@@ -24,7 +24,7 @@ ADR 0015 requires less-restricted profiles to have a PIN when restricted profile
 Application validation alone cannot protect against concurrent writes or alternative writers, while an ordinary SQL `CHECK` constraint cannot inspect the other rows and tables required by this rule.
 
 This ADR replaces the affected identity model as one decision because account membership, profile portability, session scope, sharing authorization, and PIN safety must agree.
-It supersedes ADR 0015's multiple-household account membership, household-owned profiles, active-household selection, per-account profile-use grants, no-cross-household-grant decision, and rule that any restricted adult profile triggers PIN protection on less-restricted profiles; ADR 0016's selected-household session, three-scope access-token shape, and self-contained household-context claims; and ADR 0021's post-pairing household selection.
+It supersedes ADR 0015's multiple-household account membership, household-owned profiles, active-household selection, per-account profile-use grants, no-cross-household-grant decision, and rule that any restricted adult profile triggers PIN protection on less-restricted profiles; ADR 0016's selected-household session and three-scope access-token shape; and ADR 0021's post-pairing household selection.
 The unaffected authentication, authorization, content-control, and pairing decisions in those ADRs remain in force.
 
 == Diagram
@@ -49,7 +49,8 @@ Ownership transfer is transactional, and the database rejects both an ownerless 
 The database represents this total relationship with a required household foreign key and household role on the account rather than a many-to-many membership table.
 Account creation and household transfer are transactional operations, so an account is never committed without a home household.
 A household transfer changes the account's administrative and profile-availability boundary; it does not move or duplicate any profiles.
-It clears the account's active profile from every session, and already-issued profile tokens lose profile access when live authorization no longer finds that profile shared into the new home household.
+It clears the account's active profile from every session so refresh and later access-token issuance use the new household boundary.
+An already-issued access token remains a valid signed snapshot until its short expiry.
 
 Deleting a household never cascades into deleting accounts, portable profiles, or viewing history.
 A household can be deleted only after its accounts are transferred or explicitly deleted, its pending offers are canceled or rejected, and its active profiles are unshared; foreign keys reject deletion while any such reference remains.
@@ -121,11 +122,12 @@ An active cross-household share requires authority from both sides: a profile ma
 The exact invitation delivery and web interaction are deferred, but no one-sided operation may silently place a profile into another household.
 Only an accepted share is active, selectable, or considered by household safety rules.
 After activation, either endpoint may end the relationship: the receiving household may remove the profile through its owner or parent, or the active profile may leave its current household directly.
-The server authorizes the profile-side action only from a profile-scoped session whose active profile matches the share and whose authenticated account's home household is the household named by that share.
+The server authorizes the profile-side action only from a profile-scoped access token issued while that profile was selected and the authenticated account's home household was the household named by that share.
 The request cannot name another household, and Profile Manager status alone grants no authority to make the profile leave a remote household.
 Kid and adult profiles have the same ability to leave because ending one share only removes availability; it does not relax policy, erase profile data, or affect another household.
 Unsharing by either endpoint ends availability only in that household, clears affected sessions selecting the profile, and preserves the portable profile and all of its data.
 A profile manager may cancel a pending offer, and the target household may reject it, without consent from the other side.
+Acceptance, rejection, and cancellation each conditionally transition the same `PENDING` share in one database statement, so exactly one competing terminal action succeeds and only that winner is audited.
 
 This preserves both motivating boundaries.
 In the divorced-parent case, each parent controls only their own household endpoint and neither can take the profile away from the other's household.
@@ -141,6 +143,7 @@ Reclassifying a widely shared adult profile as a kid remains blocked until every
 Application services preflight profile-side leave, ordinary deletion, manager invitation or relinquishment, account deletion or transfer, household ownership and role changes, Profile Kind changes, and kid-share changes so callers receive corrective errors before writing.
 PostgreSQL rechecks the no-managerless-profile, unique-household-owner, and local-kid-manager invariants at commit through deferred constraint triggers over the affected manager, invitation, account, profile, household, and share rows.
 Ordinary-deletion eligibility is captured earlier in the same transaction: after shares and pending invitations are visibly gone, an authorization-row trigger locks the profile and verifies that the acting account is its sole manager; the profile deletion trigger then requires that authorization.
+The authorization is a transaction-local capability rather than durable approval: a deferred constraint rejects any authorization row that survives commit, while deleting the profile cascades the consumed row before commit.
 This ordering lets the final manager row be removed before the profile row without creating a committed managerless profile, while preventing a shared or co-managed profile from being deleted through an ordinary authorization.
 Each profile carries a non-semantic `management_version` guard, and each household carries the `safety_version` guard described below.
 Every enforcement path follows one global guard order: increment all affected profile guards in profile-id order, then all affected household guards in household-id order, then run separate validation queries.
@@ -162,20 +165,22 @@ Access tokens have account scope before profile selection and profile scope afte
 There is no household-selection endpoint or household token scope.
 Playback tokens remain the separate, stream-session-bound carrier ADR 0016 defines.
 
-Account scope reaches login and session surfaces plus home-household administration when the account's current household role permits it.
+Account scope reaches login and session surfaces plus home-household administration when the token's signed household role permits it.
 Profile scope nests account scope and additionally reaches content, activity, and playback surfaces under the selected profile's policy.
-Scope continues to express context rather than privilege; the current account role, household role, profile management, and household share still authorize each operation.
+Scope continues to express context rather than privilege; the signed role snapshot and the current manager, share, and resource state required by an operation still authorize that operation.
 
-Account and profile access tokens name the account subject, authorization session, scope, and optional active profile; they do not carry household id or household role claims.
-For every household- or profile-sensitive request, the authorization facade loads the account's current home household and role and verifies any active profile share from authoritative database state.
-That authoritative state is resolved once per incoming request and propagated through the authorization facade, not queried independently by every GraphQL field, controller, or repository call.
-Failure to load it fails the protected request closed.
-The server never accepts a client-selected household or trusts a mutable session or token household field.
-This deliberately replaces ADR 0016's self-contained household context so account transfer and unsharing cannot retain cross-household access for the remainder of an access-token lifetime.
+Account and profile access tokens are stateless signed authorization snapshots.
+They name the account subject, authorization session, account role, scope, home household, household role, and optional selected profile as they existed when the token was issued.
+Ordinary authorization uses those claims without loading the account, session, household role, or profile share on every request.
+Operations that act on mutable resources still load and validate the current resource state required by that operation; destructive operations keep their fresh password-reauthentication and database-invariant checks.
 
-An account transfer clears the active profile from all of that account's sessions in the transfer transaction.
-An already-issued profile token may continue to reach nested account surfaces, but profile-sensitive requests fail until the account selects a profile actively shared into its new home household.
-Refresh always revalidates the stored active profile and emits account scope when no valid active share remains.
+The configured short access-token lifetime is the deliberate bound on stale authorization.
+Logout revokes refresh credentials and clears client cookies but cannot revoke an already-issued stateless access token.
+Likewise, profile selection, unsharing, role changes, and account transfer do not rewrite old tokens; the client immediately replaces or forgets superseded tokens, while a caller holding one directly may use its signed snapshot until expiry.
+
+Account transfer and unsharing clear affected active-profile selections from stored sessions in the same transaction.
+Refresh always loads the live session and account, revalidates the current home household, roles, and stored profile share, and emits account scope when no valid active share remains.
+Selecting a profile also verifies the current share and PIN before issuing the new profile snapshot.
 
 The profile-selection response and `me` query expose selectable profiles as a flat account result rather than nesting the viewing flow under household memberships.
 Household identifiers and roles are absent from tvOS profile selection but remain available to authenticated administration surfaces that actually manage the household.
@@ -186,8 +191,8 @@ The web application provides management surfaces to offer, review, accept, diagn
 Any client may expose a direct `Leave this home` action for the active profile; that action uses the account-derived current household and never presents a household picker or the `Household` domain term.
 Limited-input clients otherwise consume accepted shares and do not create or administer them.
 
-The web surface makes the named managers and global effect of a portable-profile edit explicit.
-It explains why a share, Profile Kind, ceiling, or PIN change is blocked and identifies every profile that needs a PIN without exposing PIN values or hashes.
+The web surface makes the profile, household, named managers, inviter, invitee, and global effect of a portable-profile edit explicit rather than exposing only opaque relationship identifiers.
+It explains why a share, Profile Kind, ceiling, or PIN change is blocked and returns structured identifiers for every profile that needs a PIN without exposing PIN values or hashes.
 Each policy concept has an explicit operation: managers set Profile Kind, set or remove the optional content ceiling, and reset the PIN to a non-empty replacement.
 There is no PIN-clear operation.
 PIN reset does not require the manager's account password in this version; password reauthentication may be added later as a separate security decision.
@@ -281,8 +286,8 @@ Constraint triggers enforce the cross-row, cross-table child-safety and manager-
 * Each invariant check acquires sorted profile guards before sorted household guards, multi-row application mutations use guard-id order, and transaction retry handles both SQLSTATE `40001` and `40P01` with jittered backoff.
 * The schema removes `profile.household_id`, replaces `account_profile` with manager and share relationships, and replaces many-to-many household membership with a required account home household and role.
 * `auth_session.active_household_id`, household scope, household selection, household-to-profile auto-selection, and APIs that nest selectable profiles under memberships are removed or migrated.
-* Household- and profile-sensitive API authorization now reads current account, household-role, manager, and share state; it no longer accepts ADR 0016's bounded access-token staleness for those boundaries.
-  This adds one authoritative authorization read to each affected request, makes database availability part of those request paths, and fails closed when current state cannot be loaded; request-scoped resolution prevents the cost from multiplying per field or repository call.
+* Account and profile authorization remains stateless for the configured short access-token lifetime, preserving ADR 0016's bounded-staleness model while adding the account's single home household and role to the signed snapshot.
+  Ordinary protected requests need no live session, account, role, or profile-share read; refresh and new token issuance revalidate current state, and clients discard superseded tokens immediately.
 * Account transfer clears active profile selections, and deleting a household requires its accounts and shares to be resolved first.
 * Streamarr has no production instances when this decision is made, so adoption does not preserve or transform legacy identity rows or sessions.
   Development and test databases may be reset against the new schema instead of carrying a one-time family-relationship migration design.
@@ -305,6 +310,7 @@ Constraint triggers enforce the cross-row, cross-table child-safety and manager-
 * Keep per-account profile-use grants alongside household shares — two competing availability models make unsharing and safety evaluation ambiguous; an accepted household share is the single use boundary.
 * Make every owner or parent in a receiving household a profile manager automatically — a later role assignment would silently gain global edit rights over a portable identity; managers must be named explicitly.
 * Allow one-sided shares into another household — it bypasses the target household's privacy and child-safety consent.
+* Read the live account, session, household role, and profile share on every protected request — this gives immediate invalidation but makes short-lived access tokens stateful in practice, adds a database dependency and request cache to every authorization path, and does not justify that complexity for the bounded stale-token window.
 * Require both endpoints to approve ending a share — a visitor profile could not leave another household without that household's cooperation; either endpoint may end the relationship under its own governance.
 * Require every manager to approve deletion while retaining management — that creates a separate durable approval workflow.
   Ordinary deletion instead requires other managers to relinquish voluntarily; relinquishment unconditionally gives up the veto, and Streamarr accepts the risk that the final manager may then choose not to delete.

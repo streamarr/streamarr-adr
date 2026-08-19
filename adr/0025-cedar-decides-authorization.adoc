@@ -1,0 +1,113 @@
+= ADR 0025: Cedar Decides Authorization; PostgreSQL Keeps the Relationships
+
+== Status
+
+Accepted
+
+link:0024-identity-authority-by-relationship.adoc[ADR 0024] was accepted independently of this decision; it requires an engine with default deny, schema-validated policies, and guardrails no permit can override, and this ADR chooses Cedar as that engine.
+
+== Context
+
+link:0015-authorization-profiles-and-content-controls.adoc[ADR 0015] put authorization behind a Streamarr-owned `AuthorizationService` facade, ran the policy in-process, and deferred adopting an external policy engine until the domain justified one.
+The identity model in link:0024-identity-authority-by-relationship.adoc[ADR 0024] is that justification.
+Authority is now derived from a graph of eight relationships — `memberOf`, `adminOf`, `personalProfileOf`, `managerOf`, `belongsTo`, `sharedInto`, `registeredTo`, `authorizedBy` — plus derived edges (self-management, "may use Household") and guardrails that no positive rule may override, such as Household-derived authority never creating a portable relationship.
+Every action must be decided against the same graph, and read actions are split as finely as writes (`viewProfileActivity` is not `viewProfileAdministration`).
+
+The first implementation attempt (streamarr-server PR #296) hand-rolled these decisions in Java.
+Each service re-derived authority in its own predicates — `HouseholdAdministrationService`, `KidProfileManagerPolicy`, `ProfileManagementService`, `ServerAdminAuthorizer` — and nothing checked that the predicates agreed with each other, covered every action, or respected the guardrails.
+That is what a policy language with a schema is for.
+
+Two things are settled before this decision and are not reopened here.
+PostgreSQL is the source of truth for identities and relationships and the final authority on state integrity, through foreign keys, partial unique indexes, and deferred constraint triggers.
+Content visibility (which titles a Profile may see) remains ADR 0015's typed fail-closed policy translated into a jOOQ `WHERE` condition; that is list filtering, not a point decision, and stays outside the engine.
+
+== Decision
+
+Cedar is the authorization decision point for every point decision — principal, action, resource, context — behind the existing `AuthorizationService` facade.
+
+* Cedar runs in-process through `cedar-java`. Streamarr does not add an authorization service, sidecar, or network hop; ADR 0015's facade shape is unchanged and callers do not know Cedar exists.
+* Policies live in this repository next to a Cedar schema, and the schema is validated in the build. A policy that names an unknown action, attribute, or entity type fails the build, not a request.
+* Cedar defaults to deny. Positive authority is an explicit `permit`. Guardrails are `forbid` policies that no `permit` can override — the first is that authority derived from a Household share may not create `managerOf`, `personalProfileOf`, `sharedInto`, a Profile transfer or deletion, change a restricted Profile's kind, or leave it unrestricted (Adult with no Content Ceiling); the last two are permitted only to a direct ProfileManager or a live ServerAdmin override, and the `forbid` is written with that exception so it does not also block ServerAdmin. Portable-relationship actions form one action group so that `forbid` names it once.
+* The authorization module owns the entity slice. Canonical, typed principal and resource slice builders assemble it from two sources only: facts signed into the access token (Account, session, membership Household and role, context Household, scope, selected Profile, device registration) and the current rows the action touches. The token's ServerAdmin claim is never placed in the slice: it exists for the UI and routing, and policy never sees it. Callers pass an action, a resource identifier, and genuinely attempt-specific context — never their own reading of authority. An ArchUnit rule keeps Cedar and the slice builders behind the facade so no service can assemble facts differently or interpret claims on its own.
+* Mutable relationship facts and the write they authorize share one consistency boundary: the slice's relationship rows are read inside the mutation's transaction and held (`SELECT … FOR SHARE`) or the write is conditional on them, so a `managerOf` removed a millisecond after the decision cannot let the already-authorized edit commit. Cedar never queries PostgreSQL, caches identity, locks rows, or serializes transactions; a Cedar `allow` is a precondition to a transactional PostgreSQL mutation, not a substitute for its constraints.
+* Errors deny. Cedar skips a policy that errors during evaluation and reports the error in diagnostics, so an intended `forbid` starved of its entity data could be skipped while a `permit` still allows. The facade therefore validates every request and entity slice against the schema before evaluation, treats any evaluation diagnostic error as a denial and an internal failure to alert on, and every `forbid` has tests with the relationship omitted and with a malformed slice. Schema validation prevents most evaluation errors — type and attribute errors on conformant input — but not all: a referenced entity missing from the slice or an integer overflow can still error, and the fail-closed rule is what covers those.
+* JWTs carry facts, never computed permissions. Cedar derives `canEditProfile`; the token does not say it.
+* ADR 0024's supervision rule is two policies, not a special case: `permit` `editRestrictedProfile` when the principal is `adminOf` a Household the resource is actively `sharedInto` and the resource is restricted; `forbid` `changeProfileKind` and `liftFinalRestriction` unless the principal holds `managerOf` the resource or `principal.serverAdmin` — the live fact loaded for ServerAdmin-gated actions — is true; and `forbid` `restrictSovereignProfile` — any update whose result gives an unrestricted Adult Personal Profile a Kid kind or any ceiling — unless `principal.serverAdmin` is true, because a retained manager must not take an adult's sovereignty back. Context may carry `overrideRequested` to record intent for the audit trail; it never proves authority, per Cedar's context guidance. Editing an unrestricted Adult Profile is otherwise permitted only through `managerOf` or self-management, and neither of those may restrict it.
+* Device-bound sessions are viewing sessions: a `forbid` denies every Account, Household, sharing, manager, credential, Device, and destructive administration action group to any principal whose session carries a registration id, and the TV's permitted group (select Profile, enter PIN, watch, viewing state and preferences, sign out) is enumerated. Hiding administration in the client is not authorization.
+* The caller never chooses among those actions. The authorization module receives the typed Profile update, loads the current kind and ceiling, computes the result, and classifies the transition itself — an ordinary edit, a kind change, a lift to unrestricted Adult (`ADULT` with no ceiling), or a restriction of a sovereign adult (an unrestricted Adult Personal Profile gaining a Kid kind or any ceiling) — then authorizes exactly that; the mutation applies the same normalized values in the same transaction, so a caller cannot label "make Kai unrestricted" as an edit and inherit HouseholdAdmin permission.
+* Fresh password reauthentication and PIN verification stay outside Cedar because they prove a credential. Reauthentication is the authenticated step-up ceremony `POST /api/auth/reauth` (ADR 0024, Fresh reauthentication): it verifies the password through the central throttled verifier and returns a replacement access token that carries a signed `reauthenticated_at` claim; the facade derives the trusted `freshReauthentication` context value from that claim (present, within the configured window, not future-dated) and Cedar never sees the password, its hash, or a per-attempt password field — GraphQL mutations carry no password input and no proof type. PIN verification happens only inside `POST /api/auth/select-profile`; `pinVerified` exists only as trusted internal attempt context created by that ceremony's service and is never client-supplied.
+* Live ServerAdmin authority is authorization data, so it lives inside the decision — and only as a live fact. ServerAdmin-gated and override actions form their own action group; their slice builders always load `principal.serverAdmin` and `principal.enabled` from PostgreSQL, and no other builder sets `principal.serverAdmin` at all, so a recently revoked token claim can never satisfy an override policy. This read happens only for those actions; ordinary requests keep deciding from the signed snapshot, or the stateless model would be gone.
+* Initial setup is a one-time provisioning exception outside Cedar: guarded by "no Account exists", claimed atomically, and never repeatable. There is no synthetic bootstrap principal; `Account` remains the only principal type.
+* Three more ceremonies have no principal and are likewise outside Cedar, as ADR 0024 defines: accepting or declining an Account invitation, redeeming a password-reset code, and a Device redeeming its `deviceCode` in ADR 0021's polling flow. Cedar authorizes what an Account does around them — issuing, replacing, and canceling invitations and reset codes, and the human approval step `linkDevice`; a Device's own grant request and poll have no principal and are outside Cedar entirely. PostgreSQL validates and consumes each code atomically, throttled and single-use, and the winning poll rechecks live Account, Household, and ESN state before minting anything. Invitation acceptance and Device redemption yield an Account session that every later request authorizes normally; a password reset yields no session, so it never bypasses a disabled Account.
+* One action group, `requiresFreshReauthentication`, is the single list of operations a stolen token must not be enough for — ADR 0024 enumerates it: `liftFinalRestriction` for any actor, `restrictSovereignProfile`, ordinary Profile deletion by the final manager, Account self-deletion, and every ServerAdmin destructive and break-glass action. A `forbid` denies the whole group unless `context.freshReauthentication` is true, which the facade derives only from the token's signed `reauthenticated_at` claim; individual policies do not repeat the condition, so the two ADRs cannot drift. When such an action is denied, the facade re-evaluates the same request with only `freshReauthentication` forced to true: an allow there surfaces as `REAUTHENTICATION_REQUIRED`, anything else surfaces as the ordinary denial, so the step-up hint never reveals a resource the caller could not otherwise reach.
+* Policies are tested like code: every action has allow and deny fixtures over a small entity slice, and the same fixtures run through the facade so a policy edit that changes a decision fails a test.
+* Every point decision that exists today is ported into the first policy set rather than kept beside the engine: `requireServerAdmin` on library mutations, `requireHouseholdRole`, `canViewActivityOf` (ADR 0015 activity visibility), the may-select and PIN-required decisions of Profile selection, and ADR 0018's live playback-authority predicate.
+  Nothing authorizes outside Cedar except authentication itself, the credential ceremonies (`POST /api/auth/reauth`, PIN verification inside `POST /api/auth/select-profile`) that feed it signed or internal results, and the content-visibility filter above; live ServerAdmin authority is a principal fact inside the decision, not a checkpoint beside it.
+  The `ACCOUNT ⊂ HOUSEHOLD ⊂ PROFILE` scope hierarchy collapses with ADR 0024, since there is no household scope; scope stays a token-context fact Cedar reads, not a permission it computes.
+* The model follows Cedar's published best practices; the one deviation is named below rather than discovered later.
+
+The best-practice mapping, one line each:
+
+Naming::
+  One `Streamarr` namespace; entity types in PascalCase (`Account`, `Profile`, `Household`, `DeviceRegistration`, `PairingGrant`, `Server`); actions, attributes, and context keys in camelCase (`viewProfileActivity`, `principal.membershipHousehold`, `context.freshReauthentication`).
+Identifiers::
+  Entity ids are opaque UUIDs — never emails, names, or anything a person can change.
+Actions::
+  Business operations, not CRUD verbs (`offerProfileShare`, `endProfileShare`, `inviteProfileManager`, `linkDevice`); reads as fine-grained as writes, aggregated in the UI, never in policy.
+Relationships::
+  Entity attributes, not policy templates — Cedar reserves templates for grants that exist only for permissions, and every Streamarr relationship is also lifecycle and safety data in PostgreSQL.
+Containers::
+  Every resource lives in one; `Household` contains Profiles, invitations, shares, and Device registrations, and a singleton `Server` is the root so `createHousehold`, `inviteAccount`, and ServerAdmin authority have a resource to be granted on.
+Principals::
+  `Account` is the only principal type and is never a container; a `Profile` is a resource and never a principal (ADR 0024: a Profile cannot authenticate); acting on one's own Account is a principal acting on a resource with the same id.
+Meta-permissions::
+  Administrative authority is ordinary actions with their own policies (`grantHouseholdAdmin`, `grantServerAdmin`, `overrideProfileManager`), not a bypass flag checked outside the engine.
+Policy scope::
+  Principal, action, and resource are named in the scope wherever fixed; `when` clauses carry only what varies.
+Context::
+  Attempt-specific _verified_ facts only — `freshReauthentication` derived from the signed `reauthenticated_at` claim, `pinVerified` set only inside the select-profile ceremony — never a raw credential (the `deviceCode` is a credential like a password or PIN and is verified and consumed outside Cedar), and never a principal, action, or resource fact. For `linkDevice` the typed `userCode` is resolved _before_ authorization to a typed `PairingGrant` entity, which is the action's resource in the entity slice, contained by `Server`; no code and no grant ever travels in context.
+Deviation::
+  Content visibility stays a typed list filter (ADR 0015) rather than a Cedar decision, because it is a query predicate over thousands of titles, not a point decision; that door reopens if Cedar partial evaluation is adopted.
+
+Prerequisite before implementation begins: a spike proving `cedar-java` loads and evaluates inside the Spring Boot test suite on the arm64 and amd64 container images and on developer Macs, with the native library packaged reproducibly by the build.
+
+Explicitly deferred:
+
+* Partial evaluation or policy-derived list filtering; content visibility keeps ADR 0015's typed policy.
+* Externalizing the decision point (Amazon Verified Permissions, a Cedar service) — the interface allows it, nothing needs it.
+* Policy authoring by operators; policies are code shipped with the server.
+
+== Consequences
+
+* Authority is stated once, in a validated schema and readable policies, instead of re-derived per service; a new action is a new policy plus its fixtures, not a new predicate.
+* The build gains a native dependency and the container image gains its shared library; multi-arch packaging becomes a build concern rather than a runtime surprise.
+* The slice builders must be complete for every action; a builder that omits a relationship yields a deny (and, if it errors, a deny plus an alert), never an escalation, because default is deny and errors fail closed.
+* The guardrail lives in one `forbid` and cannot be bypassed by a later `permit`, which is the property a hand-rolled check cannot promise.
+* Bounded staleness is unchanged: ordinary requests decide from the signed snapshot plus the rows they touch; refresh and issuance reload live state, as ADR 0016 and ADR 0024 already require.
+
+== Rejected Alternatives
+
+* Hand-rolled ReBAC checks per service (PR #296) — no schema, no proof of coverage or agreement between services, no `forbid` semantics; the branch is the evidence.
+* Spring Security method security (`@PreAuthorize`, SpEL) — string expressions scattered across resolvers and services, no schema, no way to express a global guardrail.
+* OPA/Rego — Rego is untyped and a sidecar or embedded WASM adds an evaluation boundary; Cedar's schema validation is the feature we want.
+* OpenFGA or SpiceDB — an external relationship store would duplicate PostgreSQL as source of truth and need synchronization; our relationships already live in transactional tables with the integrity rules attached.
+* Casbin or a Java rules engine — model files without validation give the scattering problem a new file format.
+
+== References
+
+* https://docs.cedarpolicy.com/[Cedar Policy Language]
+* https://github.com/cedar-policy/cedar-java[cedar-java]
+* https://docs.cedarpolicy.com/overview/patterns.html[Cedar RBAC, ABAC, and ReBAC patterns]
+* https://docs.cedarpolicy.com/policies/validation.html[Cedar schema and policy validation]
+* https://docs.cedarpolicy.com/bestpractices/bp-overview.html[Cedar best practices]
+* https://docs.cedarpolicy.com/bestpractices/bp-naming-conventions.html[Cedar naming conventions]
+* https://docs.cedarpolicy.com/bestpractices/bp-relationship-representation.html[Cedar: representing relationships]
+* https://docs.cedarpolicy.com/bestpractices/bp-resources-containers.html[Cedar: resource containers]
+* https://docs.cedarpolicy.com/bestpractices/bp-separate-principals.html[Cedar: separate principals from containers]
+* https://docs.cedarpolicy.com/bestpractices/bp-meta-permissions.html[Cedar: meta-permissions]
+* https://docs.cedarpolicy.com/bestpractices/bp-using-the-context.html[Cedar request context guidance]
+* link:0015-authorization-profiles-and-content-controls.adoc[ADR 0015: Authorization, Profiles, and Content Controls]
+* link:0016-authentication-mechanisms-and-session-security.adoc[ADR 0016: Authentication Mechanisms and Session Security]
+* link:0022-single-home-accounts-and-portable-profile-sharing.adoc[ADR 0022: Accounts Have One Home Household and Profiles Are Portable]
+* link:0024-identity-authority-by-relationship.adoc[ADR 0024: Identity Authority: One Household per Account, One Personal Profile per Account, Portable Profiles Facilitate Sharing by Relationship]
+* https://github.com/streamarr/streamarr-server/pull/296[streamarr-server PR #296]

@@ -1,0 +1,89 @@
+= ADR 0027: Library Scan and Refresh Are Claimed Atomically in the Database and Run on a Single Instance
+
+== Status
+
+Proposed
+
+== Context
+
+link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026] fixes the public contract of `scanLibrary` and `refreshLibrary`: the mutation returns the `Library` node, accepted is not completed, `Library.status` is what a client observes afterwards, a same-kind request while the work is running is an idempotent success, a different-kind request is a `LibraryBusyError`, and a failure to start the work after it was accepted is a top-level `UNAVAILABLE` error.
+That ADR deliberately stops at the contract.
+This ADR is the execution protocol behind it — how a request claims the work, when the worker starts, what happens when it cannot, and why the whole thing is correct only on one instance today.
+
+The current implementation cannot honor the contract.
+`triggerAsyncScan` starts a virtual thread first; the worker then performs a read-check-save of `Library.status` under a single-JVM mutex (`transitionToScanning`), so a mutation that returned the row would return `HEALTHY` before anything was claimed.
+The worker catches only `LibraryScanFailedException`; any other exception leaves the row `SCANNING`.
+An in-memory `activeScans` set is the only record of running work.
+`LibraryCrashRecoveryService` resets every `REFRESHING` row, and every `SCANNING` row absent from that in-memory set, at startup and shutdown — a process-local view of a shared table.
+The same library mutex has a third user: `removeLibrary` takes it, reads the status, rejects a busy library, and deletes the row and its media files.
+
+The server runs as one replica today: in-memory stream-session state already precludes a second, and no deployment runs two.
+`FileProcessingTaskCoordinator` already shows the multi-instance shape Streamarr uses when it needs one — `SELECT … FOR UPDATE SKIP LOCKED` with lease-based heartbeats.
+
+== Decision
+
+Library work is claimed by one atomic database decision made synchronously in the mutation, the worker starts only after that claim commits, every recoverable scheduling or worker failure (`Exception`) after the claim moves the row out of its busy state, and the deployment runs one instance — configured as such, guarded at startup, and detected on loss.
+
+=== The claim
+
+* The claim is one atomic decision against a row whose state cannot change until the decision commits: a single `UPDATE … RETURNING old.status, new.status` (PostgreSQL 18), or `SELECT … FOR UPDATE` on the library row followed by the update in the same transaction.
+* The outcome table is total, decided on the previous status: no row → `LibraryNotFoundError`; `HEALTHY` or `UNHEALTHY` → this request claimed the work and the row is now `SCANNING` or `REFRESHING`; equal to the requested kind → idempotent, the row is returned unchanged; the other kind → `LibraryBusyError` carrying it.
+* The service outcome keeps the two successes apart even though GraphQL does not: `LibraryWorkOutcome permits Claimed, AlreadyRunning, Busy, NotFound`. Only `Claimed` publishes the scheduling event, inside the claim transaction; `AlreadyRunning` maps to the same successful payload and publishes nothing. A contract test drives concurrent same-kind requests and asserts exactly one scheduling event and one worker.
+* There is no zero-row re-read and so no window in which a concurrent completion or deletion falls between branches; a concurrency contract test commits a completion against a concurrent claim.
+* `removeLibrary` joins the same row protocol: it locks the library row with `SELECT … FOR UPDATE` in its transaction before reading the status, rejects a busy library with the `LibraryBusyError` member and a missing one with `LibraryNotFoundError`, and holds the lock through the delete, so a claim cannot slip between removal's status read and its delete — a claim that arrives during removal blocks on the row and then finds no row. `LibraryRemovedEvent` is published inside the deletion transaction, as today, and its consumers are `@TransactionalEventListener(AFTER_COMMIT)`, so they run only if the delete commits; publishing after the transaction has ended would never invoke them, because a transactional listener needs an active transaction to bind to. An integration test proves the listeners run after commit and not after rollback.
+* The library mutex is removed only when all three of its users — scan claim, refresh claim, and removal — are on the row protocol; until then a partially migrated mutex is a race, not a refactor. The claim replaces the read-check-save; `LibraryScanInProgressException` and `LibraryRefreshInProgressException` are gone. The separate filepath mutex used when adding a library is unchanged by this ADR.
+
+=== Scheduling and its failure protocol
+
+* The worker starts only after the claim commits (`@TransactionalEventListener(AFTER_COMMIT)`).
+* The listener catches a recoverable scheduling `Exception` (not `Throwable` — a JVM `Error` is not compensated), moves the row to `UNHEALTHY` in a new transaction (`REQUIRES_NEW`), logs the cause with the library id, and rethrows a classified scheduling exception that ADR 0026's handler maps to `errorType` `UNAVAILABLE`, `code` `LIBRARY_WORK_NOT_SCHEDULED`. Swallowing it would return the claimed `SCANNING` row as accepted while the process knows no worker exists; propagating without compensating would leave the row busy.
+* Every exit path of the worker that ends in an `Exception` moves the row out of its busy state (`UNHEALTHY` on failure); no such exit leaves `SCANNING` or `REFRESHING` behind for recovery to find.
+* The cleanup invariant is stated for `Exception` and no wider. A JVM `Error` in the scheduling listener or the worker — an uncaught `Error` in a virtual thread ends that thread, not the process — is not compensated: the worker's `finally` still attempts to clear the busy state, but nothing is promised, and the row is recovered by `LibraryCrashRecoveryService` at the next startup. Streamarr has no fatal-error shutdown policy and this ADR does not introduce one; catching `Throwable` and continuing to serve is rejected.
+
+=== Acceptance and concurrent requests
+
+* Acceptance means the committed claim, and the client contract is to observe `status` afterwards.
+* A same-kind request that observes the claimed row is correctly told accepted even when the first request's scheduling then fails: the row moves to `UNHEALTHY` and the second caller sees that on its next read exactly as it would had the worker started and failed at its first step. The timing of a post-claim failure is not observable to a client and does not change its contract; only the request whose own scheduling failed learns synchronously, because that request knows.
+* The concurrency contract tests include this interleaving: claim commits, a second same-kind request is accepted, scheduling fails, the second caller's next read shows `UNHEALTHY`.
+
+=== Single instance, enforced
+
+* The protocol above is correct within one process. `LibraryCrashRecoveryService` remains a startup-and-shutdown reconciler with a process-local view; a second instance starting or stopping would reset the first instance's running work and free the row for a duplicate claim.
+* The deployment's one-replica configuration is therefore authoritative, and the server adds a guard against misconfiguration: a dedicated, non-pooled database connection is opened at startup, takes a session-scoped PostgreSQL advisory lock on a fixed key, and is held for the process lifetime, so a second instance started against the same database fails fast at startup.
+* Loss of that connection — database restart, failover, network break, or the session being terminated — revokes readiness and terminates the process. The lock is never transparently reacquired, because a session lock is released the moment its session ends, even ungracefully, and another instance may already own it. A pooled connection is not acceptable for this purpose: the pool retires connections (`maxLifetime`), which would release the lock while the process kept running.
+* This is failure detection, not fencing. Between PostgreSQL releasing the session and the old process noticing, a second instance can acquire the lock and both can run for that interval; only a database fencing token checked by every library mutation — the deferred lease design — would close it. The guard's promise is that a misconfigured second replica does not start while the first holds the lock and that a process which has lost the lock does not keep running; zero-overlap at runtime is the one-replica configuration's promise, not the lock's.
+* Deployment documentation states the full invariant: one replica, replaced stop-before-start (a recreate strategy, no surge), because a rolling replacement that starts the new process before stopping the old one is exactly the overlap the lock cannot fence. The advisory lock is a misconfiguration guard on top of that invariant, not a substitute for it.
+
+Explicitly deferred:
+
+* Multi-instance library work: a durable owner and lease with heartbeat on the busy row, compare-and-set completion and recovery, and a periodic reconciler — the `FileProcessingTaskCoordinator` pattern applied to libraries.
+* Durable dispatch of accepted work, which would let a scheduling failure be retried instead of reported.
+* A first-class operation handle (`LibraryOperation`), already deferred in ADR 0026.
+
+== Consequences
+
+* The mutation's response is the claimed row, so a client can never be shown `HEALTHY` for work it just started; the response race disappears with the mutex.
+* The claim holds across instances in principle, but this ADR does not claim that until recovery does too; the honest statement today is single-instance, and it is the deployment invariant — one replica, stop-before-start replacement — that makes it a fact, with the startup guard catching a misconfigured second replica.
+* A new startup component owns one long-lived connection outside the pool and ties readiness to it; the process supervisor restarts a terminated instance, and a second instance cannot start while the first holds the lock. In the interval between session loss and detection two instances can overlap; the deployment's one-replica configuration, not the lock, is what rules that out.
+* A JVM `Error` in the scheduling listener or a worker may leave the row busy until the process is restarted and startup recovery runs; this is the accepted limit of the cleanup invariant.
+* Two exception classes and the library mutex are removed once scan, refresh, and removal are all on the row protocol; one classified scheduling exception and one `LibraryBusyError` member are added.
+* Five contract tests are obligated, on real PostgreSQL: completion against a concurrent claim; removal serialized against a claim in both orders (claim locks first: removal waits, then rejects the busy library; removal locks first: the claim waits until the delete commits, then returns `NotFound` — the test proves blocking, not a race the design has removed); concurrent same-kind requests producing exactly one scheduling event; the accepted-then-scheduling-fails interleaving; and the singleton guard under both contention and loss — a second instance fails at startup, and terminating the dedicated advisory-lock session (`pg_terminate_backend` from another connection) revokes readiness, requests shutdown, and never reacquires the lock or resumes work.
+
+== Rejected Alternatives
+
+* Keep the JVM mutex and read-check-save (status quo) — a check-then-act that returns the pre-claim row and coordinates only one process.
+* Move scan and refresh claims to the database while removal keeps the mutex — removal would read `HEALTHY` under a mutex the claim no longer takes, a claim would commit `SCANNING`, and removal would delete the busy library from its stale managed entity.
+* Conditional `UPDATE`, then a zero-row re-read with a retry loop — the re-read leaves a window in which a concurrent completion or deletion falls between branches; deciding on the previous status in one locked statement has no window.
+* Gate an idempotent reply on a JVM-local "worker running" record — reintroduces the process-local state named as the weakness above and answers a benign retry in the claim-to-start window with a spurious `LibraryBusyError`.
+* Swallow a scheduling failure after compensating — returns the claimed row as accepted while the process knows no worker exists.
+* Hold the singleton advisory lock on a pooled connection — the pool retires the connection and the lock is released silently.
+* Transparent lock reacquisition after reconnect — another instance may already own the lock; only fail-fast is safe.
+* Build the lease-and-heartbeat multi-instance protocol now — no deployment runs two instances and the rest of the server cannot either; the pattern exists to copy when one does.
+
+== References
+
+* link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026: Mutations Return Payloads Whose Expected Errors Are Typed Unions; Top-Level Errors Carry Failure]
+* https://www.postgresql.org/docs/18/sql-update.html[PostgreSQL 18 — UPDATE, RETURNING old and new]
+* https://www.postgresql.org/docs/18/explicit-locking.html#ADVISORY-LOCKS[PostgreSQL 18 — Advisory Locks]
+* https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/transaction/support/TransactionSynchronization.html[Spring — TransactionSynchronization]
+* streamarr-server `FileProcessingTaskCoordinator` — lease-based multi-instance coordination pattern

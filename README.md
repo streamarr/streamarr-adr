@@ -8,6 +8,18 @@ Architecture Decision Records live in [`adr/`](adr/). Start new decisions from [
 
 Diagrams belong beside the decisions they explain. Commit both the editable source and a rendered image when both are available.
 
+## Working Proposals
+
+Documents in `proposals/` are discussion drafts. They are not accepted architecture decisions and do not supersede ADRs.
+
+None at present.
+
+## Spikes
+
+Throwaway prototypes whose conclusion an ADR depends on live in [`spikes/`](spikes/). They are evidence, not product code, and are kept only while the decision they support is in force.
+
+- [`spikes/rebac-engine-comparison`](spikes/rebac-engine-comparison/) — Cedar versus OpenFGA, the basis for ADR 0025.
+
 ## Catalog
 
 - [ADR 0001: PostgreSQL Over Embedded Database](adr/0001-postgresql-over-embedded-db.adoc)
@@ -31,5 +43,9 @@ Diagrams belong beside the decisions they explain. Commit both the editable sour
 - [ADR 0019: Recoverable Just-In-Time HLS Segment Delivery](adr/0019-recoverable-jit-hls-segment-delivery.adoc)
 - [ADR 0020: TMDB Reachability Does Not Gate Aggregate Health](adr/0020-tmdb-reachability-does-not-gate-aggregate-health.adoc)
 - [ADR 0021: Device Pairing over Streamarr Transport](adr/0021-device-pairing-over-streamarr-transport.adoc)
-- [ADR 0022: Accounts Have One Home Household and Profiles Are Portable](adr/0022-single-home-accounts-and-portable-profile-sharing.adoc)
+- [ADR 0022: Accounts Have One Home Household and Profiles Are Portable](adr/0022-single-home-accounts-and-portable-profile-sharing.adoc) — superseded by ADR 0024
 - [ADR 0023: `startLetter` Is a Seek Anchor under TITLE Sort](adr/0023-start-letter-seek-pagination.adoc)
+- [ADR 0024: Identity Authority: One Household per Account, One Personal Profile per Account, Portable Profiles Facilitate Sharing by Relationship](adr/0024-identity-authority-by-relationship.adoc)
+- [ADR 0025: Cedar Decides Authorization; PostgreSQL Keeps the Relationships](adr/0025-cedar-decides-authorization.adoc)
+- [ADR 0026: Mutations Return Payloads Whose Expected Errors Are Typed Unions; Top-Level Errors Carry Failure](adr/0026-mutation-payloads-and-error-channels.adoc)
+- [ADR 0027: Library Scan and Refresh Are Claimed Atomically in the Database and Run on a Single Instance](adr/0027-library-work-claimed-in-database-single-instance.adoc)

@@ -1,0 +1,280 @@
+= ADR 0026: Mutations Return Payloads Whose Expected Errors Are Typed Unions; Top-Level Errors Carry Failure
+
+== Status
+
+Accepted
+
+== Context
+
+link:0002-graphql-over-rest.adoc[ADR 0002] makes GraphQL the only delivery protocol, so the mutation contract is the whole write API for the Apple, Android, and web clients.
+All three are first-party; the Apple client generates its types from the checked-in schema, the web client hand-maintains typed operation documents today, and the Android client is not yet implemented.
+The server keeps the hexagonal shape of link:0005-tdd-and-behavior-testing.adoc[ADR 0005] and link:0014-protocol-agnostic-pagination.adoc[ADR 0014] — services return protocol-independent values and adapters translate — so this decision governs the GraphQL adapter and the shape of the outcomes services return to it; it does not touch how services decide.
+
+On `main`, `root-mutation.graphqls` declares ten mutations and seven of them return `Boolean!`.
+A `true` tells the client nothing it can use: there is no node to write into the normalized cache, no way to tell one outcome from another, and, for the mutations that are asynchronous by policy (`scanLibrary`, `refreshLibrary`), not even the node whose `status` the client must now poll, so clients refetch after every write.
+
+Every expected outcome that is not success is thrown as an exception and translated by `StreamarrDataFetcherExceptionHandler` into a top-level GraphQL error with `extensions.code`.
+On `main` that table holds five codes — four request gates (`AUTHENTICATION_REQUIRED`, `PROFILE_REQUIRED`, `HOUSEHOLD_REQUIRED`, `FORBIDDEN`) and one ordinary domain outcome (`SESSION_NOT_FOUND`) — and every further domain outcome, infrastructure failure, and piece of corrective data has the same channel as its only home.
+The mixing is the problem, not the count: one channel carries gates, outcomes, and failures with nothing in the schema to tell them apart.
+Errors the handler recognizes carry `code` and nothing else, while errors that fall through to the DGS default carry `errorType` and no `code`, so no client can rely on either key.
+Because every mutation field is declared Non-Null, any error raised at the root nulls the entire `data` object, including sibling fields the client asked for in the same operation.
+
+The GraphQL specification (September 2025 edition) defines two error categories — a _request error_ that yields no `data`, and an _execution error_ that yields partial `data` — and the shape of an error entry (`message` required; `locations`, `path`, `extensions` optional).
+It says nothing about mutation inputs, payloads, or how business rejection is represented.
+Everything past that is ecosystem convention, and the conventions disagree: Relay Classic requires one `input` argument and `Input`/`Payload` suffixes; Shopify adds a `userErrors` list, prefixes mutation names with the object, and separates the selector argument from the change data; GitHub uses the Relay shape and reports domain failure at the top level; the graphql.org error-handling page and Apollo both recommend errors as data, one with a `userErrors` list and the other with result unions.
+None of these is a standard Streamarr can inherit, so this ADR chooses and records.
+
+Two decisions already made constrain the choice.
+Services never import the `graphql` package (`ArchitectureTest`), so the outcome vocabulary a service returns must be protocol-independent.
+Stream-session ownership is existence-oracle-free (streamarr-server PR #209): an unowned session is indistinguishable from a missing one, so no error design may reintroduce a "forbidden versus not found" distinction the caller could not otherwise observe.
+
+== Decision
+
+Streamarr mutations use one input argument and a nullable, mutation-specific payload.
+The payload holds the affected result and a non-null list of expected errors typed as a mutation-specific union whose members implement shared interfaces.
+Unexpected failure uses GraphQL's top-level `errors`; every error raised while fetching data carries a DGS `errorType`, a Streamarr `code`, a `requestId`, and a sanitized message.
+
+=== Mutation shape
+
+* Every mutation is `verbNoun(input: VerbNounInput!): VerbNounPayload` — exactly one argument named `input`, a non-null mutation-specific input object, and a nullable mutation-specific payload.
+* The payload is nullable so that an execution error raised inside one mutation field stops there and leaves sibling root fields intact; a Non-Null payload would null the whole response. Clients are asked to send one mutation per operation, but the schema cannot enforce that, so the guarantee is kept. This follows the specification's Non-Null propagation rule and is the prevailing shape at Relay-style APIs — GitHub's and Shopify's mutation fields return nullable payloads.
+* Mutation names are verb-first domain actions (`markWatched`, `offerProfileShare`, `renamePortableProfile`), not CRUD verbs and not object-prefixed for alphabetical grouping; distinct actions with different validation or authorization get distinct mutations, never one `updateProfile`.
+* The single `input` argument and the `Input`/`Payload` suffixes are a Relay-style convention Streamarr adopts deliberately, not a GraphQL requirement.
+* A payload exposes exactly one result position — the affected node or a deletion receipt (`deletedProfileId: ID`) — plus `userErrors`. No mutation returns a bare `Boolean`, a bare `ID`, or a domain type directly at the root.
+* Inputs carry only client-controlled command data. A secret-bearing input (password, PIN) is consumed and never echoed in the payload, an error, or a log.
+
+=== Expected rejection is typed data in the payload
+
+[source,graphql]
+----
+type RenamePortableProfilePayload {
+  profile: PortableProfileSummary
+  userErrors: [RenamePortableProfileError!]!
+}
+
+union RenamePortableProfileError =
+    ProfileNameRequiredError
+  | ProfileNameTooLongError
+  | ProfileNameAlreadyInUseError
+  | PortableProfileNotFoundError
+
+interface MutationError {
+  message: String!
+}
+
+interface InputMutationError implements MutationError {
+  message: String!
+  inputPath: [String!]!
+}
+
+type ProfileNameRequiredError implements InputMutationError & MutationError {
+  message: String!
+  inputPath: [String!]!
+}
+----
+
+An expected rejection is an ordinary successful response with a populated `userErrors` list, no top-level `errors`, and a `null` result position:
+
+[source,json]
+----
+{
+  "data": {
+    "renamePortableProfile": {
+      "profile": null,
+      "userErrors": [
+        {
+          "__typename": "ProfileNameRequiredError",
+          "message": "Enter a profile name.",
+          "inputPath": ["name"]
+        }
+      ]
+    }
+  }
+}
+----
+
+Success is the same envelope with the result present and `userErrors` an empty list — `{"profile": {"id": "…", "name": "Morgan"}, "userErrors": []}`; `userErrors` is never `null`.
+
+* `userErrors` is a non-null list of a mutation-specific union; the union is where the schema states which rejections this mutation can produce.
+* Union members are shared error object types declared once in a `mutation-errors.graphqls` file and reused across unions; only the union is per-mutation. `PortableProfileNotFoundError` appears in every union that targets a portable profile.
+* Every member implements `MutationError`; every member attributable to an input field implements `InputMutationError`. The interface fragment `... on MutationError { message }` is how a client renders a member it knows from the schema but handles no further; the concrete type is what the client switches on. It is not protection against a member the client has never seen — Apollo matches interface and union fragments from generated `possibleTypes`, and a deployed client's `possibleTypes` cannot contain a type added later.
+* An error that carries corrective information declares it as typed fields on its own type — for example `ProfileSafetyViolationError { message, profilesRequiringPin: [ID!]! }` — never as a JSON scalar, an unstructured map, an encoded message, or a top-level `extensions` entry.
+* Corrective data passes the same authorization as reading it directly. An error may not disclose a name, ID, or state that the same caller's query would refuse; when it would, the error carries less.
+* `inputPath` is relative to the mutation's `input` object, its segments are strings, list indexes are decimal strings (`["members", "0", "profileId"]`), and it is deliberately not the specification's response `path` (whose list indexes are integers).
+* The payload invariant is: blocking `userErrors` present ⇒ the result position is `null`; result present ⇒ `userErrors` is empty. GraphQL's type system cannot express this; it is enforced by the sealed service outcome, the adapter mapping, and a contract test per mutation. A mutation that must report non-blocking diagnostics alongside a result adds a separate `warnings` field; it never returns a result together with blocking `userErrors`.
+* A mutation does not commit partial state and then report `userErrors`; either the whole command applies or the payload reports rejection with nothing written.
+* `message` is a complete, safe, displayable sentence — what happened or what the user can do — and never a database constraint, class name, path, or internal identifier. `__typename` is the machine-readable code; wording may change without a schema change and clients never parse `message` for control flow.
+
+=== The channel rule
+
+Top-level `errors` describe request or execution failure.
+Payload `userErrors` describe an expected domain rejection that a correctly working client presents or acts on.
+
+Top-level:
+
+* Malformed document, variable coercion, and unknown-field errors — the specification's request errors.
+* Missing or invalid authentication (`AUTHENTICATION_REQUIRED`) and the profile- and household-selection gates (`PROFILE_REQUIRED`, `HOUSEHOLD_REQUIRED`) — request-context gates that apply before any mutation's own logic.
+* Cross-cutting authority the whole surface requires — a deny on a surface-level action before any resource is looked up, such as the server-administration surface (`FORBIDDEN` from `requireServerAdmin()` today).
+* Rate limiting and lockout (`TOO_MANY_CREDENTIAL_ATTEMPTS`) — a gate, reported with `retryAfterSeconds` in `extensions` when known.
+* Infrastructure failure, defects, and unexpected exceptions — always sanitized.
+
+Payload `userErrors`:
+
+* Field and form validation.
+* A mutation target that does not exist (`SESSION_NOT_FOUND` on timeline reporting becomes `StreamSessionNotFoundError`); an idempotent command such as `destroyStreamSession` has no not-found outcome — see the idempotency rules below.
+* An invalid confirmation credential or PIN for the specific action being confirmed.
+* Domain conflicts, prohibited state transitions, and safety rules — a deletion blocked by a safety rule, a transfer that requires another transfer first, a name already in use.
+* A capability the caller lacks for this specific resource — a link:0025-cedar-decides-authorization.adoc[ADR 0025] deny on the action for that resource — subject to the oracle rule below.
+
+The oracle rule: where the caller cannot otherwise observe that a resource exists, denial is reported as the not-found member.
+A `...DeniedError` member exists in a union only when the caller can already see the resource by a query — for example a household member denied a manager-only action on a profile they can list.
+`IllegalArgumentException` is never a public outcome. Three layers reject a bad value and each has one channel: a value that fails GraphQL scalar, enum, or variable coercion is a request error raised by graphql-java before any resolver runs; a value GraphQL accepts but Streamarr cannot use — an `ID` that is not a UUID — is answered by the resolver with an `InputMutationError`; form and domain validation (required, too long, already in use) is a service decision returned as a rejection member, so it stays reusable outside GraphQL.
+
+=== Top-level error contract
+
+[source,json]
+----
+{
+  "message": "The requested change could not be persisted.",
+  "path": ["renamePortableProfile"],
+  "extensions": {
+    "errorType": "INTERNAL",
+    "code": "DATABASE_OPERATION_FAILED",
+    "requestId": "req-3f9c"
+  }
+}
+----
+
+* `errorType` is the DGS classification (`BAD_REQUEST`, `UNAUTHENTICATED`, `PERMISSION_DENIED`, `NOT_FOUND`, `FAILED_PRECONDITION`, `UNAVAILABLE`, `INTERNAL`, `UNKNOWN`): Streamarr adopts DGS's coarse vocabulary rather than inventing one, and the handler stamps it on every error it emits.
+* `code` is Streamarr's stable refinement. Streamarr does not use DGS's `errorDetail` for this because `errorDetail` is a closed Netflix enumeration with no room for Streamarr values.
+* `requestId` correlates the sanitized response with the server log entry that holds the real exception; the exception message never reaches the client.
+* On every data-fetcher error, `extensions` is limited to `errorType`, `code`, `requestId`, and `retryAfterSeconds`; corrective domain data never travels here because top-level errors are outside the schema — they cannot be selected, cannot take fragments, are not introspectable, and code generators cannot type them.
+* Response shapes follow the specification: a request error yields `errors` and no `data` entry; an execution error yields `errors` plus partial or `null` `data`; success omits `errors`; `{"data": null, "errors": []}` is invalid.
+* The contract covers every error raised while fetching data. Request errors — syntax, validation, variable coercion — are raised by graphql-java before any data fetcher runs and carry its own `extensions.classification` (`InvalidSyntax`, `ValidationError`, …); they are developer errors, this ADR does not restyle them, and stamping `requestId` on them through an `Instrumentation` is deferred.
+* The Streamarr handler keeps delegating throwables it does not recognize to `DefaultDataFetcherExceptionHandler`, as DGS recommends, and decorates the delegate's result with `code` and `requestId` before returning it, so every data-fetcher error carries the same three keys whether Streamarr or DGS classified it. When no finer Streamarr code applies, `code` repeats the `errorType` value (`INTERNAL`, `NOT_FOUND`, …), so the key is always present and a client needs one lookup, not two.
+
+=== Service outcome and GraphQL adapter
+
+[source,text]
+----
+GraphQL input → resolver adapter → application command
+             → sealed service outcome → resolver mapping → GraphQL payload
+----
+
+* A service returns an expected outcome as a value — a sealed interface such as `RenameOutcome permits Renamed, Rejected`, where `Rejected` carries a non-empty list of typed reasons (`ProfileNotFound`, `NameRequired`, `NameAlreadyInUse`) so a form with three invalid fields reports three — never as an exception thrown from the service's public method. Exceptions are reserved for failure and for the request gates.
+* A service decides before it writes. When a rejection can only be discovered after a write in the same transaction, the transactional unit throws an internal exception to roll back, and the conversion to a rejection value happens after the rollback, outside the transaction — through a `TransactionTemplate` callback or a separately proxied transactional bean, never a self-invoked `@Transactional` method, which Spring does not proxy. Returning a value from inside a transaction commits, so a value is never the only signal that work must be undone.
+* The service outcome vocabulary is protocol-independent; the resolver maps each rejection member to a schema error type. `ArchitectureTest` continues to forbid `graphql` imports in services.
+* Each resolver maps its outcome with an exhaustive `switch` over the sealed type, so the compiler proves every rejection member has a schema error type; shared helpers build the payload envelope and the common error members so each switch arm is one line. Exhaustiveness is worth more than a reflective generic adapter, and the helpers are what keep the duplicated-lines gate green as the mutation count grows.
+* Concurrency conditions are expressed atomically in the database as before; an expected conflict is a rejection member (`ProfileNameAlreadyInUseError`) surfaced by the statement's affected-row count, never a check-then-act read, never an exception exposed from the public service method, and never a reliance on GraphQL's serial root-field execution.
+
+=== Asynchronous and idempotent mutations
+
+* `scanLibrary` and `refreshLibrary` stay asynchronous by policy and return the `Library` node; its existing `status` (`SCANNING`, `REFRESHING`, `HEALTHY`, `UNHEALTHY`) is the observable a client polls through `library(id:)`. Accepted is not completed, and the payload says so by returning a library whose status is already `SCANNING` or `REFRESHING`.
+* A same-kind request while that work is running is an idempotent success returning the same node in its running status; a different-kind request while the library is busy is the rejection member `LibraryBusyError` carrying the current status; a library that does not exist is `LibraryNotFoundError`. `LibraryScanInProgressException` and `LibraryRefreshInProgressException` become the `LibraryBusyError` member.
+* Acceptance means the work is claimed, and the client contract is to observe `status` afterwards. If the server accepts the work and then cannot start it, the caller whose request failed to start receives a sanitized top-level error (`errorType` `UNAVAILABLE`, `code` `LIBRARY_WORK_NOT_SCHEDULED`) with a `null` payload, and every other caller sees the library become `UNHEALTHY` — exactly as if the worker had started and failed at its first step.
+* How a request claims the work atomically, when the worker starts, how a post-acceptance failure is compensated, and why this is single-instance today are the execution protocol in link:0027-library-work-claimed-in-database-single-instance.adoc[ADR 0027]; this ADR fixes only the contract above.
+* Naturally idempotent mutations return the resulting state on a repeat call and never report the repeat as an error: `markWatched` and `markUnwatched` return the media node in its resulting state; `destroyStreamSession` returns a receipt for the requested id whether or not a session was running, because after deletion the server cannot tell a retry from an unknown id, and the existing no-op is oracle-free by design (PR #209).
+* Streamarr does not add `clientMutationId`; it is a Relay Classic cache-reconciliation field and no Streamarr client uses Relay.
+
+=== Client obligations
+
+* Select `__typename` and the `... on MutationError { message }` fallback on every `userErrors` selection; add concrete fragments only for errors the screen handles specially.
+* Configure the cache with the generated `possibleTypes` (Apollo web `InMemoryCache({ possibleTypes })` from the codegen `fragment-matcher` output; Apollo iOS emits schema metadata itself), or interface fragments do not match at all.
+* Tolerate an unknown union member without crashing — treat it as a generic rejection — and an unknown enum value (code generators must be configured with an unknown case).
+* Send one root mutation field per operation; two mutation fields in one document execute serially and are not one transaction.
+
+=== Enforcement
+
+A schema contract test in streamarr-server verifies for every field on `Mutation`:
+
+* exactly one required argument named `input` whose type is a mutation-specific `*Input`;
+* a nullable return type named `*Payload`, mutation-specific;
+* the payload declares `userErrors` as a non-null list of a non-null union, and every union member implements `MutationError`;
+* no field on `Mutation` returns `Boolean`, `ID`, or a domain object type directly.
+
+Every mutation's tests demonstrate: success returns the result and an empty `userErrors`; each expected rejection returns a payload member and no top-level error; each `InputMutationError` names the correct `inputPath`; an unexpected failure yields a sanitized top-level error with `errorType`, `code`, and `requestId`; no response carries a secret or persistence detail; concurrent conflicting requests preserve the invariant.
+
+=== Migration
+
+* Prerequisite before the first slice: the web client generates its operation types and `possibleTypes` from the pinned server SDL with a CI drift check — GraphQL Code Generator with `typescript-operations`, `fragment-matcher`, optionally `typed-document-node`, and not the `client` preset, which Apollo advises against for Apollo Client — and wires `possibleTypes` into `InMemoryCache`. Until that lands, the web client's hand-maintained `TypedDocumentNode` types cannot detect the drift each slice introduces and the generated-contract premise below does not hold.
+* Every existing mutation changes shape twice over — the seven `Boolean!` mutations on `main` gain a payload with a result, the three that return a domain type directly (`addRating`, `addLibrary`, `createStreamSession`) gain the payload envelope, and the eight that take positional arguments (`id`, `sessionId`, `mediaFileId`, …) move to the single `input` object. Because both shipping clients are first-party and, once the prerequisite lands, generate from the schema, migration proceeds per domain slice — streaming sessions, watch progress, library administration, ratings — with the server change, the regenerated Apple types, and the updated web documents landing together. A slice may replace a field in place only when no distributed build — App Store, TestFlight, a private install — and no deployed or service-worker-cached web bundle can still run against the upgraded server; a slice that cannot show that ships an additive `*V2` field beside the old one and retires the old field by the minimum supported client version, not by calendar.
+* A new mutation adopts the shape from its first commit; nothing new is written in the old shape and migrated later.
+* Each slice stays inside the SonarCloud new-lines budget on its own.
+
+Explicitly deferred:
+
+* A server-enforced `idempotencyKey` for mutations that create unique side effects; the same-kind-in-flight and natural-idempotency rules above cover v1.
+* A first-class asynchronous-operation handle (`LibraryOperation` with an id, terminal states, failure detail, a lookup or subscription field, and retention); v1 observes `Library.status`.
+* Stamping `requestId` on graphql-java request errors through an `Instrumentation`.
+* A `warnings` field; no mutation currently produces non-blocking diagnostics.
+* Query-side error design; queries keep nullable fields and top-level errors, unchanged.
+* Message localization; the server always supplies an English `message` and clients may localize from `__typename`.
+
+== Consequences
+
+* The schema gains one input, one payload, and one error union per mutation, plus a shared file of error object types and two interfaces; the union count is the price of per-mutation discoverability, and the shared error types keep the type count linear in the number of distinct rejections rather than the number of mutations.
+* Nullable payloads make every generated payload type optional in Swift and TypeScript; clients unwrap once per mutation. This is the accepted cost of not nulling sibling fields.
+* Returning the affected node with its `id` and changed fields lets Apollo's normalized cache (web and iOS) merge those fields into every watched query — a `markWatched` that returns the `Movie` or `Episode` node with its new `watchStatus` and `watchProgress` needs no `refetchQueries` and no hand-written cache `update` for screens showing that title. A `Boolean!` forces one or the other. Normalization merges fields on a known node only: connection membership (continue watching, a filtered list) still needs an `update` or refetch, and deletion receipts give `cache.evict` its key.
+* Adding a member to a union is schema-additive but behaviorally a breaking change for any deployed client whose `possibleTypes` predate it: the interface fallback cannot match the new type, so that client sees a rejection with no message. Clients that know the new member ship before the server begins returning it — the same client-first ordering as the migration rule below. Removing a member or a payload field is breaking outright. Adding a field to a payload is non-breaking, which is the reason the payload envelope exists.
+* Most exceptions in `com.streamarr.server.exceptions` that model expected outcomes become sealed outcome members; `StreamarrDataFetcherExceptionHandler` shrinks to request gates and failure classification, and its `code` table splits into a small top-level set and the schema's error types.
+* Services grow sealed outcome types and their tests assert on outcome values instead of expected exceptions; the resolver layer grows one exhaustive `switch` per mutation plus the shared payload helpers.
+* The mutation contract becomes testable structurally (the schema contract test) and behaviorally (six assertions per mutation), so a new mutation that returns `Boolean!` or throws an expected outcome fails the build.
+* The Apple repository's `make generate` runs against the codegen database in the same change as each server slice.
+* The web client gains a codegen step, a pinned SDL, and generated `possibleTypes` before the first slice; Android adopts the same rule when it exists.
+* Top-level `errors` carry the same keys for every failure the handler emits, so clients can key on `errorType` first and `code` second everywhere.
+
+== Rejected Alternatives
+
+* Keep expected outcomes as thrown exceptions mapped to top-level codes (status quo) — outside the schema, untyped corrective data, nulls the whole `data` object, and one table mixing gates, domain outcomes, and infrastructure failure.
+* Whole-result unions (`union RenameResult = PortableProfileSummary | ...`) — represents one outcome at a time, so a form with three invalid fields cannot report them together, and a second root signature would need its own exemption from every contract test; not adopted, revisit by ADR if a single-outcome workflow ever needs it.
+* One generic `UserError { code: Enum, field, message }` per mutation (Shopify Rule #23) — no room for per-error corrective fields, and a shared error type cannot say which mutation produces which code; the union of typed members plus interfaces (Giroux's stage 6a) keeps both.
+* An error-interface list `[MutationError!]!` without a per-mutation union — clients cannot discover which errors a mutation can return.
+* Non-null payloads — the specification propagates a root Non-Null error to `data: null`, discarding sibling fields.
+* `clientMutationId` on inputs and payloads — Relay Classic reconciliation with no consumer; it promises correlation and no deduplication.
+* Shopify's object-prefixed names and separate selector argument (`collectionUpdate(collectionId:, collection:)`) — one `input` variable is simpler for clients and alphabetical grouping is not a need at this schema size.
+* `userErrors` outside the payload so that payloads stay Non-Null — at the response root beside `data`, in response-level `extensions`, or inside `data` as a sibling of the mutation field. The root permits only `data`, `errors`, and `extensions`; `extensions` is untyped, unselectable, and invisible to code generation; and every key of `data` is a selected root field, so a sibling `userErrors` would be a `Mutation.userErrors` field resolved serially and independently of the mutation that produced the errors, with no way to attribute errors when an operation selects more than one mutation. In every placement the result position inside the payload would still be nullable because a rejected mutation has no node to return. Sketched, the two rejected shapes are:
++
+[source,json]
+----
+{
+  "data": { "renamePortableProfile": { "profile": null } },
+  "userErrors": [ { "code": "NAME_REQUIRED", "message": "Enter a profile name." } ]
+}
+----
++
+[source,json]
+----
+{
+  "data": {
+    "renamePortableProfile": { "profile": null },
+    "userErrors": [ { "code": "NAME_REQUIRED", "message": "Enter a profile name." } ]
+  }
+}
+----
++
+No schema type describes the first; the second must be a root field the client selects and the server cannot bind to its sibling; `profile` is `null` in both, and a client that reads only the mutation's own field sees a mutation that silently did nothing.
+* Corrective data in `extensions` or a JSON scalar — not selectable, not introspectable, not code-generated.
+* DGS `errorDetail` as the carrier of Streamarr codes — a closed Netflix enumeration.
+* Replacing domain entities in every read resolver with DTOs as part of this decision — a separate concern with its own blast radius across ten resolvers; this ADR governs mutations only.
+
+== References
+
+* link:0002-graphql-over-rest.adoc[ADR 0002: GraphQL Over REST]
+* link:0005-tdd-and-behavior-testing.adoc[ADR 0005: TDD and Behavior Testing]
+* link:0010-spring-application-events.adoc[ADR 0010: Spring Application Events for Service Decoupling]
+* link:0014-protocol-agnostic-pagination.adoc[ADR 0014: Protocol-Agnostic Pagination]
+* link:0015-authorization-profiles-and-content-controls.adoc[ADR 0015: Authorization, Profiles, and Content Controls]
+* link:0016-authentication-mechanisms-and-session-security.adoc[ADR 0016: Authentication Mechanisms and Session Security]
+* link:0024-identity-authority-by-relationship.adoc[ADR 0024: Identity Authority by Relationship]
+* link:0025-cedar-decides-authorization.adoc[ADR 0025: Cedar Decides Authorization]
+* link:0027-library-work-claimed-in-database-single-instance.adoc[ADR 0027: Library Scan and Refresh Are Claimed Atomically in the Database and Run on a Single Instance]
+* https://spec.graphql.org/September2025/#sec-Errors[GraphQL Specification, September 2025 — Errors]
+* https://spec.graphql.org/September2025/#sec-Handling-Execution-Errors[GraphQL Specification, September 2025 — Handling Execution Errors]
+* https://graphql.org/learn/error-handling/[GraphQL Foundation — Error Handling]
+* https://web.archive.org/web/20190919202213/http://facebook.github.io/relay/graphql/mutations.htm[Relay Input Object Mutations Specification (archived)]
+* https://github.com/Shopify/graphql-design-tutorial/blob/master/TUTORIAL.md[Shopify GraphQL Design Tutorial, Rules #14–#24]
+* https://productionreadygraphql.com/2020-08-01-guide-to-graphql-errors/[Marc-André Giroux — A Guide to GraphQL Errors]
+* https://www.apollographql.com/docs/graphos/schema-design/guides/errors-as-data-explained[Apollo — Errors as Data Explained]
+* https://netflix.github.io/dgs/error-handling/[Netflix DGS — Error Handling]
+* https://www.apollographql.com/docs/react/development-testing/graphql-codegen[Apollo Client — GraphQL Codegen]
+* streamarr-server PR #209 — existence-oracle-free stream-session ownership

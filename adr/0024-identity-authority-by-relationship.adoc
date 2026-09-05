@@ -16,7 +16,7 @@ Implementing it (streamarr-server PR #296, about 22,000 added lines and a 792-li
 * An Account had no Profile of its own.
   Every Account was merely a manager of Profiles it happened to create, so "this Profile is me" — the case of a child who later gets a login, or an adult whose identity should follow their Account — had no representation.
 * A Profile had no canonical Household.
-  Household teardown, the local manager a Kid Profile needs, and "which deletion deletes this Profile" therefore had nowhere to anchor.
+  Household deletion, the local manager a Kid Profile needs, and "which deletion deletes this Profile" therefore had nowhere to anchor.
 * Sharing a Profile into a Household let that Household's members use the Profile, but never let the Profile's own person use that Household.
   A visitor could appear on a friend's TV yet could not browse the friend's catalog from their own devices, and a parent who moved out could not act on their own Profile left behind.
 * One `OWNER` per Household with `PARENT` delegates encoded a hierarchy the product does not need once ServerAdmin resolves disputes; it cost a unique index and two constraint triggers.
@@ -159,7 +159,7 @@ Any required replacement HouseholdAdmin is assigned first through a separate ope
 A Household whose HouseholdAdmins are all disabled keeps working for its members and surfaces to ServerAdmin as needing an active admin.
 
 The final Account cannot be transferred or deleted independently.
-It is handled only by Household teardown, which also deletes the source Household.
+It is handled only by Household deletion, which also deletes the source Household.
 
 ===== Account deletion
 
@@ -200,7 +200,7 @@ Every Profile belongs to exactly one Household:
 Profile --belongsTo--> Household
 ----
 
-This relationship determines teardown and where the Profile's _home anchor_ — its local management anchor — must exist.
+This relationship determines Household deletion and where the Profile's _home anchor_ — its local management anchor — must exist.
 It does not make the Profile available, grant authority, or mean that a person owns it.
 Sharing does not change it.
 
@@ -212,7 +212,7 @@ The home anchor is:
 * For a Kid or content-restricted Profile, an Account holding the HouseholdAdmin role in that Household whose Personal Profile is unrestricted Adult, recorded as a direct ProfileManager.
 
 While a restricted Profile is shared into another Household, that Household's eligible HouseholdAdmins supervise it for the duration of the share; that is derived authority, not an anchor, and it ends with the share.
-Account transfer or deletion, Profile transfer, manager removal, HouseholdAdmin demotion, restriction of a Personal Profile, and Household teardown recheck the home anchor.
+Account transfer or deletion, Profile transfer, manager removal, HouseholdAdmin demotion, restriction of a Personal Profile, and Household deletion recheck the home anchor.
 Disabling an Account does not: the anchor is a structural relationship, and a disabled anchor surfaces as needing attention rather than blocking the disable.
 An unlinked Profile may transfer only through a ServerAdmin operation that establishes the destination anchor before commit.
 A linked Personal Profile moves only with its Account.
@@ -233,7 +233,7 @@ A shared TV never shows this selector because Device registration fixes its Hous
 
 A ServerAdmin may create an empty Household.
 Its first Account automatically becomes HouseholdAdmin; later Accounts default to HouseholdMember.
-Once that first Account is added, the Household must always retain at least one Account and one Account holding the HouseholdAdmin role until teardown deletes the Household.
+Once that first Account is added, the Household must always retain at least one Account and one Account holding the HouseholdAdmin role until deletion removes the Household.
 
 No Profile may belong to a newly created empty Household because no local Account can satisfy the management anchor.
 
@@ -268,7 +268,7 @@ At least one enabled ServerAdmin must remain; nobody sits above ServerAdmin to r
 
 A ServerAdmin may:
 
-* Create and permanently tear down Households.
+* Create and permanently delete Households.
 * Invite, create, transfer, disable, re-enable, and delete Accounts.
 * Appoint or remove HouseholdAdmins while preserving Household invariants.
 * Transfer an unlinked Profile; a linked Personal Profile moves with its Account.
@@ -278,7 +278,7 @@ A ServerAdmin may:
 
 ServerAdmin does not bypass structural database invariants.
 Recovery handles unavailable people or disputed relationships, not preventable invalid data.
-Destructive and break-glass operations — Account deletion, Profile force-delete and force-unshare, manager override, Household teardown, ServerAdmin authority changes, server-wide ESN blocks, restricting a sovereign Adult Profile, leaving any Profile unrestricted, setting or resetting another person's Profile PIN by override, and issuing an Account password-reset code — are the ServerAdmin members of the fresh-reauthentication action group defined under Authorization architecture: each requires fresh password reauthentication by an enabled ServerAdmin and audits the actor, resources, reason, and time, because these are exactly the operations a stolen ServerAdmin session must not be enough for.
+Destructive and break-glass operations — Account deletion, Profile force-delete and force-unshare, manager override, Household deletion, ServerAdmin authority changes, server-wide ESN blocks, restricting a sovereign Adult Profile, leaving any Profile unrestricted, setting or resetting another person's Profile PIN by override, and issuing an Account password-reset code — are the ServerAdmin members of the fresh-reauthentication action group defined under Authorization architecture: each requires fresh password reauthentication by an enabled ServerAdmin and audits the actor, resources, reason, and time, because these are exactly the operations a stolen ServerAdmin session must not be enough for.
 Transfer, disable, re-enable, and role changes need live ServerAdmin authority and an audit record, not reauthentication.
 
 Every ServerAdmin operation checks live ServerAdmin authority rather than relying on a stale access-token claim; the authorization slice loads it from PostgreSQL as a current principal fact for those actions (link:0025-cedar-decides-authorization.adoc[ADR 0025]).
@@ -286,13 +286,13 @@ Every ServerAdmin operation checks live ServerAdmin authority rather than relyin
 Only ServerAdmin may read the security audit log.
 No role, including ServerAdmin, may read password or PIN hashes, access or refresh tokens, session secrets, invitation codes, or other reusable authentication material.
 
-===== Household teardown
+===== Household deletion
 
-ServerAdmin may tear down a Household, including through an audited break-glass path.
+ServerAdmin may delete a Household, including through an audited break-glass path.
 The operation revokes its Device registrations and refresh sessions, and the registrations its Accounts authorized anywhere, returns affected sessions to the Profile picker, cancels pending invitations and offers, ends shares, deletes its Accounts, deletes Profiles that belong to it, and then deletes the Household.
 
-Before teardown, ServerAdmin transfers out whatever should survive through the ordinary workflows: every Account but the last, and every unlinked Profile worth keeping.
-Teardown then handles the final Account atomically with deleting the Household: transfer the Account with its Personal Profile, delete both, or delete the Account while transferring its preserved Profile.
+Before deletion, ServerAdmin transfers out whatever should survive through the ordinary workflows: every Account but the last, and every unlinked Profile worth keeping.
+Household deletion then handles the final Account atomically: transfer the Account with its Personal Profile and delete the Household, delete both, or delete the Account while transferring its preserved Profile and deleting the Household.
 Whatever still belongs to the Household is deleted; Profiles that merely visit are only unshared.
 Because a Profile's home anchor always lives in the Household it belongs to, deleting this Household's Accounts cannot strand a Profile that belongs elsewhere — it can only remove a co-manager, and the share into this Household ends with it.
 
@@ -479,7 +479,7 @@ The target is recipient email for Account invitations and Account-plus-Profile f
 
 A direct ServerAdmin manager grant invalidates a pending invitation for the same Account and Profile.
 ServerAdmin removal also invalidates older pending invitations so an old code cannot restore disputed authority.
-A pending invitation or offer is also invalidated when its Profile is deleted, transferred, or connected to an Account, its named Account is deleted or becomes ineligible, its inviting or offering manager loses management, its creating ServerAdmin loses ServerAdmin authority or is disabled, or its target Household is torn down; the system is the acting party.
+A pending invitation or offer is also invalidated when its Profile is deleted, transferred, or connected to an Account, its named Account is deleted or becomes ineligible, its inviting or offering manager loses management, its creating ServerAdmin loses ServerAdmin authority or is disabled, or its target Household is deleted; the system is the acting party.
 A removed or compromised ServerAdmin therefore leaves no codes behind that could take effect later.
 Acceptance rechecks every eligibility and safety rule as of that moment.
 The sovereign Account may cancel any pending offer of its own Personal Profile.
@@ -728,7 +728,7 @@ PostgreSQL ensures, regardless of application path or concurrency:
 * Every Account has exactly one Household and Personal Profile; every Profile represents at most one Account.
 * An Account and its Personal Profile relate to the same Household, and the Profile is shared into that Household; a transfer moves membership and `belongsTo`, creates the destination share, and ends or keeps the source share per `sourceAccess`, in one transaction.
 * A newly created Household may be empty.
-  Removing its final Account is forbidden except inside teardown, which deletes the Household; every Household with Accounts has an Account holding the HouseholdAdmin role.
+  Removing its final Account is forbidden except inside Household deletion; every Household with Accounts has an Account holding the HouseholdAdmin role.
 * Every Profile belongs to one Household and retains a ProfileManager and required local anchor.
 * Restricted Profiles have the required local unrestricted-Adult HouseholdAdmin as direct manager.
 * Enabledness is operational, not structural: apart from the enabled-ServerAdmin rule below, no invariant mentions `enabled`, so disabling an Account is never rejected.
@@ -895,7 +895,7 @@ This ADR preserves ADR 0022's single-Household Accounts, portable Profile data a
 It changes or adds:
 
 . Peer HouseholdAdmins replace HouseholdOwner, `OWNER`, and `PARENT`.
-. ServerAdmin may create an empty Household; its first Account becomes HouseholdAdmin, and its final Account can leave only through teardown that deletes the Household.
+. ServerAdmin may create an empty Household; its first Account becomes HouseholdAdmin, and its final Account can leave only through Household deletion.
 . Every Account has one Personal Profile, and the pair transfers together; the transfer's `sourceAccess` (`END` by default, or `KEEP_AS_VISITOR`) says whether the old Household keeps them as a visitor.
 . Every Profile has one `belongsTo` relationship and a local management anchor.
 . Unrestricted Adult Personal Profiles derive self-management; restricted Profiles do not.
@@ -909,7 +909,7 @@ It changes or adds:
 . PIN safety locks a Profile that lacks a required PIN at selection instead of blocking the Kid change; PINs are never removed automatically, and removal is refused while it would lock the Profile somewhere.
 . Profile-side `Leave this home` is removed; Accounts authorize unsharing.
   The Account whose self-managed Personal Profile it is may end any share of it except the one into its own Household.
-. ServerAdmin may perform audited break-glass Household teardown.
+. ServerAdmin may perform audited break-glass Household deletion.
 . Authorization is centralized behind the `AuthorizationService` facade while PostgreSQL retains identities, relationships, and integrity enforcement; link:0025-cedar-decides-authorization.adoc[ADR 0025] adopts Cedar as the engine.
 . Invitations, shares, and Device registrations use explicit state machines; manager changes, transfers, and deletion are single conditional transactions.
 . An Account with self-management is sovereign over its Personal Profile: it may remove direct managers of it and delete Account and Profile together after fresh password reauthentication, subject to the last-admin, last-Account, last-ServerAdmin, and no-stranded-Profile rules.
@@ -932,7 +932,7 @@ Decisions of ADR 0022 this ADR reverses:
 * Never switch Household context during a session — rejected there to keep the session unambiguous.
   Sharing your Personal Profile into a Household should let _you_ use that Household, not only its members use your Profile; Streamarr-web switching validates the target and issues a fresh signed snapshot, so the session stays unambiguous, it just moves.
 * A Profile has no owning Household foreign key — `belongsTo` returns as a lifecycle and anchor relationship only.
-  It says which teardown deletes the Profile and where its local manager must live; it grants no availability and no authority, which is what the original objection was about.
+  It says which Household deletion deletes the Profile and where its local manager must live; it grants no availability and no authority, which is what the original objection was about.
 * Profile-side `Leave this home` from a Profile-scoped token — replaced by Account-side authority over one's own Personal Profile.
   The person leaves, not the Profile; a manager of someone else's Profile still cannot pull it from another Household.
 * Block a Kid's creation, transfer, or share until every Adult and less-restricted Kid Profile in the Household has a PIN — with ten Profiles in a home, adding one Kid waits on ten people, and a Kid change is a change to the Kid, not to them.

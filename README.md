@@ -49,3 +49,4 @@ Throwaway prototypes whose conclusion an ADR depends on live in [`spikes/`](spik
 - [ADR 0025: Cedar Decides Authorization; PostgreSQL Keeps the Relationships](adr/0025-cedar-decides-authorization.adoc)
 - [ADR 0026: Mutations Return Payloads Whose Expected Errors Are Typed Unions; Top-Level Errors Carry Failure](adr/0026-mutation-payloads-and-error-channels.adoc)
 - [ADR 0027: Library Scan and Refresh Are Claimed Atomically in the Database and Run on a Single Instance](adr/0027-library-work-claimed-in-database-single-instance.adoc)
+- [ADR 0029: Pin Jellyfin FFmpeg Releases and Resolve Updates Before Building](adr/0029-pin-jellyfin-ffmpeg-releases.adoc)

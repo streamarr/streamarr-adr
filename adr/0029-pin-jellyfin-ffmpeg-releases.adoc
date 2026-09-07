@@ -1,0 +1,62 @@
+= ADR 0029: Pin Jellyfin FFmpeg Releases and Resolve Updates Before Building
+
+== Status
+
+Accepted
+
+== Context
+
+Streamarr runs FFmpeg as a subprocess (link:0004-processbuilder-over-jni.adoc[ADR 0004]) and requires H.264, AV1, and recoverable HLS behavior (link:0009-h264-plus-av1-codec-strategy.adoc[ADR 0009], link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]).
+The previous binary provider retained only a rolling window of daily builds, so a pinned dependency could disappear without a source change.
+CI also installed distribution FFmpeg for smoke tests, exercising a different runtime from the shipped image.
+Jellyfin publishes numbered FFmpeg releases with media-server patches and portable GPL binaries for both supported Linux architectures.
+Its packaging revision is a fourth numeric version component, not a prerelease indicator.
+
+== Decision
+
+Consume exact numbered Jellyfin FFmpeg releases through the existing Cloud Native Buildpack, keeping ProcessBuilder and the application codec contracts unchanged.
+Renovate owns one release-tag file and uses the GitHub releases datasource with regex versioning that compares the packaging revision numerically as a stable build component.
+Keep FFmpeg updates isolated and reviewed rather than automerged.
+
+Generate a checked-in lock from published release metadata containing the full package version, fork source commit, portable GPL asset names, and SHA-256 digests for Linux amd64 and arm64.
+Require both architecture assets before accepting an update and verify every downloaded archive against its locked digest before extraction.
+Validate runtime identity, GPL/nonfree build flags, and required HLS capabilities; ship license text, source attribution, and an SBOM alongside the binaries.
+The runtime banner omits Jellyfin's packaging revision, so the artifact checksum identifies the exact package build.
+
+Separate dependency resolution from ordinary builds.
+Validate the lock offline on every CI run and before publishing; query upstream metadata when FFmpeg resolution inputs change.
+Run application smoke tests against the locked runtime, and verify both architecture images and their HLS recovery behavior for packaging changes.
+
+Use a narrowly privileged synchronization workflow for Renovate updates.
+Execute only trusted base-branch resolver code, treat the proposed tag as data, and generate the lock before minting write credentials.
+Use a short-lived GitHub App token to create a signed commit containing only that lock, with an atomic expected-head check that rejects concurrent branch changes.
+Include the App's commit identity in Renovate's ignored authors so generated commits do not prevent future updates.
+Unprivileged PR CI may execute the proposed resolver to test changes to that resolver.
+
+Explicitly deferred:
+
+* A Streamarr-owned permanent binary/source archive and independent build pipeline.
+* Hardware-accelerator certification or new codec selection behavior.
+
+== Consequences
+
+Dependency age alone no longer invokes a daily-build retention policy, and normal lock validation does not depend on the release API being available.
+Binary downloads still depend on upstream availability; numbered releases are not a permanent-retention or immutability guarantee.
+A deleted asset fails the build, and a replaced asset fails checksum verification rather than silently changing the runtime.
+Rebuilds independent of upstream retention require an owned archive; caches do not provide that guarantee.
+Streamarr accepts Jellyfin's patch and release cadence and retains responsibility for reviewing security updates, redistribution obligations, and runtime compatibility.
+The privileged updater changes only after trusted resolver changes merge, while ordinary PR CI can validate a resolver migration before merge.
+
+== Rejected Alternatives
+
+* Refresh daily-build pins more frequently — postpones the retention failure without removing the dependency on an expiring artifact.
+* Use a floating latest asset or distribution package — loses a reviewed runtime identity and dev/test/production parity.
+* Treat the packaging suffix as SemVer prerelease — can suppress stable Jellyfin packaging fixes in Renovate.
+* Query release metadata on every build — adds a live resolution dependency to builds whose inputs have not changed.
+
+== References
+
+* https://github.com/jellyfin/jellyfin-ffmpeg[Jellyfin FFmpeg]
+* https://github.com/jellyfin/jellyfin-ffmpeg/wiki/FAQ[Jellyfin FFmpeg build variants]
+* https://docs.renovatebot.com/modules/versioning/regex/[Renovate regex versioning]
+* https://github.blog/changelog/2021-09-13-a-simpler-api-for-authoring-commits/[GitHub signed commit API]

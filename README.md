@@ -52,3 +52,4 @@ Throwaway prototypes whose conclusion an ADR depends on live in [`spikes/`](spik
 - [ADR 0028: Credential Attempts Are Journaled and Throttled in PostgreSQL](adr/0028-credential-attempts-are-journaled-and-throttled-in-postgresql.adoc)
 - [ADR 0029: Pin Jellyfin FFmpeg Releases and Resolve Updates Before Building](adr/0029-pin-jellyfin-ffmpeg-releases.adoc)
 - [ADR 0030: Credential Attempts Use PostgreSQL Time and Pairing Successes Preserve Failures](adr/0030-credential-budgets-use-shared-time-and-explicit-success-reset.adoc)
+- [ADR 0031: Artwork Replacement Uses a Bounded Transaction-Scoped Advisory Lock](adr/0031-transaction-scoped-artwork-replacement-locking.adoc)

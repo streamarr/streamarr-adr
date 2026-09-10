@@ -28,44 +28,70 @@ Playback consumers read the stored data.
 
 === The tables
 
-`media_file_container_info` holds one row per media file: container format name, duration, total bitrate, a snapshot of the source file's size and modification time, and `probe_version`.
+`media_file_container_info` holds one row per media file: container format name, duration, total bitrate, a snapshot of the source file's size and modification time, `probe_version`, and an optional typed `probe_error` code.
 `media_file_stream_info` holds one row per stream: stream type, index, codec, width, height, frame rate, channels, bitrate, language, and the default and forced flags.
 The tables correspond to ffprobe's `format` and `streams` sections.
+
+A missing container row means no completed probe outcome is available.
+A row without `probe_error` records a successful probe, even when some properties are unknown.
+A row with `probe_error` records a terminal media error and has no stream rows or container properties.
+Both outcomes retain the source snapshot and `probe_version`.
+Matching and enrichment continue to use `media_file.status` without new probe status values.
 
 Store typed columns without a raw ffprobe JSON column.
 Workers must produce the complete result through ADR 0018's typed contract, which excludes JSON on the wire.
 Derive the playback `MediaProbe` from the stream rows rather than storing summary fields on the container row.
 The summary uses the same tracks as the FFmpeg command: the first video stream and the first audio stream (`0:v:0` and `0:a:0`).
 Selecting default-flagged tracks for the summary could authorize copying one audio codec while FFmpeg copies another.
-A missing container row distinguishes an unprobed file from a probed file with unknown properties.
 
 The term "metadata" is reserved for descriptive data from TMDB.
 Examples include `library_metadata` and the `METADATA_NOT_FOUND` status.
 
 === The probe step
 
-Run probing as a file-processing step, separate from matching and enrichment, with tasks claimed and leased through `FileProcessingTaskCoordinator`.
-File processing is complete only when the probe rows exist.
-The media file status gains `PROBED` and `PROBE_FAILED`.
-The producer returns the complete container-and-stream result, including width, height, and frame rate for video streams and bitrate for any stream that reports it.
+Run probing as a step of the existing per-file task claimed and leased through `FileProcessingTaskCoordinator`.
+Matching, enrichment, and probing share that task.
+Evaluate the probe step independently of matching and enrichment outcomes, including for files already marked `MATCHED`.
+A probe request skips matching and enrichment whose successful results remain valid.
+File processing is complete only when the probe outcome is recorded for the current source snapshot and `probe_version`.
+
+On success, the producer returns the complete container-and-stream result, including width, height, and frame rate for video streams and bitrate for any stream that reports it.
+On terminal media failure, it returns a typed error.
 Replace `MediaProbe` as the producer's return type and derive it from the complete result for playback consumers.
 Extend the parser to retain the per-stream dimensions, frame rate, and video bitrate that today's `StreamInfo` omits.
 The server initially runs ffprobe.
 ADR 0033 moves execution to the worker using the same result contract.
 
-Re-probe a file when its size or modification time no longer matches the stored snapshot.
-Also re-probe files whose stored `probe_version` is older than the current version.
+Compare file size and modification time with the stored snapshot during library scans and file processing triggered by watcher events.
+Delete the stored outcome and its stream rows in one transaction when the snapshot differs or `probe_version` is older than the current version.
+The per-file task then probes the file again.
+Skip probing while the stored success or terminal media error remains current.
 Adding a probe column requires a `probe_version` bump to trigger a library-wide re-probe.
 
-=== Playback of an unprobed file
+Read the source snapshot before and after probing.
+Discard the result and reschedule processing if the snapshot changes during the probe.
+Publish the container outcome and replace its stream rows in one transaction.
 
-A playback request for a file without a container row returns a typed not-ready error in the mutation payload, per link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026].
+Worker unavailability, session loss, and temporary storage errors are transient execution failures.
+Record these failures and the next retry time on the per-file task without writing a terminal `probe_error`.
+Return the task to `PENDING` and let the coordinator claim it when the retry is due.
+Use capped backoff without requiring a file change or version bump.
+Keep one active task per file path during retries.
+Schedule retries without holding a task lease or database transaction across the delay.
+
+=== Playback and background scheduling
+
+A playback request for a file without a container row or with an older `probe_version` returns a typed not-ready error in the mutation payload, per link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026].
 The server publishes `MediaFileProbeRequested(mediaFileId)` in `services.events.library`.
-The library listener enqueues a probe task with `ON CONFLICT DO NOTHING`, so concurrent attempts create one task.
+The library listener enqueues the file's processing task with `ON CONFLICT DO NOTHING`.
+The existing partial unique index on `file_processing_task.filepath_uri` for active tasks guards concurrent requests.
 Probing runs only through background file processing.
 
-Upgrading an existing installation enqueues a probe for every media file without a container row.
-Until that backlog drains, playback of an unprobed file returns the not-ready error.
+Playback of a file with a current terminal `probe_error` returns that failure as a typed mutation payload error.
+It does not enqueue another task.
+
+Upgrading an existing installation uses the same enqueue operation for every media file without a container row or with an older `probe_version`.
+Playback returns the not-ready error until a current probe outcome is available.
 
 Explicitly deferred:
 
@@ -85,7 +111,9 @@ Every playback needs a producer.
 After ADR 0033, that producer is a worker.
 * Playback consumers use a `MediaProbe` derived from stored rows instead of a probe process result.
 * Persistence adds two entities, `MediaFileContainerInfo` and `MediaFileStreamInfo`, and a mapping from the complete probe result to those rows.
-* The not-ready error is a new client-visible state, mostly during the upgrade backfill.
+* Playback exposes typed errors for unavailable probe data and recorded terminal media failures.
+Transient execution failures remain retryable background work.
+The task coordinator gains persisted retry scheduling for these failures.
 * Each new probe column requires a library-wide re-probe, performed in the background and, after ADR 0033, by workers.
 * ADR 0013's pipeline reads its probe input from rows.
 The pipeline itself is unchanged.
@@ -95,6 +123,7 @@ The pipeline itself is unchanged.
 * Probe on demand when playback finds no row — adds a process wait to playback startup and makes playback responsible for missing library analysis.
 * Store raw ffprobe JSON beside the typed columns — adds a second representation while playback and the worker contract use typed fields.
 * Denormalized summary columns on the container row — duplicates stream properties and requires keeping both copies consistent to avoid a read-time lookup.
+* Probe outcomes in `media_file.status` — matching and probing can succeed or fail independently, so one status cannot preserve both outcomes.
 * Columns on `media_file` — nullable properties alone do not distinguish an unprobed file from a probed file with unknown values.
 * Names `media_analysis`, `media_file_analysis`, and `media_file_metadata` — "media" means the collectable in this schema, "analysis" names the step rather than the row, and "metadata" is TMDB's.
 * Pure Java probing libraries — replacing ffprobe would require validating equivalent support for MKV, HEVC, Dolby Vision, and audio channel layouts.

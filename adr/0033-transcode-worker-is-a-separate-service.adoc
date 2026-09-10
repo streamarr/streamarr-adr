@@ -27,18 +27,23 @@ The transcode worker is a separate service in the `streamarr/streamarr-transcode
 Transcoding and probing both run on workers.
 The local transcode executor, the local engine wiring, and the FFmpeg health indicator are removed from the server, and the `streaming.remote.enabled` switch is gone because remote execution is the only execution.
 The server's health reports worker connectivity instead of FFmpeg availability.
-Direct play never needs a worker, because it reads the rows of link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032].
+Every playback needs a worker: compatible media is remuxed into HLS by FFmpeg (link:0007-transcode-first-with-smart-remux.adoc[ADR 0007]), and there is no worker-free delivery path.
+link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032] keeps probing off the playback path; it does not make playback worker-free.
 
 Probing is a request on the worker session, issued by the file-processing pipeline.
 It never runs on the playback path.
 The worker resolves the same `MediaSourceRef` it transcodes from, so it needs no new access.
+The worker advertises probing in its registration capabilities, and the server sends a probe request only to a worker that advertised it; a worker without it is still a valid transcode worker.
+The same rule covers every future operation: Buf's breaking-change check protects decoding, not behavior, and today's worker logs a command it does not implement and never replies, so a new operation is gated on an advertised capability until every deployed worker has it.
 
 === Every installation runs a worker
 
 A single-node installation runs a co-located worker.
 The server binds an opt-in plaintext gRPC listener to the loopback interface only, the worker id comes from the worker's environment, and there is no credential, because the loopback binding is the trust boundary.
 The worker runs in the server's network namespace: `network_mode: service:<server>` in Docker Compose, a sidecar container in Kubernetes.
-The plaintext listener never binds a non-loopback address in a shipped configuration; the bind address is configurable so tests can reach it from a container.
+The plaintext listener binds the loopback interface and nothing else; there is no setting for its address, and the server refuses to start if configuration names one.
+The listener accepts any caller that reaches it, and a caller presenting an existing worker id replaces that worker's connection and abandons its jobs, which is why reachability is the whole boundary.
+Tests reach the loopback listener from the test JVM through the contract stubs; container-based tests use the mutual-TLS listener.
 Mutual TLS with externally issued identities, as decided in ADR 0018, remains the only mode off-host.
 
 === One contract, owned by the server
@@ -46,11 +51,11 @@ Mutual TLS with externally issued identities, as decided in ADR 0018, remains th
 The server repository owns the proto file and keeps the Buf lint and breaking-change checks.
 On merge to main it pushes the module to the Buf Schema Registry as `buf.build/streamarr/transcode`, and the worker consumes it from there, as a module dependency or as the registry's generated Java SDK.
 There is no copy of the proto in the worker repository.
-Contract changes are additive, so an older worker keeps working against a newer server and the server deploys first.
+Contract changes are additive so that an older worker keeps decoding a newer server's messages; new operations are gated on advertised capabilities, and the server deploys first.
 
 === Tests cross the boundary through images
 
-The server's remote playback and recovery tests run against the published worker image with Testcontainers, pinned to an immutable version tag.
+The server's remote playback and recovery tests run against the published worker image with Testcontainers, over the mutual-TLS listener with test-issued certificates, pinned to an immutable version tag.
 A scripted `ffmpeg` mounted into the container keeps segment-precise fault injection; the worker already takes its FFmpeg path from the environment.
 The worker's own tests run against a scripted fake control plane built from the contract stubs.
 
@@ -72,6 +77,7 @@ Then issue #248 closes.
 Explicitly deferred:
 
 * A worker health and readiness endpoint for orchestrator probes.
+* A worker-free delivery path for compatible media, such as serving the file as-is.
 * Multiple control-plane replicas, as already deferred in ADR 0018.
 * Worker-to-client or object-store segment delivery.
 * An in-process worker mode inside the server.
@@ -83,6 +89,7 @@ Explicitly deferred:
 * The server image no longer needs FFmpeg; a change to FFmpeg handling is a worker release.
 * Cross-repository changes are sequenced by the additive-contract rule and the image pin.
 * The server's in-process worker tests become container tests, and a scripted `ffmpeg` replaces the fake process manager.
+* A new worker operation ships worker-first behind a capability, and the server checks the capability before dispatching; probing is the first.
 * This ADR supersedes ADR 0018's local execution decision (one engine, two execution adapters), its statement that distributed transcoding is optional and adds nothing to the default path, and its single image with separate process types. ADR 0018's live playback authority, outbound mutual-TLS sessions, workload identity, `MediaSourceRef`, and contract rules remain in force.
 * link:0004-processbuilder-over-jni.adoc[ADR 0004]'s single image with and without GPU now describes the worker image.
 
@@ -95,13 +102,16 @@ Explicitly deferred:
 * Keeping the engine in both repositories — the FFmpeg command builder is the most behavior-dense code in the system and would drift.
 * Server-issued identities for the co-located worker — ADR 0018 rejected an embedded certificate authority, and a bootstrap-only one is still one.
 * A pre-shared token or other credential on the loopback listener — adds a secret to the single-node installation for no gain over the loopback binding.
-* Probing on the playback path — direct play would depend on a worker connection.
+* Probing on the playback path — puts a worker round trip and a process spawn ahead of every playback start, and leaves scans without the data the library needs before playback.
+* A configurable bind address for the plaintext listener — an externally reachable listener with no credential lets any caller register as a worker or replace one, and tests do not need it.
+* Relying on additive schemas alone for rollout — Protobuf compatibility covers decoding; a worker that decodes a probe request it does not implement still never answers it.
 * Keeping ffprobe in the server — keeps the FFmpeg buildpack in both images and two copies of the runtime pin.
 * Publishing the worker as a Maven artifact so server tests keep an in-process worker — a registry for a test convenience.
 
 == References
 
 * link:0004-processbuilder-over-jni.adoc[ADR 0004: ProcessBuilder + FFmpeg Over JNI Bindings]
+* link:0007-transcode-first-with-smart-remux.adoc[ADR 0007: Transcode-First With Smart Remux]
 * link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018: Live Playback Authority and Outbound Transcode Workers]
 * link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019: Recoverable Just-In-Time HLS Segment Delivery]
 * link:0029-pin-jellyfin-ffmpeg-releases.adoc[ADR 0029: Pin Jellyfin FFmpeg Releases and Resolve Updates Before Building]
@@ -110,3 +120,4 @@ Explicitly deferred:
 * https://github.com/streamarr/streamarr-transcode-worker[streamarr-transcode-worker repository]
 * https://buf.build/docs/bsr/[Buf Schema Registry]
 * https://buf.build/docs/bsr/generated-sdks/maven/[Buf generated SDKs for Maven]
+* https://protobuf.dev/programming-guides/proto3/#updating[Protobuf: updating a message type]

@@ -34,7 +34,8 @@ These mirror ffprobe's own `format` and `streams` sections.
 
 Columns are typed.
 There is no raw ffprobe JSON column, because the worker contract of link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018] forbids JSON on the wire and a worker must be able to produce this record in full.
-There are no denormalized summary columns on the container row; the `MediaProbe` value that consumers use today is assembled on read by selecting the default video and audio streams.
+There are no denormalized summary columns on the container row; the `MediaProbe` value that consumers use today is assembled on read by selecting the streams the FFmpeg command maps, which today are the first video stream and the first audio stream (`0:v:0` and `0:a:0`).
+The summary and the command builder select the same tracks by construction; a summary built from the default-flagged streams could authorize copying one audio codec while FFmpeg copies another.
 A missing container row means the file has not been probed; nullable columns on `media_file` could not say that.
 
 "Metadata" stays reserved for descriptive data from TMDB, as in `library_metadata` and the `METADATA_NOT_FOUND` status.
@@ -45,6 +46,8 @@ These tables describe the file, not the title.
 Probing is a step of the file-processing pipeline, claimed and leased through `FileProcessingTaskCoordinator` like the other steps, and separate from matching and enrichment.
 A file that has finished processing always has its rows.
 The media file status gains `PROBED` and `PROBE_FAILED`.
+The producer returns the complete record: the container row and every stream row, with width, height, and frame rate on video streams and bitrate on any stream that reports one.
+`MediaProbe` is derived from that record for playback consumers and is no longer what the producer returns; today's `StreamInfo` carries no width, height, or frame rate and drops video bitrate, so the parser grows to fill the record.
 The producer today is the server's ffprobe; ADR 0033 moves it to the worker without changing the record.
 
 A file is probed again when the source file's size or modification time no longer matches the snapshot, when the row's `probe_version` is older than the current probe, or when an operator asks.
@@ -65,12 +68,14 @@ Explicitly deferred:
 * An operator-triggered probe mutation; Plex offers this as "Analyze".
 * Content hashing for change detection; size and modification time are the snapshot for now.
 * Probing over the worker session, which is ADR 0033.
+* Track selection other than the first video and first audio stream; it carries the selected stream indices through the decision, the worker contract, and the command builder.
 
 == Consequences
 
-* Playback start no longer spawns a process, and direct play needs nothing but the database.
+* Playback start no longer spawns a probe process.
+Playback still starts FFmpeg to remux or transcode into HLS (link:0007-transcode-first-with-smart-remux.adoc[ADR 0007]), so every playback needs a producer; after ADR 0033 that producer is a worker.
 * Stream session creation, the transcode decision, the quality ladder, playlist generation, watch progress, and session expiry change from calling probe to reading rows.
-* Two entities, `MediaFileContainerInfo` and `MediaFileStreamInfo`, and a mapping in each direction to `MediaProbe`, which stays the producer's output type.
+* Two entities, `MediaFileContainerInfo` and `MediaFileStreamInfo`; the probe producer returns the complete container-and-stream record, and `MediaProbe` is derived from rows for playback consumers.
 * The not-ready error is a new client-visible state, mostly during the upgrade backfill.
 * A new column costs a library-wide re-probe; the cost lands on background work and, after ADR 0033, on workers.
 * ADR 0013's pipeline reads its probe input from rows; the pipeline itself is unchanged.
@@ -86,6 +91,7 @@ Explicitly deferred:
 
 == References
 
+* link:0007-transcode-first-with-smart-remux.adoc[ADR 0007: Transcode-First With Smart Remux]
 * link:0013-stream-decision-architecture.adoc[ADR 0013: Stream Decision Architecture]
 * link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018: Live Playback Authority and Outbound Transcode Workers]
 * link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026: Mutations Return Payloads Whose Expected Errors Are Typed Unions]

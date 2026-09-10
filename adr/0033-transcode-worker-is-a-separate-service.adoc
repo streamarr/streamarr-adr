@@ -1,0 +1,112 @@
+= ADR 0033: The Transcode Worker Is a Separate Service and Repository, and the Server Runs No FFmpeg
+
+== Status
+
+Proposed
+
+== Context
+
+link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018] introduced outbound transcode workers and shipped the worker inside the server's repository and jar.
+One Maven module builds both, one image exposes a `web` and a `worker` process type, local playback runs FFmpeg inside the server, and remote workers are optional.
+
+Issue #248 proposed restoring a Maven reactor so the worker jar would physically exclude authentication, persistence, and web code, with a repository split deferred until the wire contract stabilized.
+Three things made that split hard.
+The FFmpeg engine, meaning the command builder, the process manager, and capability detection, is shared by the server's local execution path and the worker.
+The server's remote playback and recovery tests construct the real worker in-process.
+Both sides generate stubs from one proto file.
+
+The goal is an independently deployable and scalable worker in its own repository.
+Once the server runs no FFmpeg, nothing is shared but the contract, and no reactor or artifact registry is needed.
+
+== Decision
+
+The transcode worker is a separate service in the `streamarr/streamarr-transcode-worker` repository, published as the `streamarr/streamarr-transcode-worker` image, and the server executes no FFmpeg.
+
+=== The server runs no FFmpeg
+
+Transcoding and probing both run on workers.
+The local transcode executor, the local engine wiring, and the FFmpeg health indicator are removed from the server, and the `streaming.remote.enabled` switch is gone because remote execution is the only execution.
+The server's health reports worker connectivity instead of FFmpeg availability.
+Direct play never needs a worker, because it reads the rows of link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032].
+
+Probing is a request on the worker session, issued by the file-processing pipeline.
+It never runs on the playback path.
+The worker resolves the same `MediaSourceRef` it transcodes from, so it needs no new access.
+
+=== Every installation runs a worker
+
+A single-node installation runs a co-located worker.
+The server binds an opt-in plaintext gRPC listener to the loopback interface only, the worker id comes from the worker's environment, and there is no credential, because the loopback binding is the trust boundary.
+The worker runs in the server's network namespace: `network_mode: service:<server>` in Docker Compose, a sidecar container in Kubernetes.
+The plaintext listener never binds a non-loopback address in a shipped configuration; the bind address is configurable so tests can reach it from a container.
+Mutual TLS with externally issued identities, as decided in ADR 0018, remains the only mode off-host.
+
+=== One contract, owned by the server
+
+The server repository owns the proto file and keeps the Buf lint and breaking-change checks.
+On merge to main it pushes the module to the Buf Schema Registry as `buf.build/streamarr/transcode`, and the worker consumes it from there, as a module dependency or as the registry's generated Java SDK.
+There is no copy of the proto in the worker repository.
+Contract changes are additive, so an older worker keeps working against a newer server and the server deploys first.
+
+=== Tests cross the boundary through images
+
+The server's remote playback and recovery tests run against the published worker image with Testcontainers, pinned to an immutable version tag.
+A scripted `ffmpeg` mounted into the container keeps segment-precise fault injection; the worker already takes its FFmpeg path from the environment.
+The worker's own tests run against a scripted fake control plane built from the contract stubs.
+
+=== What moves
+
+The FFmpeg runtime of link:0029-pin-jellyfin-ffmpeg-releases.adoc[ADR 0029], meaning the buildpack, its lock, the notices, and the smoke tests, moves whole to the worker repository.
+The server image ships no FFmpeg.
+Hardware acceleration examples and device passthrough target the worker.
+The worker's history moves with `git filter-repo`.
+The worker stays a plain Java process; a framework may be adopted when something needs one.
+
+=== Order
+
+ADR 0032 lands first.
+Then, in the server repository and with the worker still inside it: the loopback listener, the probe request, and the removal of local execution.
+Then the package move and the repository split.
+Then issue #248 closes.
+
+Explicitly deferred:
+
+* A worker health and readiness endpoint for orchestrator probes.
+* Multiple control-plane replicas, as already deferred in ADR 0018.
+* Worker-to-client or object-store segment delivery.
+* An in-process worker mode inside the server.
+
+== Consequences
+
+* A single-node installation runs two processes; the default Compose file and the Kubernetes example include the worker, and the development loop needs a worker container for playback and scans.
+* The two executor paths collapse to one, so the scale-out path is the only path and is always exercised.
+* The server image no longer needs FFmpeg; a change to FFmpeg handling is a worker release.
+* Cross-repository changes are sequenced by the additive-contract rule and the image pin.
+* The server's in-process worker tests become container tests, and a scripted `ffmpeg` replaces the fake process manager.
+* This ADR supersedes ADR 0018's local execution decision (one engine, two execution adapters), its statement that distributed transcoding is optional and adds nothing to the default path, and its single image with separate process types. ADR 0018's live playback authority, outbound mutual-TLS sessions, workload identity, `MediaSourceRef`, and contract rules remain in force.
+* link:0004-processbuilder-over-jni.adoc[ADR 0004]'s single image with and without GPU now describes the worker image.
+
+== Rejected Alternatives
+
+* A Maven reactor in the server repository, as issue #248 proposed — makes the jar boundary load-bearing but leaves the engine shared, so a later repository split still needs a Maven registry.
+* Publishing the engine and contract as Maven artifacts, on Maven Central, GitHub Packages, or JitPack — a registry and a cross-repository version dance for code that only exists because the server ran FFmpeg.
+* Copying the proto into the worker repository with a drift check — Buf's registry exists for exactly this, and copying is the pattern it discourages.
+* A separate proto repository — the googleapis pattern earns its keep with many producers; here there is one.
+* Keeping the engine in both repositories — the FFmpeg command builder is the most behavior-dense code in the system and would drift.
+* Server-issued identities for the co-located worker — ADR 0018 rejected an embedded certificate authority, and a bootstrap-only one is still one.
+* A pre-shared token or other credential on the loopback listener — adds a secret to the single-node installation for no gain over the loopback binding.
+* Probing on the playback path — direct play would depend on a worker connection.
+* Keeping ffprobe in the server — keeps the FFmpeg buildpack in both images and two copies of the runtime pin.
+* Publishing the worker as a Maven artifact so server tests keep an in-process worker — a registry for a test convenience.
+
+== References
+
+* link:0004-processbuilder-over-jni.adoc[ADR 0004: ProcessBuilder + FFmpeg Over JNI Bindings]
+* link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018: Live Playback Authority and Outbound Transcode Workers]
+* link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019: Recoverable Just-In-Time HLS Segment Delivery]
+* link:0029-pin-jellyfin-ffmpeg-releases.adoc[ADR 0029: Pin Jellyfin FFmpeg Releases and Resolve Updates Before Building]
+* link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032: Media File Probe Results Are Persisted and Playback Reads Them]
+* https://github.com/streamarr/streamarr-server/issues/248[Issue #248: Restore Maven reactor]
+* https://github.com/streamarr/streamarr-transcode-worker[streamarr-transcode-worker repository]
+* https://buf.build/docs/bsr/[Buf Schema Registry]
+* https://buf.build/docs/bsr/generated-sdks/maven/[Buf generated SDKs for Maven]

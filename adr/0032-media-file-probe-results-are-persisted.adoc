@@ -8,55 +8,60 @@ Proposed
 
 Streamarr learns a media file's technical properties by running ffprobe.
 link:0013-stream-decision-architecture.adoc[ADR 0013] describes the pipeline as probe, decide per stream, compose, resolve mode, build command.
-Today the probe runs when a stream session is created, once per session, and the result lives only in memory for the life of that session.
-The `media_file` table stores a filename, a path, and a size, and nothing about what is inside the file.
+Today ffprobe runs once per stream session, and the result stays in memory for that session's lifetime.
+The `media_file` table stores the filename, path, and size, but no container or stream properties.
 
-Every playback start therefore spawns a process before it can decide anything.
+Every playback start therefore waits for a probe process before making a transcode decision.
 The transcode decision, the quality ladder, the master and media playlists, watch progress, and session expiry all read that in-memory result.
 
-A file's container and streams are facts about the file.
-They change only when the file changes, so they belong with the file record and are best produced when the library processes the file.
-Playback decisions and library views can then read them with a query instead of a process, and re-probing becomes a background operation with an explicit trigger.
+Container and stream properties belong to the media file and can be collected during library processing.
+Persisting them lets playback decisions and library views read them from the database, with re-probing handled in the background.
 
 link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033] removes FFmpeg from the server.
-Probing has to leave the playback path before that can happen, and the record this ADR defines is what a worker will fill in later.
+This ADR first moves probing into library processing and defines the result that workers will later produce.
 
 == Decision
 
-Probe results are persisted per media file in two tables, produced by a probe step in the file-processing pipeline, and every playback-time consumer reads them instead of running ffprobe.
+Persist each media file's probe result in two tables.
+A probe step in the file-processing pipeline produces the result.
+Playback consumers read the stored data.
 
 === The tables
 
 `media_file_container_info` holds one row per media file: container format name, duration, total bitrate, a snapshot of the source file's size and modification time, and `probe_version`.
 `media_file_stream_info` holds one row per stream: stream type, index, codec, width, height, frame rate, channels, bitrate, language, and the default and forced flags.
-These mirror ffprobe's own `format` and `streams` sections.
+The tables correspond to ffprobe's `format` and `streams` sections.
 
-Columns are typed.
-There is no raw ffprobe JSON column, because the worker contract of link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018] forbids JSON on the wire and a worker must be able to produce this record in full.
-There are no denormalized summary columns on the container row; the `MediaProbe` value that consumers use today is assembled on read by selecting the streams the FFmpeg command maps, which today are the first video stream and the first audio stream (`0:v:0` and `0:a:0`).
-The summary and the command builder select the same tracks by construction; a summary built from the default-flagged streams could authorize copying one audio codec while FFmpeg copies another.
-A missing container row means the file has not been probed; nullable columns on `media_file` could not say that.
+Store typed columns without a raw ffprobe JSON column.
+Workers must produce the complete result through ADR 0018's typed contract, which excludes JSON on the wire.
+Derive the playback `MediaProbe` from the stream rows rather than storing summary fields on the container row.
+The summary uses the same tracks as the FFmpeg command: the first video stream and the first audio stream (`0:v:0` and `0:a:0`).
+Selecting default-flagged tracks for the summary could authorize copying one audio codec while FFmpeg copies another.
+A missing container row distinguishes an unprobed file from a probed file with unknown properties.
 
-"Metadata" stays reserved for descriptive data from TMDB, as in `library_metadata` and the `METADATA_NOT_FOUND` status.
-These tables describe the file, not the title.
+The term "metadata" is reserved for descriptive data from TMDB.
+Examples include `library_metadata` and the `METADATA_NOT_FOUND` status.
 
 === The probe step
 
-Probing is a step of the file-processing pipeline, claimed and leased through `FileProcessingTaskCoordinator` like the other steps, and separate from matching and enrichment.
-A file that has finished processing always has its rows.
+Run probing as a file-processing step, separate from matching and enrichment, with tasks claimed and leased through `FileProcessingTaskCoordinator`.
+File processing is complete only when the probe rows exist.
 The media file status gains `PROBED` and `PROBE_FAILED`.
-The producer returns the complete record: the container row and every stream row, with width, height, and frame rate on video streams and bitrate on any stream that reports one.
-`MediaProbe` is derived from that record for playback consumers and is no longer what the producer returns; today's `StreamInfo` carries no width, height, or frame rate and drops video bitrate, so the parser grows to fill the record.
-The producer today is the server's ffprobe; ADR 0033 moves it to the worker without changing the record.
+The producer returns the complete container-and-stream result, including width, height, and frame rate for video streams and bitrate for any stream that reports it.
+Replace `MediaProbe` as the producer's return type and derive it from the complete result for playback consumers.
+Extend the parser to retain the per-stream dimensions, frame rate, and video bitrate that today's `StreamInfo` omits.
+The server initially runs ffprobe.
+ADR 0033 moves execution to the worker using the same result contract.
 
 A file is probed again when the source file's size or modification time no longer matches the snapshot, when the row's `probe_version` is older than the current probe, or when an operator asks.
-Adding a column means bumping `probe_version`; the bump is what re-probes the library, and nothing else does.
+Adding a probe column requires a `probe_version` bump to trigger a library-wide re-probe.
 
 === Playback of an unprobed file
 
 A playback request for a file without a container row returns a typed not-ready error in the mutation payload, per link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026].
-The server publishes `MediaFileProbeRequested(mediaFileId)` in `services.events.library`, and the library listener enqueues a probe task with `ON CONFLICT DO NOTHING`, so a burst of attempts yields one task.
-Nothing probes on the request thread, and the server never probes on demand on the playback path.
+The server publishes `MediaFileProbeRequested(mediaFileId)` in `services.events.library`.
+The library listener enqueues a probe task with `ON CONFLICT DO NOTHING`, so concurrent attempts create one task.
+Probing runs only through background file processing.
 
 Upgrading an existing installation enqueues a probe for every media file without a container row.
 Until that backlog drains, playback of an unprobed file returns the not-ready error.
@@ -65,28 +70,33 @@ Explicitly deferred:
 
 * Exposing container and stream info in GraphQL, for example codec badges.
 * An operator-triggered probe mutation.
-* Content hashing for change detection; size and modification time are the snapshot for now.
+* Content hashing for change detection.
+The snapshot currently uses file size and modification time.
 * Probing over the worker session, which is ADR 0033.
-* Track selection other than the first video and first audio stream; it carries the selected stream indices through the decision, the worker contract, and the command builder.
+* Track selection other than the first video and first audio stream.
+Selecting other tracks requires carrying their indices through the decision, worker contract, and command builder.
 
 == Consequences
 
 * Playback start no longer spawns a probe process.
-Playback still starts FFmpeg to remux or transcode into HLS (link:0007-transcode-first-with-smart-remux.adoc[ADR 0007]), so every playback needs a producer; after ADR 0033 that producer is a worker.
-* Stream session creation, the transcode decision, the quality ladder, playlist generation, watch progress, and session expiry change from calling probe to reading rows.
-* Two entities, `MediaFileContainerInfo` and `MediaFileStreamInfo`; the probe producer returns the complete container-and-stream record, and `MediaProbe` is derived from rows for playback consumers.
+Playback still starts FFmpeg to remux or transcode into HLS (link:0007-transcode-first-with-smart-remux.adoc[ADR 0007]).
+Every playback needs a producer.
+After ADR 0033, that producer is a worker.
+* Playback consumers use a `MediaProbe` derived from stored rows instead of a probe process result.
+* Persistence adds two entities, `MediaFileContainerInfo` and `MediaFileStreamInfo`, and a mapping from the complete probe result to those rows.
 * The not-ready error is a new client-visible state, mostly during the upgrade backfill.
-* A new column costs a library-wide re-probe; the cost lands on background work and, after ADR 0033, on workers.
-* ADR 0013's pipeline reads its probe input from rows; the pipeline itself is unchanged.
+* Each new probe column requires a library-wide re-probe, performed in the background and, after ADR 0033, by workers.
+* ADR 0013's pipeline reads its probe input from rows.
+The pipeline itself is unchanged.
 
 == Rejected Alternatives
 
-* Probe on demand when playback finds no row — keeps FFmpeg on the playback path that ADR 0033 removes and hides pipeline gaps behind a slow first play.
-* Store raw ffprobe JSON beside the typed columns — the wire contract bans JSON, so a remote probe could never fill it.
-* Denormalized summary columns on the container row — width and codec belong to streams, and the read cost at this scale does not justify two copies.
-* Columns on `media_file` — nullable columns cannot distinguish not yet probed from probed and unknown.
+* Probe on demand when playback finds no row — adds a process wait to playback startup and makes playback responsible for missing library analysis.
+* Store raw ffprobe JSON beside the typed columns — adds a second representation while playback and the worker contract use typed fields.
+* Denormalized summary columns on the container row — duplicates stream properties and requires keeping both copies consistent to avoid a read-time lookup.
+* Columns on `media_file` — nullable properties alone do not distinguish an unprobed file from a probed file with unknown values.
 * Names `media_analysis`, `media_file_analysis`, and `media_file_metadata` — "media" means the collectable in this schema, "analysis" names the step rather than the row, and "metadata" is TMDB's.
-* Pure Java probing libraries — codec coverage across MKV, HEVC, Dolby Vision, and audio channel layouts is not credible without FFmpeg.
+* Pure Java probing libraries — replacing ffprobe would require validating equivalent support for MKV, HEVC, Dolby Vision, and audio channel layouts.
 
 == References
 

@@ -55,3 +55,4 @@ Throwaway prototypes whose conclusion an ADR depends on live in [`spikes/`](spik
 - [ADR 0031: Artwork Replacement Uses a Bounded Transaction-Scoped Advisory Lock](adr/0031-transaction-scoped-artwork-replacement-locking.adoc)
 - [ADR 0032: Media File Probe Results Are Persisted and Playback Reads Them](adr/0032-media-file-probe-results-are-persisted.adoc)
 - [ADR 0033: The Transcode Worker Is a Separate Service and Repository, and the Server Runs No FFmpeg](adr/0033-transcode-worker-is-a-separate-service.adoc)
+- [ADR 0034: Release Please Owns Maven Release Versions](adr/0034-release-please-owns-maven-release-versions.adoc)

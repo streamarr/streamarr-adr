@@ -30,12 +30,15 @@ The server executes no FFmpeg.
 
 Transcoding and probing both run on workers.
 Remove the server's local transcode executor, engine wiring, FFmpeg health indicator, and `streaming.remote.enabled` switch.
-The server's aggregate health reports worker connectivity.
+Retain `TranscodeExecutorHealthIndicator` to report worker connectivity.
+It reports `DOWN` when no workers are connected and continues to affect `/actuator/health`.
 Every playback needs a worker, including compatible media that FFmpeg remuxes into HLS (link:0007-transcode-first-with-smart-remux.adoc[ADR 0007]).
 
 The file-processing pipeline requests probes over the worker session, outside the playback path, as defined in link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032].
 The worker resolves the source through the same `MediaSourceRef` and mount mapping used for transcoding.
 It advertises probe support at registration, and the server sends probe requests only to workers advertising that capability.
+Probe capabilities identify the result versions the worker can produce.
+The server requests a supported `probe_version` and accepts a result only for the version requested by the task claim.
 A worker without probe support can still transcode.
 
 === Media access
@@ -68,6 +71,9 @@ The server continues to assign jobs through the worker session using advertised 
 Kubernetes readiness does not control job dispatch.
 
 Server liveness and readiness remain independent of worker availability.
+The server Deployment uses `/actuator/health/liveness` for startup and liveness probes and `/actuator/health/readiness` for readiness probes.
+Neither group includes `TranscodeExecutorHealthIndicator`.
+Configuration tests preserve this exclusion, which Spring Boot's default group membership provides today.
 The server's Service must remain reachable so workers can establish sessions when no workers are connected.
 
 === Kubernetes installations
@@ -90,6 +96,12 @@ The default Compose configuration enables the loopback listener.
 The Kubernetes example enables only the mutual-TLS listener.
 Enabling mutual TLS requires an externally issued certificate, private key, and trust bundle.
 The server refuses to start if neither worker-session listener is enabled.
+The `dev` profile enables the loopback listener.
+
+Worker-session listener ports and the worker health port are configurable.
+Tests may request port `0` and retrieve the bound port after startup.
+Shared configuration for full application tests enables loopback on an ephemeral port.
+Narrow test contexts that omit listener configuration do not start a listener.
 
 === Colocated installations
 
@@ -100,7 +112,7 @@ The plaintext gRPC listener accepts the worker's connection on the server's loop
 The worker reads its id from the environment.
 The listener requires no credential and trusts callers that can reach the loopback interface.
 The bind address is fixed and non-configurable.
-An integration test verifies that the listener binds only to loopback and rejects connections through non-loopback interfaces.
+An integration test verifies that the listener binds only to loopback and is unreachable through the server's non-loopback addresses.
 A caller presenting an existing worker id replaces that worker's connection and abandons its jobs, so the loopback restriction is part of the trust boundary.
 Tests reach the loopback listener from the test JVM through the contract stubs.
 Container-based tests use the mutual-TLS listener.
@@ -150,6 +162,7 @@ Issue #77 explores Apache OpenDAL as a possible implementation.
 * Multiple control-plane replicas, as already deferred in ADR 0018.
 * Worker-to-client or object-store segment delivery.
 * An in-process worker mode inside the server.
+* Making aggregate health independent of worker availability.
 
 == Consequences
 
@@ -167,6 +180,8 @@ Probing is the first such operation.
 It also narrows ADR 0018's no-inbound-port statement to allow a worker port solely for orchestrator health checks.
 ADR 0018's live playback authority, outbound mutual-TLS sessions, workload identity, `MediaSourceRef`, and contract rules remain in force.
 * link:0004-processbuilder-over-jni.adoc[ADR 0004]'s single image with and without GPU now describes the worker image.
+* link:0020-tmdb-reachability-does-not-gate-aggregate-health.adoc[ADR 0020]'s aggregate-health deferral now concerns worker connectivity through `TranscodeExecutorHealthIndicator`.
+The local FFmpeg contributor is removed, while worker connectivity continues to affect aggregate health.
 
 == Rejected Alternatives
 
@@ -191,6 +206,7 @@ The contract is published through Buf.
 * link:0007-transcode-first-with-smart-remux.adoc[ADR 0007: Transcode-First With Smart Remux]
 * link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018: Live Playback Authority and Outbound Transcode Workers]
 * link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019: Recoverable Just-In-Time HLS Segment Delivery]
+* link:0020-tmdb-reachability-does-not-gate-aggregate-health.adoc[ADR 0020: TMDB Reachability Does Not Gate Aggregate Health]
 * link:0027-library-work-claimed-in-database-single-instance.adoc[ADR 0027: Library Scan and Refresh Are Claimed Atomically in the Database and Run on a Single Instance]
 * link:0029-pin-jellyfin-ffmpeg-releases.adoc[ADR 0029: Pin Jellyfin FFmpeg Releases and Resolve Updates Before Building]
 * link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032: Media File Probe Results Are Persisted and Playback Reads Them]

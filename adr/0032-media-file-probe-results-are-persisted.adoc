@@ -1,0 +1,95 @@
+= ADR 0032: Media File Probe Results Are Persisted and Playback Reads Them
+
+== Status
+
+Proposed
+
+== Context
+
+Streamarr learns a media file's technical properties by running ffprobe.
+link:0013-stream-decision-architecture.adoc[ADR 0013] describes the pipeline as probe, decide per stream, compose, resolve mode, build command.
+Today the probe runs when a stream session is created, once per session, and the result lives only in memory for the life of that session.
+The `media_file` table stores a filename, a path, and a size, and nothing about what is inside the file.
+
+Every playback start therefore spawns a process before it can decide anything.
+The transcode decision, the quality ladder, the master and media playlists, watch progress, and session expiry all read that in-memory result.
+
+Plex and Jellyfin both probe during library analysis and store the result.
+Plex keeps a per-file summary in `media_items` and one row per stream in `media_streams`.
+Jellyfin keeps one row per stream in `MediaStreamInfos` and the summary on the item.
+In both, playback decisions read rows, and re-analysis is an explicit background operation.
+
+link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033] removes FFmpeg from the server.
+Probing has to leave the playback path before that can happen, and the record this ADR defines is what a worker will fill in later.
+
+== Decision
+
+Probe results are persisted per media file in two tables, produced by a probe step in the file-processing pipeline, and every playback-time consumer reads them instead of running ffprobe.
+
+=== The tables
+
+`media_file_container_info` holds one row per media file: container format name, duration, total bitrate, a snapshot of the source file's size and modification time, and `probe_version`.
+`media_file_stream_info` holds one row per stream: stream type, index, codec, width, height, frame rate, channels, bitrate, language, and the default and forced flags.
+These mirror ffprobe's own `format` and `streams` sections.
+
+Columns are typed.
+There is no raw ffprobe JSON column, because the worker contract of link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018] forbids JSON on the wire and a worker must be able to produce this record in full.
+There are no denormalized summary columns on the container row; the `MediaProbe` value that consumers use today is assembled on read by selecting the default video and audio streams.
+A missing container row means the file has not been probed; nullable columns on `media_file` could not say that.
+
+"Metadata" stays reserved for descriptive data from TMDB, as in `library_metadata` and the `METADATA_NOT_FOUND` status.
+These tables describe the file, not the title.
+
+=== The probe step
+
+Probing is a step of the file-processing pipeline, claimed and leased through `FileProcessingTaskCoordinator` like the other steps, and separate from matching and enrichment.
+A file that has finished processing always has its rows.
+The media file status gains `PROBED` and `PROBE_FAILED`.
+The producer today is the server's ffprobe; ADR 0033 moves it to the worker without changing the record.
+
+A file is probed again when the source file's size or modification time no longer matches the snapshot, when the row's `probe_version` is older than the current probe, or when an operator asks.
+Adding a column means bumping `probe_version`; the bump is what re-probes the library, and nothing else does.
+
+=== Playback of an unprobed file
+
+A playback request for a file without a container row returns a typed not-ready error in the mutation payload, per link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026].
+The server publishes `MediaFileProbeRequested(mediaFileId)` in `services.events.library`, and the library listener enqueues a probe task with `ON CONFLICT DO NOTHING`, so a burst of attempts yields one task.
+Nothing probes on the request thread, and the server never probes on demand on the playback path.
+
+Upgrading an existing installation enqueues a probe for every media file without a container row.
+Until that backlog drains, playback of an unprobed file returns the not-ready error.
+
+Explicitly deferred:
+
+* Exposing container and stream info in GraphQL, for example codec badges.
+* An operator-triggered probe mutation; Plex offers this as "Analyze".
+* Content hashing for change detection; size and modification time are the snapshot for now.
+* Probing over the worker session, which is ADR 0033.
+
+== Consequences
+
+* Playback start no longer spawns a process, and direct play needs nothing but the database.
+* Stream session creation, the transcode decision, the quality ladder, playlist generation, watch progress, and session expiry change from calling probe to reading rows.
+* Two entities, `MediaFileContainerInfo` and `MediaFileStreamInfo`, and a mapping in each direction to `MediaProbe`, which stays the producer's output type.
+* The not-ready error is a new client-visible state, mostly during the upgrade backfill.
+* A new column costs a library-wide re-probe; the cost lands on background work and, after ADR 0033, on workers.
+* ADR 0013's pipeline reads its probe input from rows; the pipeline itself is unchanged.
+
+== Rejected Alternatives
+
+* Probe on demand when playback finds no row — keeps FFmpeg on the playback path that ADR 0033 removes and hides pipeline gaps behind a slow first play.
+* Store raw ffprobe JSON beside the typed columns — the wire contract bans JSON, so a remote probe could never fill it.
+* Denormalized summary columns on the container row, as Plex does — width and codec belong to streams, and the read cost at this scale does not justify two copies.
+* Columns on `media_file` — nullable columns cannot distinguish not yet probed from probed and unknown.
+* Names `media_analysis`, `media_file_analysis`, and `media_file_metadata` — "media" means the collectable in this schema, "analysis" names the step rather than the row, and "metadata" is TMDB's.
+* Pure Java probing libraries — codec coverage across MKV, HEVC, Dolby Vision, and audio channel layouts is not credible without FFmpeg.
+
+== References
+
+* link:0013-stream-decision-architecture.adoc[ADR 0013: Stream Decision Architecture]
+* link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018: Live Playback Authority and Outbound Transcode Workers]
+* link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026: Mutations Return Payloads Whose Expected Errors Are Typed Unions]
+* link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033: The Transcode Worker Is a Separate Service and Repository]
+* https://ffmpeg.org/ffprobe.html[ffprobe documentation]
+* https://github.com/jellyfin/jellyfin/blob/master/src/Jellyfin.Database/Jellyfin.Database.Implementations/Entities/MediaStreamInfo.cs[Jellyfin `MediaStreamInfo` entity]
+* https://github.com/streamarr/streamarr-server/issues/248[Issue #248: Restore Maven reactor]

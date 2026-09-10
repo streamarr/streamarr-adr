@@ -1,0 +1,210 @@
+= ADR 0032: Media File Probe Results Are Persisted and Playback Reads Them
+
+== Status
+
+Proposed
+
+== Context
+
+Streamarr learns a media file's technical properties by running ffprobe.
+link:0013-stream-decision-architecture.adoc[ADR 0013] describes the pipeline as probe, decide per stream, compose, resolve mode, build command.
+Today ffprobe runs once per stream session, and the result stays in memory for that session's lifetime.
+The `media_file` table stores the filename, path, and size, but no container or stream properties.
+
+Every playback start therefore waits for a probe process before making a transcode decision.
+The transcode decision, the quality ladder, the master and media playlists, watch progress, and session expiry all read that in-memory result.
+
+Container and stream properties belong to the media file and can be collected during library processing.
+Persisting them lets playback decisions and library views read them from the database, with re-probing handled in the background.
+
+Bulk scans call the file processors directly.
+The watcher creates per-file tasks but processes files inline.
+`FileProcessingTaskCoordinator` exposes claim and recovery methods without a production dispatcher.
+Its lease heartbeat already runs through Spring scheduling.
+
+link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033] removes FFmpeg from the server.
+This ADR first moves probing into library processing and defines the result that workers will later produce.
+
+== Decision
+
+Persist each media file's probe result in two tables.
+A probe step in the file-processing pipeline produces the result.
+Playback consumers read the stored data.
+
+=== The tables
+
+`media_file_container_info` holds one row per media file: container format name, duration, total bitrate, a snapshot of the source file's size and modification time, `probe_version`, and an optional typed `probe_error` code.
+`media_file_stream_info` holds one row per stream: stream type, index, codec, width, height, frame rate, channels, bitrate, language, and the default and forced flags.
+The tables correspond to ffprobe's `format` and `streams` sections.
+Container properties and `probe_error` are nullable.
+The media file reference, source size, modification time, and `probe_version` are required.
+
+A missing container row means no completed probe outcome is available.
+A row without `probe_error` records a successful probe, even when some properties are unknown.
+A row with `probe_error` records a terminal media error and has no stream rows or container properties.
+Both outcomes retain the source snapshot and `probe_version`.
+Matching and enrichment continue to use `media_file.status` without new probe status values.
+
+Store typed columns without a raw ffprobe JSON column.
+Workers must produce the complete result through ADR 0018's typed contract, which excludes JSON on the wire.
+Derive the playback `MediaProbe` from the stream rows rather than storing summary fields on the container row.
+The summary uses the same tracks as the FFmpeg command: the first video stream and the first audio stream (`0:v:0` and `0:a:0`).
+Selecting default-flagged tracks for the summary could authorize copying one audio codec while FFmpeg copies another.
+
+The term "metadata" is reserved for descriptive data from TMDB.
+Examples include `library_metadata` and the `METADATA_NOT_FOUND` status.
+
+=== Scheduling and scan completion
+
+A shared library collaborator checks whether a file needs probing during scans and watcher processing.
+Call it before `LibraryManagementService.processFile` returns for a file already marked `MATCHED`.
+It schedules required probe work independently of matching and enrichment outcomes.
+Matching and enrichment retain their existing execution paths.
+Rename the existing `LibraryManagementService.probeFile` method to `findOrCreateMediaFile`.
+That method finds or creates the media file row and does not run ffprobe.
+
+Every probe executes through a per-file task claimed through `FileProcessingTaskCoordinator`.
+Scans, watcher events, playback requests, and upgrade backfill use the same enqueue operation.
+Use `ON CONFLICT DO NOTHING` against the existing partial unique index on active `file_processing_task.filepath_uri` rows.
+The dispatcher runs the probe step without repeating matching or enrichment.
+The watcher no longer creates, completes, or fails these tasks around its inline processing.
+The shared collaborator schedules them and the dispatcher owns their execution.
+
+A scan completes after enumeration, matching, and enrichment attempts finish and all required probe work is durably enqueued.
+If enqueueing fails, the scan fails through link:0027-library-work-claimed-in-database-single-instance.adoc[ADR 0027]'s failure path.
+The library status continues to describe the scan operation defined by link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026] and ADR 0027.
+A completed scan may have pending probe work and does not guarantee playback readiness.
+
+=== The probe step
+
+Add a background dispatcher in this ADR's implementation, before moving execution to workers in ADR 0033.
+It claims due tasks, executes probes, and recovers expired claims.
+Recovery does not bypass the retry time of a pending task.
+The per-file task completes only when an outcome exists for its requested source snapshot and `probe_version`.
+The dispatcher checks probe need again after claiming the task.
+It waits for source stability before probing.
+
+On success, the producer returns the complete container-and-stream result, including width, height, and frame rate for video streams and bitrate for any stream that reports it.
+On terminal media failure, it returns a typed error.
+Replace `MediaProbe` as the producer's return type and derive it from the complete result for playback consumers.
+Extend the parser to retain the per-stream dimensions, frame rate, and video bitrate that today's `StreamInfo` omits.
+The server initially runs ffprobe.
+ADR 0033 moves execution to the worker using the same result contract.
+
+=== Source changes and probe versions
+
+Compare file size and modification time with the stored snapshot during library scans and file processing triggered by watcher events.
+When the source snapshot differs, delete the stored outcome and its stream rows and schedule a new probe.
+The cache is then unavailable for playback until a new outcome is recorded.
+
+A `probe_version` bump schedules older outcomes for background refresh.
+An older successful result remains available for playback while the current implementation can safely interpret it and its source snapshot still matches.
+Keep that result until its replacement is published atomically.
+Changes to required fields or their interpretation must invalidate incompatible outcomes in the migration that introduces the change.
+The migration deletes the affected container and stream rows and documents the playback restriction until they are rebuilt.
+This includes corrections to codec or stream-selection data, even when no column is added.
+Adding a probe column requires a `probe_version` bump to trigger a library-wide re-probe.
+Skip probing while the stored success or terminal media error matches the source snapshot and requested version.
+Older terminal errors are refreshed by the same backfill as older successful results.
+
+=== Claim ownership and publication
+
+Persist a fresh claim id whenever a task is claimed or reclaimed.
+The claim identifies one execution attempt and records its expected source snapshot and requested `probe_version`.
+The process instance id alone does not identify an attempt.
+
+Read the source snapshot before and after probing.
+Discard the result and reschedule processing if the snapshot changes during the probe.
+Compare snapshots for equality.
+File size and modification time do not establish which execution is newer.
+
+Publish an outcome in one transaction that verifies the task is `PROCESSING`, its claim id is current, and its lease has not expired.
+The result's snapshot and version must match the claim's expected inputs.
+That transaction replaces the container outcome and stream rows and completes the task.
+Claim validation and publication are one atomic database operation, not a check followed by an unguarded write.
+Completion without probing, failure, and rescheduling require the same current-claim checks.
+An execution that loses its claim cannot change the outcome or task state.
+
+Source invalidation and task input changes use the same transaction protocol as publication.
+They revoke a claim for obsolete inputs and leave one pending task for the requested inputs.
+An enqueue conflict must not discard a detected input change.
+The scheduled heartbeat renews only current, unexpired claims that the dispatcher is still executing.
+It cannot revive an expired or superseded claim.
+Run file I/O and probing outside database transactions.
+
+=== Transient failures
+
+Temporary storage errors are transient execution failures.
+After ADR 0033, worker unavailability and session loss are also transient execution failures.
+Record these failures and the next retry time on the per-file task without writing a terminal `probe_error`.
+Return the task to `PENDING` through the guarded rescheduling operation and let the dispatcher claim it when the retry is due.
+Use capped backoff without requiring a file change or version bump.
+Keep one active task per file path during retries.
+Schedule retries without holding a task lease or database transaction across the delay.
+
+=== Playback and upgrade backfill
+
+A playback request for a file without a usable probe outcome returns a typed not-ready error in the mutation payload, per ADR 0026.
+The server publishes `MediaFileProbeRequested(mediaFileId)` in `services.events.library`.
+The library listener uses the shared enqueue operation.
+Probing runs only through background file processing.
+
+Playback of a file with a retained terminal `probe_error` returns that failure as a typed mutation payload error.
+It does not enqueue another task.
+
+Upgrading an existing installation uses the same enqueue operation for every media file without a container row or with an older `probe_version`.
+Playback continues to use compatible older successful results while that backfill runs.
+
+Integration tests cover concurrent enqueueing from scans and watchers, matched-file backfill, scan failure when enqueueing fails, and playback during compatible refresh.
+They also prove that an expired or superseded attempt cannot publish, complete, fail, reschedule, or renew a reclaimed task.
+
+Explicitly deferred:
+
+* Exposing container and stream info in GraphQL, for example codec badges.
+* A mutation that lets a ServerAdmin request re-probing.
+* Content hashing for change detection.
+The snapshot currently uses file size and modification time.
+* Probing over the worker session, which is ADR 0033.
+* Track selection other than the first video and first audio stream.
+Selecting other tracks requires carrying their indices through the decision, worker contract, and command builder.
+
+== Consequences
+
+* Playback start no longer spawns a probe process.
+Playback still starts FFmpeg to remux or transcode into HLS (link:0007-transcode-first-with-smart-remux.adoc[ADR 0007]).
+Every playback needs a producer.
+After ADR 0033, that producer is a worker.
+* Playback consumers use a `MediaProbe` derived from stored rows instead of a probe process result.
+* Persistence adds two entities, `MediaFileContainerInfo` and `MediaFileStreamInfo`, and a mapping from the complete probe result to those rows.
+* Playback exposes typed errors for unavailable probe data and recorded terminal media failures.
+Transient execution failures remain retryable background work.
+The task coordinator gains a dispatcher and persisted retry scheduling.
+Task transitions and result publication reject expired or superseded claims.
+* Scan completion and probe completion are separate.
+The scan waits for durable scheduling, while playback readiness depends on the stored probe outcome.
+* Each new probe column requires a library-wide re-probe, performed in the background and, after ADR 0033, by workers.
+Compatible outcomes remain usable during refresh.
+Migrations that invalidate incompatible outcomes temporarily block playback for the affected files.
+* ADR 0013's pipeline reads its probe input from rows.
+The pipeline itself is unchanged.
+
+== Rejected Alternatives
+
+* Probe on demand when playback finds no row — adds a process wait to playback startup and makes playback responsible for missing library analysis.
+* Store raw ffprobe JSON beside the typed columns — adds a second representation while playback and the worker contract use typed fields.
+* Denormalized summary columns on the container row — duplicates stream properties and requires keeping both copies consistent to avoid a read-time lookup.
+* Probe outcomes in `media_file.status` — matching and probing can succeed or fail independently, so one status cannot preserve both outcomes.
+* Columns on `media_file` — nullable properties alone do not distinguish an unprobed file from a probed file with unknown values.
+* Names `media_analysis`, `media_file_analysis`, and `media_file_metadata` — "media" means the collectable in this schema, "analysis" names the step rather than the row, and "metadata" is TMDB's.
+* Pure Java probing libraries — replacing ffprobe would require validating equivalent support for MKV, HEVC, Dolby Vision, and audio channel layouts.
+
+== References
+
+* link:0007-transcode-first-with-smart-remux.adoc[ADR 0007: Transcode-First With Smart Remux]
+* link:0013-stream-decision-architecture.adoc[ADR 0013: Stream Decision Architecture]
+* link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018: Live Playback Authority and Outbound Transcode Workers]
+* link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026: Mutations Return Payloads Whose Expected Errors Are Typed Unions]
+* link:0027-library-work-claimed-in-database-single-instance.adoc[ADR 0027: Library Scan and Refresh Are Claimed Atomically in the Database and Run on a Single Instance]
+* link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033: The Transcode Worker Is a Separate Service and Repository]
+* https://ffmpeg.org/ffprobe.html[ffprobe documentation]
+* https://github.com/streamarr/streamarr-server/issues/248[Issue #248: Restore Maven reactor]

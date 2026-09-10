@@ -53,3 +53,5 @@ Throwaway prototypes whose conclusion an ADR depends on live in [`spikes/`](spik
 - [ADR 0029: Pin Jellyfin FFmpeg Releases and Resolve Updates Before Building](adr/0029-pin-jellyfin-ffmpeg-releases.adoc)
 - [ADR 0030: Credential Attempts Use PostgreSQL Time and Pairing Successes Preserve Failures](adr/0030-credential-budgets-use-shared-time-and-explicit-success-reset.adoc)
 - [ADR 0031: Artwork Replacement Uses a Bounded Transaction-Scoped Advisory Lock](adr/0031-transaction-scoped-artwork-replacement-locking.adoc)
+- [ADR 0032: Media File Probe Results Are Persisted and Playback Reads Them](adr/0032-media-file-probe-results-are-persisted.adoc)
+- [ADR 0033: The Transcode Worker Is a Separate Service and Repository, and the Server Runs No FFmpeg](adr/0033-transcode-worker-is-a-separate-service.adoc)

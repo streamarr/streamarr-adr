@@ -2,7 +2,7 @@
 
 == Status
 
-Proposed
+Accepted
 
 == Context
 
@@ -64,13 +64,16 @@ Rename the existing `LibraryManagementService.probeFile` method to `findOrCreate
 That method finds or creates the media file row and does not run ffprobe.
 
 Every probe executes through a per-file task claimed through `FileProcessingTaskCoordinator`.
-Scans, watcher events, playback requests, and upgrade backfill use the same enqueue operation.
-Use `ON CONFLICT DO NOTHING` against the existing partial unique index on active `file_processing_task.filepath_uri` rows.
+Scans, watcher events, and playback requests use the same enqueue operation.
+Use a conditional `ON CONFLICT DO UPDATE` against the existing partial unique index on active `file_processing_task.filepath_uri` rows.
+Update a conflicting task only when its expected inputs differ.
+An unchanged request preserves the active claim or pending retry time.
 The dispatcher runs the probe step without repeating matching or enrichment.
 The watcher no longer creates, completes, or fails these tasks around its inline processing.
 The shared collaborator schedules them and the dispatcher owns their execution.
 
 A scan completes after enumeration, matching, and enrichment attempts finish and all required probe work is durably enqueued.
+A source removed before its snapshot is read requires no probe task.
 If enqueueing fails, the scan fails through link:0027-library-work-claimed-in-database-single-instance.adoc[ADR 0027]'s failure path.
 The library status continues to describe the scan operation defined by link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026] and ADR 0027.
 A completed scan may have pending probe work and does not guarantee playback readiness.
@@ -97,15 +100,15 @@ Compare file size and modification time with the stored snapshot during library 
 When the source snapshot differs, delete the stored outcome and its stream rows and schedule a new probe.
 The cache is then unavailable for playback until a new outcome is recorded.
 
-A `probe_version` bump schedules older outcomes for background refresh.
+A `probe_version` bump makes older outcomes eligible for background refresh during scans and watcher processing.
 An older successful result remains available for playback while the current implementation can safely interpret it and its source snapshot still matches.
 Keep that result until its replacement is published atomically.
 Changes to required fields or their interpretation must invalidate incompatible outcomes in the migration that introduces the change.
 The migration deletes the affected container and stream rows and documents the playback restriction until they are rebuilt.
 This includes corrections to codec or stream-selection data, even when no column is added.
-Adding a probe column requires a `probe_version` bump to trigger a library-wide re-probe.
+Adding a probe column requires a `probe_version` bump so file processing detects outdated outcomes.
 Skip probing while the stored success or terminal media error matches the source snapshot and requested version.
-Older terminal errors are refreshed by the same backfill as older successful results.
+Older terminal errors are refreshed through the same scheduling path as older successful results.
 
 === Claim ownership and publication
 
@@ -142,7 +145,7 @@ Use capped backoff without requiring a file change or version bump.
 Keep one active task per file path during retries.
 Schedule retries without holding a task lease or database transaction across the delay.
 
-=== Playback and upgrade backfill
+=== Playback
 
 A playback request for a file without a usable probe outcome returns a typed not-ready error in the mutation payload, per ADR 0026.
 The server publishes `MediaFileProbeRequested(mediaFileId)` in `services.events.library`.
@@ -152,14 +155,17 @@ Probing runs only through background file processing.
 Playback of a file with a retained terminal `probe_error` returns that failure as a typed mutation payload error.
 It does not enqueue another task.
 
-Upgrading an existing installation uses the same enqueue operation for every media file without a container row or with an older `probe_version`.
-Playback continues to use compatible older successful results while that backfill runs.
+The initial rollout has no production installations to migrate.
+Automatic library-wide backfill is deferred, as recorded in https://github.com/streamarr/streamarr-server/issues/344[issue #344].
+Scans and watcher processing schedule missing or outdated outcomes through the shared enqueue operation.
+Playback continues to use compatible older successful results while that work runs.
 
-Integration tests cover concurrent enqueueing from scans and watchers, matched-file backfill, scan failure when enqueueing fails, and playback during compatible refresh.
+Integration tests cover concurrent enqueueing from scans and watchers, matched-file scheduling, scan failure when enqueueing fails, and playback during compatible refresh.
 They also prove that an expired or superseded attempt cannot publish, complete, fail, reschedule, or renew a reclaimed task.
 
 Explicitly deferred:
 
+* Automatic library-wide backfill on upgrades.
 * Exposing container and stream info in GraphQL, for example codec badges.
 * A mutation that lets a ServerAdmin request re-probing.
 * Content hashing for change detection.
@@ -182,7 +188,8 @@ The task coordinator gains a dispatcher and persisted retry scheduling.
 Task transitions and result publication reject expired or superseded claims.
 * Scan completion and probe completion are separate.
 The scan waits for durable scheduling, while playback readiness depends on the stored probe outcome.
-* Each new probe column requires a library-wide re-probe, performed in the background and, after ADR 0033, by workers.
+* Each new probe column requires a version bump.
+File processing refreshes outdated outcomes in the background and, after ADR 0033, through workers.
 Compatible outcomes remain usable during refresh.
 Migrations that invalidate incompatible outcomes temporarily block playback for the affected files.
 * ADR 0013's pipeline reads its probe input from rows.

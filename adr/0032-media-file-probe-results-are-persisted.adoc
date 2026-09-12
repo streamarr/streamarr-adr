@@ -63,29 +63,36 @@ Matching and enrichment retain their existing execution paths.
 Rename the existing `LibraryManagementService.probeFile` method to `findOrCreateMediaFile`.
 That method finds or creates the media file row and does not run ffprobe.
 
-Every probe executes through a per-file task claimed through `FileProcessingTaskCoordinator`.
-Scans, watcher events, and playback requests use the same enqueue operation.
-Use a conditional `ON CONFLICT DO UPDATE` against the existing partial unique index on active `file_processing_task.filepath_uri` rows.
-Update a conflicting task only when its expected inputs differ.
-An unchanged request preserves the active claim or pending retry time.
-The dispatcher runs the probe step without repeating matching or enrichment.
-The watcher no longer creates, completes, or fails these tasks around its inline processing.
-The shared collaborator schedules them and the dispatcher owns their execution.
+Every probe executes through a db-scheduler task instance keyed by the media file id.
+Scans, watcher events, and playback requests use the same request operation.
+Requesting a probe schedules the instance if none exists and replaces a pending instance's inputs when they differ.
+A request that changes the inputs of a running probe must retain those inputs durably.
+An unchanged request preserves the pending retry time.
+The execution runs the probe step without repeating matching or enrichment.
+The watcher no longer creates, completes, or fails tasks around its inline processing.
+The shared collaborator requests probes and db-scheduler owns their execution.
 
-A scan completes after enumeration, matching, and enrichment attempts finish and all required probe work is durably enqueued.
+A scan completes after enumeration, matching, and enrichment attempts finish and all required probe work is durably requested.
 A source removed before its snapshot is read requires no probe task.
-If enqueueing fails, the scan fails through link:0027-library-work-claimed-in-database-single-instance.adoc[ADR 0027]'s failure path.
+If recording a request fails, the scan fails through link:0027-library-work-claimed-in-database-single-instance.adoc[ADR 0027]'s failure path.
 The library status continues to describe the scan operation defined by link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026] and ADR 0027.
 A completed scan may have pending probe work and does not guarantee playback readiness.
 
 === The probe step
 
-Add a background dispatcher in this ADR's implementation, before moving execution to workers in ADR 0033.
-It claims due tasks, executes probes, and recovers expired claims.
-Recovery does not bypass the retry time of a pending task.
-The per-file task completes only when an outcome exists for its requested source snapshot and `probe_version`.
-The dispatcher checks probe need again after claiming the task.
-It waits for source stability before probing.
+Probes execute through db-scheduler, a PostgreSQL-backed task scheduler, rather than through a claim protocol of our own.
+Each media file has at most one scheduled task instance.
+Repeated requests reuse that instance while it exists.
+The task data carries the media file id, path, requested source snapshot, and `probe_version`, serialized as JSON inside db-scheduler's own `scheduled_tasks` table.
+That table is neither the outcome record nor the wire contract, so ADR 0018's no-JSON rule does not reach it.
+db-scheduler claims due executions with `SELECT … FOR UPDATE SKIP LOCKED`, heartbeats them, reclaims executions whose heartbeats stop, and runs them on a virtual-thread executor under a configured concurrency cap.
+Those mechanics replace the claim, lease, and retry columns this ADR first added to `file_processing_task`.
+
+An execution checks probe need again after being picked, waits for source stability, and reads the source snapshot before and after probing.
+It completes without probing when a stored outcome already matches the requested snapshot and version, or when the media file row no longer exists.
+It reschedules itself with the observed inputs when the snapshot differs from the requested one or the requested version is older than the current one.
+A request for a version newer than the server supports is logged and removed.
+The next scan requests it again after the upgrade.
 
 On success, the producer returns the complete container-and-stream result, including width, height, and frame rate for video streams and bitrate for any stream that reports it.
 On terminal media failure, it returns a typed error.
@@ -97,7 +104,9 @@ ADR 0033 moves execution to the worker using the same result contract.
 === Source changes and probe versions
 
 Compare file size and modification time with the stored snapshot during library scans and file processing triggered by watcher events.
-When the source snapshot differs, delete the stored outcome and its stream rows and schedule a new probe.
+Compare snapshots for equality.
+File size and modification time do not establish which execution is newer.
+When the source snapshot differs, the request operation deletes the stored outcome and its stream rows and schedules a new probe.
 The cache is then unavailable for playback until a new outcome is recorded.
 
 A `probe_version` bump makes older outcomes eligible for background refresh during scans and watcher processing.
@@ -110,58 +119,57 @@ Adding a probe column requires a `probe_version` bump so file processing detects
 Skip probing while the stored success or terminal media error matches the source snapshot and requested version.
 Older terminal errors are refreshed through the same scheduling path as older successful results.
 
-=== Claim ownership and publication
+=== Publication
 
-Persist a fresh claim id whenever a task is claimed or reclaimed.
-The claim identifies one execution attempt and records its expected source snapshot and requested `probe_version`.
-The process instance id alone does not identify an attempt.
+`media_file_probe_request` retains the latest requested source snapshot and probe version for each file.
+It records the desired probe inputs, with no execution status, lease, heartbeat, attempt count, or retry time.
+Deleting a media file removes its requested inputs through a foreign key cascade.
 
-Read the source snapshot before and after probing.
-Discard the result and reschedule processing if the snapshot changes during the probe.
-Compare snapshots for equality.
-File size and modification time do not establish which execution is newer.
+Requesting a probe locks the media file row and records the desired inputs in the same transaction as invalidation and native scheduling.
+Publication takes the same lock and rejects a result that differs from the retained inputs.
+It also refuses to replace a newer probe version for the same snapshot.
+An accepted publication atomically replaces the container outcome and its stream rows.
+A publication for a missing media file writes nothing.
+If a crash occurs after publication and before task completion, an execution with unchanged inputs sees the stored outcome and completes without probing.
 
-Publish an outcome in one transaction that verifies the task is `PROCESSING`, its claim id is current, and its lease has not expired.
-The result's snapshot and version must match the claim's expected inputs.
-That transaction replaces the container outcome and stream rows and completes the task.
-Claim validation and publication are one atomic database operation, not a check followed by an unguarded write.
-Completion without probing, failure, and rescheduling require the same current-claim checks.
-An execution that loses its claim cannot change the outcome or task state.
-
-Source invalidation and task input changes use the same transaction protocol as publication.
-They revoke a claim for obsolete inputs and leave one pending task for the requested inputs.
-An enqueue conflict must not discard a detected input change.
-The scheduled heartbeat renews only current, unexpired claims that the dispatcher is still executing.
-It cannot revive an expired or superseded claim.
+Completion takes the media file lock and compares the execution's inputs with the retained request.
+If they differ, it invokes db-scheduler's native reschedule operation with the retained inputs.
+Otherwise, it applies the execution's completion or rescheduling result.
+That decision and the native operation share one transaction, so a request cannot disappear between publication and task removal.
+A datasource adapter preserves Spring's commit and rollback ownership when native completion joins that transaction.
+Scheduler operations outside a Spring transaction retain their normal transaction behavior.
+db-scheduler guards its task-row updates with the execution's row version.
+Probe publication separately checks the retained source snapshot and version.
+Retain the requested inputs after completion so a delayed publication cannot bypass their check.
 Run file I/O and probing outside database transactions.
 
 === Transient failures
 
 Temporary storage errors are transient execution failures.
 After ADR 0033, worker unavailability and session loss are also transient execution failures.
-Record these failures and the next retry time on the per-file task without writing a terminal `probe_error`.
-Return the task to `PENDING` through the guarded rescheduling operation and let the dispatcher claim it when the retry is due.
-Use capped backoff without requiring a file change or version bump.
-Keep one active task per file path during retries.
-Schedule retries without holding a task lease or database transaction across the delay.
+A transient failure is an exception out of the execution.
+db-scheduler records it on the task instance and reschedules the instance with capped exponential backoff, without holding a database transaction or connection across the delay.
+A terminal media error is not a failure: the execution publishes it as the outcome and completes.
 
 === Playback
 
 A playback request for a file without a usable probe outcome returns a typed not-ready error in the mutation payload, per ADR 0026.
 The server publishes `MediaFileProbeRequested(mediaFileId)` in `services.events.library`.
-The library listener uses the shared enqueue operation.
-Probing runs only through background file processing.
+The library listener uses the shared request operation.
+Probing runs only through background execution.
 
 Playback of a file with a retained terminal `probe_error` returns that failure as a typed mutation payload error.
-It does not enqueue another task.
+It does not request another probe.
 
 The initial rollout has no production installations to migrate.
 Automatic library-wide backfill is deferred, as recorded in https://github.com/streamarr/streamarr-server/issues/344[issue #344].
-Scans and watcher processing schedule missing or outdated outcomes through the shared enqueue operation.
+Scans and watcher processing schedule missing or outdated outcomes through the shared request operation.
 Playback continues to use compatible older successful results while that work runs.
 
-Integration tests cover concurrent enqueueing from scans and watchers, matched-file scheduling, scan failure when enqueueing fails, and playback during compatible refresh.
-They also prove that an expired or superseded attempt cannot publish, complete, fail, reschedule, or renew a reclaimed task.
+Integration tests cover concurrent requests from scans and watchers, matched-file scheduling, scan failure when a request cannot be recorded, and playback during compatible refresh.
+They also prove that a duplicate request yields one instance, that a transient failure reschedules with backoff, that executions run on virtual threads, and that publication refuses a stale result for a newer stored version.
+Concurrency tests cover requests arriving during publication and between publication and task completion.
+Transaction tests prove that native task removal and rescheduling roll back with the surrounding domain write.
 
 Explicitly deferred:
 
@@ -184,8 +192,13 @@ After ADR 0033, that producer is a worker.
 * Persistence adds two entities, `MediaFileContainerInfo` and `MediaFileStreamInfo`, and a mapping from the complete probe result to those rows.
 * Playback exposes typed errors for unavailable probe data and recorded terminal media failures.
 Transient execution failures remain retryable background work.
-The task coordinator gains a dispatcher and persisted retry scheduling.
-Task transitions and result publication reject expired or superseded claims.
+* db-scheduler adds one dependency and one table, `scheduled_tasks`, created by a Flyway migration and excluded from jOOQ generation.
+The coordinator's claim, lease, heartbeat, and retry code is not written.
+* A separate request row retains the domain inputs that a running probe must not discard.
+db-scheduler continues to own execution and retry state.
+* No legacy task recovery bridge is needed because Streamarr has no production installations.
+The former coordinator and its runtime consumers are removed.
+The unused `file_processing_task` table remains until a later migration drops it.
 * Scan completion and probe completion are separate.
 The scan waits for durable scheduling, while playback readiness depends on the stored probe outcome.
 * Each new probe column requires a version bump.
@@ -201,6 +214,11 @@ The pipeline itself is unchanged.
 * Store raw ffprobe JSON beside the typed columns — adds a second representation while playback and the worker contract use typed fields.
 * Denormalized summary columns on the container row — duplicates stream properties and requires keeping both copies consistent to avoid a read-time lookup.
 * Probe outcomes in `media_file.status` — matching and probing can succeed or fail independently, so one status cannot preserve both outcomes.
+* A claim protocol of our own on `file_processing_task`, the first implementation — review found the defects in the queue mechanics rather than the domain logic: a renewal exception treated as lease loss, a discarded executor future, and a three-statement enqueue racing legacy completion. db-scheduler owns exactly that half.
+* JobRunr — enqueueing inside a Spring transaction is a paid feature, and scheduling must commit with changes to the desired inputs and outcome invalidation.
+* Quartz — eleven tables, thread pools, and no per-execution fencing.
+* Spring Modulith's event publication registry — durable delivery of the request event only, with no lease, backoff, or reclaim.
+* Spring `@Scheduled` alone — a timer does not persist queued work or provide execution recovery.
 * Columns on `media_file` — nullable properties alone do not distinguish an unprobed file from a probed file with unknown values.
 * Names `media_analysis`, `media_file_analysis`, and `media_file_metadata` — "media" means the collectable in this schema, "analysis" names the step rather than the row, and "metadata" is TMDB's.
 * Pure Java probing libraries — replacing ffprobe would require validating equivalent support for MKV, HEVC, Dolby Vision, and audio channel layouts.
@@ -214,4 +232,5 @@ The pipeline itself is unchanged.
 * link:0027-library-work-claimed-in-database-single-instance.adoc[ADR 0027: Library Scan and Refresh Are Claimed Atomically in the Database and Run on a Single Instance]
 * link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033: The Transcode Worker Is a Separate Service and Repository]
 * https://ffmpeg.org/ffprobe.html[ffprobe documentation]
+* https://github.com/kagkarlsson/db-scheduler[db-scheduler]
 * https://github.com/streamarr/streamarr-server/issues/248[Issue #248: Restore Maven reactor]

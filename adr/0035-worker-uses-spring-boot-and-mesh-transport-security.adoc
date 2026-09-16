@@ -1,0 +1,160 @@
+= ADR 0035: The Worker Uses Spring Boot and Delegates Distributed Transport Security to the Mesh
+
+== Status
+
+Proposed
+
+== Context
+
+link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033] separates the worker repository and image from the server.
+It retains application-managed mutual TLS for distributed connections, a separate localhost listener, and a plain Java worker with a custom gRPC health service.
+These choices require certificate loading, identity mapping, two listener configurations, and a separate health implementation.
+
+Local installations already trust processes within the server's network namespace.
+Distributed Kubernetes installations can delegate certificate issuance, rotation, and workload authentication to a service mesh.
+Using Spring Boot lets the worker use the same Actuator probe endpoints and lifecycle support as the server.
+The goal is to remove application code for these responsibilities while preserving the worker protocol and execution behavior.
+
+== Decision
+
+=== Worker runtime and health
+
+Run the standalone worker as a Spring Boot application with Actuator.
+Spring manages configuration, startup, and shutdown of the worker session and its execution resources.
+The worker build includes the HTTP runtime needed for Actuator but excludes server authentication, persistence, GraphQL, and application code.
+The engine remains independent of Spring.
+
+Replace the custom gRPC health server with `/actuator/health/liveness` and `/actuator/health/readiness`.
+Liveness reports local process health and remains healthy during a server disconnection.
+Readiness requires successful initialization and an active session accepted by the server.
+A fully occupied worker remains ready.
+Session loss withdraws readiness, and accepted reconnection restores it.
+The session and its advertised capabilities and capacity continue to govern dispatch.
+
+Expose only the Actuator endpoints required by the deployment.
+The HTTP port is configurable and supports port `0` in tests.
+Kubernetes probes reach it on the Pod IP.
+The server never uses it for worker control or dispatch.
+The deployment preserves probe access when mesh policy is enabled, using Istio's probe rewriting where appropriate.
+
+Server liveness and readiness remain independent of worker availability.
+Tests preserve the exclusion of worker connectivity from both server probe groups.
+The server must remain reachable with zero workers so they can establish sessions.
+The existing aggregate health behavior remains in force.
+
+=== One application transport
+
+Use one plaintext gRPC listener for worker sessions and segment uploads.
+It starts with the server and binds to `127.0.0.1` by default.
+The listen address and port are configurable.
+Tests may request port `0` and retrieve the bound port.
+The worker connects to its configured server endpoint through the same plaintext client in every topology.
+
+Remove application TLS clients and listeners, certificate and private-key loading, trust-bundle configuration, certificate-to-worker mapping, and transport-mode flags.
+A non-loopback bind is an explicit deployment choice that requires the distributed protection described below.
+The application cannot verify that a mesh is present from its listen address.
+The deployment tests establish that boundary.
+
+Colocated Compose uses `network_mode: service:<server>` and connects to `127.0.0.1` without credentials.
+It does not publish the worker-session port.
+A colocated Kubernetes worker may share the server's Pod under the same trust rule.
+Callers that can reach loopback within that network namespace are trusted as workers.
+
+=== Distributed Kubernetes transport
+
+Use Istio for the supported distributed deployment example.
+Both server and worker traffic pass through its data plane.
+The worker-session port must remain intercepted, including connections sent directly to the server Pod IP.
+Require `PeerAuthentication` in `STRICT` mode for that workload port.
+Require an `AuthorizationPolicy` that admits only the dedicated worker ServiceAccount identity to that port.
+Worker-port rules must preserve the server's separately configured API access and orchestrator probes.
+Installing Istio alone is insufficient because automatic mutual TLS does not require peers to use it or restrict which authenticated workloads may connect.
+
+The mesh owns certificate issuance, rotation, encryption, and workload authentication.
+Streamarr does not consume forwarded certificate headers such as XFCC or add a token or authentication service to recover certificate-bound worker ids.
+Retire the standalone distributed-Compose example that mounts application TLS credentials.
+Ordinary colocated Compose remains certificate-free.
+
+=== Worker identity and ownership
+
+An authorized worker ServiceAccount establishes membership in the worker trust boundary.
+The worker's configured UUID identifies an instance within that boundary.
+Kubernetes may supply the Pod UID as this value.
+It is a claim made by the worker and is not cryptographically bound to a particular pod.
+
+Authorized workers share trust.
+A worker that presents another worker's UUID can replace that connection and abandon its jobs.
+The deployment therefore grants the worker ServiceAccount only to workloads trusted with that authority.
+Retain UUID validation, registration, boot ids, connection ownership, attempt fencing, capability checks, capacity management, and bounded uploads.
+Disconnected or replaced connections cannot publish stale results or segments.
+
+=== Extraction and delivery
+
+Start the worker extraction PR from the reviewed integration revision while the transport change proceeds in parallel.
+Preserve history, record the source revision and path mapping, and move the FFmpeg buildpack, runtime lock, notices, and smoke tests together.
+Establish the Spring Boot build and Actuator behavior in the worker repository.
+Reconcile later worker changes from the server before cutover.
+
+The server owns and publishes `buf.build/streamarr-org/transcode`.
+The worker pins its published Java SDK with the probe operation and result-version capability verified by an independent consumer build.
+It keeps no copied proto or shared engine dependency.
+
+Extracting the baseline does not wait for mesh implementation.
+Remove worker TLS in a focused follow-up once the standalone build is green.
+Review the corresponding server listener and deployment changes together.
+Publish an immutable worker image and verify it before switching server tests and deployments to that image and deleting the server's worker sources.
+The cutover includes all applicable fixes made after the extraction revision.
+
+=== Required evidence
+
+Write failing behavior tests before changing application behavior.
+Preserve existing registration, probe, playback, cancellation, disconnect, replacement, and recovery coverage when replacing TLS fixtures and health transport.
+Application tests prove certificate-free operation, default loopback isolation, explicit network binding, Actuator state transitions, and server readiness with zero workers.
+
+Real Istio deployment tests prove an authorized worker can register, probe media, and produce a playable segment.
+They also prove a meshed workload with the wrong ServiceAccount is denied and an unmeshed plaintext client is denied through both the Service and direct Pod IP.
+Run these checks against the shipped manifests and verify that server and worker probes still function.
+Configuration inspection alone does not satisfy these tests.
+Record the production and test line changes in the transport implementation PRs.
+
+Explicitly deferred:
+
+* Additional service-mesh deployment examples.
+* Per-worker cryptographic identity within an authorized worker ServiceAccount.
+* Multiple server replicas and durable playback recovery.
+* Direct object-storage access and worker-to-client segment delivery.
+
+== Consequences
+
+* The worker gains Spring Boot and an HTTP runtime for standard lifecycle and Actuator support.
+Its packaged dependencies remain isolated from the server application.
+* Application certificate handling, duplicate transport paths, and custom gRPC health code are removed.
+* Local Compose requires no mesh or certificates.
+Distributed Kubernetes requires an enforced mesh policy and administrators who maintain that policy.
+* Access to the worker port grants worker authority.
+Misconfigured interception or authorization can expose that authority beyond the intended workloads.
+* This ADR supersedes ADR 0018's application-managed mutual TLS, certificate-bound worker UUIDs, mesh bypass, and rejection of a required mesh for distributed deployments.
+Its live playback authority, outbound sessions, media references, contract rules, and connection fencing remain in force.
+* This ADR supersedes ADR 0033's plain Java runtime, custom gRPC health protocol, dual listeners, fixed-only plaintext bind, application certificates, and certificate-based image tests.
+It also permits extraction to begin before the transport replacement is complete.
+The separate repository and image, server execution boundary, media mounts, single server replica, and final image cutover remain in force.
+
+== Rejected Alternatives
+
+* Retaining application TLS alongside a mesh mode keeps the certificate and transport branches that this decision removes.
+* Requiring a mesh for colocated Compose adds infrastructure to an installation whose worker traffic stays within one network namespace.
+* Trusting XFCC headers or introducing worker tokens recreates an application identity path when the deployment already controls admission to the worker port.
+* Keeping a custom gRPC health server duplicates lifecycle and probe support available through Actuator.
+* Waiting for the mesh replacement before opening the extraction PR delays the independent worker build without reducing the need to reconcile later changes.
+
+== References
+
+* link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018: Live Playback Authority and Outbound Transcode Workers]
+* link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033: The Transcode Worker Is a Separate Service and Repository, and the Server Runs No FFmpeg]
+* https://github.com/streamarr/streamarr-server/issues/338[Epic: Run the transcode worker as a separate service and repository]
+* https://github.com/streamarr/streamarr-transcode-worker/issues/3[Worker extraction and standalone build]
+* https://docs.spring.io/spring-boot/reference/actuator/endpoints.html[Spring Boot Actuator endpoints and Kubernetes probes]
+* https://istio.io/latest/docs/concepts/security/[Istio security]
+* https://istio.io/latest/docs/reference/config/security/peer_authentication/[Istio PeerAuthentication]
+* https://istio.io/latest/docs/reference/config/security/authorization-policy/[Istio AuthorizationPolicy]
+* https://istio.io/latest/docs/ops/configuration/mesh/app-health-check/[Istio application health checks]

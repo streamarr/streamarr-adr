@@ -1,0 +1,294 @@
+= ADR 0036: Video Contracts Share One Vocabulary and Preserve Dynamic-Range Facts
+
+== Status
+
+Proposed
+
+The dynamic-range structure and validation principle below are agreed design inputs.
+The sections marked as open questions require further discussion before the complete probe, capability, and output contracts are finalized.
+
+== Context
+
+https://github.com/streamarr/streamarr-server/issues/399[The playback capabilities epic] requires the playlist to describe the media that the worker actually produces.
+Codec names alone do not describe a stream's codec profile, level, bit depth, color properties, or dynamic range.
+Choosing an output from incomplete descriptions can produce video that a client cannot decode, incorrect color processing, or a playlist that advertises a different format from its segments.
+
+The source probe, client capability declaration, and explicit video decision need the same meanings for shared properties.
+The vocabulary applies to the server, workers, and all clients.
+https://github.com/streamarr/streamarr-adr/issues/15[Vocabulary issue #15] tracks this prerequisite.
+
+A video stream can contain both HDR10+ and Dolby Vision information.
+A single mutually exclusive HDR-format label cannot retain that combination without introducing additional compound values.
+The underlying picture can also disagree with a Dolby Vision profile's claimed compatibility.
+Jellyfin's fixes and reports show that a source classification, its validity, and a particular player's ability to handle it are distinct questions.
+
+Streamarr already has vocabulary for variants, renditions, stream sessions, transcode decisions, and persisted probe results.
+This ADR extends those definitions.
+External terminology is comparison material; adopting another project's name alone is not a reason to rename an established Streamarr concept.
+
+== Decision
+
+=== Preserve the established domain language
+
+Use the existing definitions and reference their owning ADRs.
+
+[cols="1,3",options="header"]
+|===
+|Existing concept |Meaning retained
+
+|Variant and rendition
+|link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018] uses variant for a bitrate/resolution option and reserves rendition for HLS alternates such as audio languages.
+
+|Stream session and dispatch attempt
+|ADR 0018 defines the runtime stream-session aggregate and the worker job/dispatch-attempt identities.
+A worker dispatch attempt is distinct from a format-recovery attempt within a logical playback session.
+
+|Transcode decision
+|link:0013-stream-decision-architecture.adoc[ADR 0013] composes independent stream decisions.
+The planned explicit video decision extends that architecture.
+
+|Probe result and stream properties
+|link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032] owns persisted container and per-stream properties, successful probes with unknown properties, terminal probe errors, and `probe_version`.
+
+|Metadata
+|ADR 0032 reserves the unqualified domain term for descriptive TMDB data.
+Use probe properties and stream properties for technical facts; qualify standard-specific terms such as Dolby Vision metadata when discussing the external format.
+|===
+
+Keep the existing `StreamingOptions`, `VideoQuality`, `TranscodeMode`, `ContainerFormat`, `MediaProbe`, and `MediaSourceRef` names.
+Auto, Original, and a fixed quality are user playback choices; transcode mode describes the processing that implements a selected output.
+Qualify codec profile and Dolby Vision profile so neither is confused with the viewing profile defined by link:0024-identity-authority-by-relationship.adoc[ADR 0024].
+Preserve explicit units already used in the worker contract, including bits per second for bitrate and seconds for seek position.
+
+=== Keep source facts, capabilities, and output descriptions separate
+
+Use shared property meanings across these roles without treating their records as interchangeable.
+
+[cols="1,3",options="header"]
+|===
+|Role |Responsibility
+
+|Source description
+|Describe the individual media track found by probing.
+A chosen playback output does not rewrite these source facts.
+
+|Client capability declaration
+|Describe combinations the current player and delivery path can accept, with the relevant display constraints.
+A declaration is evidence for selection, not a guarantee of successful playback.
+
+|Planned output
+|Describe the output selected by the server using source facts, client capabilities, verified worker capabilities, and the user's playback choice.
+
+|Produced output
+|Describe the media actually produced.
+The worker must honor the selected decision or report failure, and the playlist must agree with the produced media.
+|===
+
+The planned explicit `VideoDecision` belongs within ADR 0013's existing `TranscodeDecision`.
+Its source and output dynamic ranges are distinct.
+The field spellings `sourceDynamicRange` and `outputDynamicRange` remain proposals until the decision contract is finalized.
+
+=== Represent dynamic range as one structured description
+
+Use `VideoDynamicRange` as the shared type and `dynamicRange` as the field on an individual video stream.
+Here, video stream means a media track, not the runtime stream-session aggregate.
+The same type can describe a source video stream or an output video stream; those values may differ.
+
+Use the following agreed structure.
+TypeScript notation makes the shape readable and does not select a wire format or implementation language.
+
+[source,typescript]
+----
+type Presence = "UNSPECIFIED" | "ABSENT" | "PRESENT";
+
+type VideoDynamicRange = {
+  compatibleBase: "UNSPECIFIED" | "NONE" | "SDR" | "HDR10" | "HLG";
+  hdr10Plus: Presence;
+  dolbyVision: {
+    presence: Presence;
+    profile: number | null;
+    level: number | null;
+    baseLayerCompatibilityId: number | null;
+    baseLayer: Presence;
+    enhancementLayer: Presence;
+    rpu: Presence;
+  };
+};
+----
+
+`compatibleBase` describes the standard underlying picture compatibility when advanced HDR information is unused.
+`NONE` means the stream has no standard compatible base; `UNSPECIFIED` means its compatibility is unknown.
+The value does not promise that a device can play unchanged source bytes.
+Using a compatible base may require an explicit, supported transformation.
+
+`hdr10Plus` records HDR10+ presence independently of Dolby Vision.
+Both may be `PRESENT` in the same stream.
+The nested Dolby Vision description retains its own profile, level, base-layer compatibility identifier, and layer-presence facts.
+`rpu` records the presence of Dolby Vision picture-adjustment instructions.
+
+`Presence` distinguishes unknown information, observed absence, and observed presence.
+Failure to observe information through an insufficient probe is not evidence of absence.
+Unknown numeric details remain absent/null rather than defaulting to a meaningful zero.
+The Dolby Vision profile and level describe Dolby Vision signaling and are separate from the codec's profile and level.
+
+Derive broad HDR/SDR presentation labels from the detailed description instead of storing another independently editable answer.
+Preserve uncertainty when the description is incomplete or inconsistent.
+The exact derivation rules are an open question below.
+
+Retain ADR 0018's typed Protobuf contract and explicit unspecified enum zero values.
+Preserve numeric field presence in the protocol and generated clients.
+The notation above does not authorize JSON on the worker wire.
+Protocol field numbers, generated names, and storage columns belong to the contract implementation after the outstanding semantics are resolved.
+
+=== Preserve facts and report validation separately
+
+Preserve the observed source facts and record the specific validation problem separately.
+Keep missing information distinct from contradictory information.
+ADR 0032 already permits unknown properties in a successful probe; this ADR does not turn every incomplete description into a terminal probe error.
+
+Validate the specific Dolby Vision profile and the properties it requires.
+Some valid profiles have an SDR fallback base, so Dolby Vision presence alongside an SDR base is not inherently contradictory.
+A known conflict must identify the claims that disagree rather than erase the original observations.
+
+Choose color processing from the actual picture signal used by the selected path.
+Dolby Vision presence alone does not justify HDR-to-SDR tone mapping.
+Keep validation of source properties distinct from compatibility with a player, container, delivery path, and display.
+A malformed stream working on one player does not establish that another player safely supports it.
+
+The server evaluates usable playback paths under the epic's existing Auto/manual rules.
+Validation does not create another automatic recovery trigger.
+Only Auto can automatically change format after an explicit format-related playback error.
+Manual and Original selections remain fixed, including Original selected by a platform default.
+Any permitted replacement is an explicit server output decision; it does not mutate the source description.
+Dolby Vision source recognition does not introduce Dolby Vision output support.
+
+=== Examples of the shared meanings
+
+These examples illustrate the agreed semantics without defining the remaining client-capability or validation-result schemas.
+
+A source with an HDR10-compatible base, HDR10+, and Dolby Vision Profile 8.1 can be described as follows when the relevant probe facts agree:
+
+[source,typescript]
+----
+const sourceDynamicRange: VideoDynamicRange = {
+  compatibleBase: "HDR10",
+  hdr10Plus: "PRESENT",
+  dolbyVision: {
+    presence: "PRESENT",
+    profile: 8,
+    level: 6,
+    baseLayerCompatibilityId: 1,
+    baseLayer: "PRESENT",
+    enhancementLayer: "ABSENT",
+    rpu: "PRESENT",
+  },
+};
+----
+
+A client declaring HDR10 support has not thereby declared support for every combination of Dolby Vision, HDR10+, container, and delivery path.
+An HDR10 output is a candidate only if the playback choice permits it and a worker can perform the required explicit transformation.
+The source continues to describe both HDR features even when the delivered output contains neither enhancement.
+
+[cols="2,3",options="header"]
+|===
+|Situation |Required interpretation
+
+|Auto encounters an explicit format failure and the server selects an eligible SDR replacement
+|Keep the original source description.
+Describe the selected SDR output with `compatibleBase = SDR`, HDR10+ absent, and Dolby Vision absent.
+An output known to contain no Dolby Vision has null Dolby Vision numeric details and absent layer/RPU flags.
+The worker performs the required conversion and the playlist describes SDR.
+The replacement shares the existing playback-session attempt budget.
+
+|The user requests a fixed quality and HDR output that cannot be produced
+|The requested output does not change the source properties.
+The server cannot silently substitute SDR or another quality.
+The precise user-facing failure behavior remains tracked by the epic.
+
+|The probe cannot determine HDR10+ or Dolby Vision presence
+|Retain `UNSPECIFIED` and absent/null numeric details where knowledge is missing.
+Do not infer SDR or absent enhancements solely from missing information.
+A successful probe may still contain these unknown properties.
+
+|A Dolby Vision Profile 7 description accompanies SDR transfer/color properties
+|Retain the profile/layer observations and the separate color properties.
+Record the specific inconsistency separately and evaluate processing from the picture signal actually used.
+Do not tone-map solely because Dolby Vision information is present.
+The precise validation code and resulting path eligibility remain open.
+
+|A valid Dolby Vision profile has an SDR-compatible base
+|Retain that combination.
+The compatible base describes an available base interpretation, not the complete Dolby Vision presentation.
+Deriving the broad HDR label requires profile-aware rules.
+|===
+
+=== Open questions before the contracts are finalized
+
+The following items are deliberately unresolved; they are not additional agreed fields or implementation requirements.
+
+* Complete the codec names, codec-specific profile and level conventions, bit-depth and chroma representations, and the color primaries, transfer, matrix, and range definitions.
+Reuse established names and units where they already exist.
+* Define how observed color properties and Dolby Vision claims produce `compatibleBase`, including contradictory claims and the distinction between confirmed `NONE` and `UNSPECIFIED`.
+Keep a single consistent interpretation rather than independently editable duplicates.
+* Define broad HDR/SDR label derivation for complete, incomplete, conflicting, and unfamiliar descriptions, including known HDR whose kind is unknown.
+Do not erase source information to obtain a convenient display label.
+* Define the separate validation-result structure, problem codes, severity, storage/reporting location, and the eligibility consequences of each problem.
+No generic allow-invalid-streams setting has been adopted.
+* Define client capability combinations and limits, including correlations among codec, profile, level, bit depth, dynamic-range features, container, player, and display.
+A list of independent supported values must not be interpreted as every possible combination unless the contract explicitly establishes that meaning.
+* Finalize the explicit video-decision fields, wire representations, and mappings to generated server, worker, and client types.
+Retain unknown numeric presence and the distinction between source and selected output.
+
+https://github.com/streamarr/streamarr-server/issues/394[Server probe #394], https://github.com/streamarr/streamarr-server/issues/395[client capabilities #395], and https://github.com/streamarr/streamarr-server/issues/396[explicit video decision #396] consume this shared vocabulary.
+Creating this draft does not complete those prerequisites while their required definitions remain open.
+The server publishes the protocol first, the worker implements the published contract, and the server then updates its worker image pin as the epic requires.
+Adding persisted probe properties follows ADR 0032's `probe_version` rules.
+
+Explicitly deferred:
+
+* Dolby Vision output.
+Source recognition remains in scope.
+* A new codec preference policy in this ADR.
+The epic schedules amendments to link:0009-h264-plus-av1-codec-strategy.adoc[ADR 0009] with the encoder-eligibility and codec-selection work.
+* Replacement of the playback policy already recorded in the epic, including retry limits, ladder allocation, and client controls.
+Their dedicated issues own delivery.
+* Renaming existing stream-session, variant, rendition, probe, and transcode-decision concepts to match an external project.
+
+== Consequences
+
+* Server, worker, and client implementations share property meanings while retaining their distinct responsibilities.
+Source, capability, and output records cannot be substituted for one another.
+* The structured description preserves simultaneous HDR features and unknown values without multiplying combined enum labels.
+Its normalization and validation require profile-aware rules and representative media examples.
+* Separate validation preserves the evidence needed to explain a selection or failure.
+The validation-result contract and eligibility mappings still need explicit design.
+* An SDR playback result cannot overwrite HDR source facts or silently change a manual choice.
+The playlist and real output must remain consistent with the selected decision.
+* This Proposed ADR provides the agreed foundation while making incomplete parts of the vocabulary visible.
+It does not claim that the contracts or application behavior have been implemented.
+* ADR 0013's explicit video-decision amendment remains tied to implementation of #396.
+Existing ADR definitions and the epic's rollout order remain in force.
+
+== Rejected Alternatives
+
+* A single HDR boolean loses the format details needed to select and explain playback.
+* One mutually exclusive HDR-format enum requires additional compound values for combined Dolby Vision/HDR10+ streams and cannot serve as the sole retained description.
+* Independently editable broad and detailed HDR labels can disagree; derive the broad label from the detailed facts and their validation.
+* Treating missing information as confirmed absence or SDR loses uncertainty that ADR 0032 already preserves.
+* Treating a Dolby Vision label as sufficient evidence for tone mapping ignores the picture signal and profile-specific interpretation.
+* Treating a successful local-player test as universal compatibility ignores differences in players and delivery paths.
+* Replacing Streamarr's established vocabulary with another project's glossary introduces renames without resolving a demonstrated ambiguity.
+
+== References
+
+* https://github.com/streamarr/streamarr-server/issues/399[Epic #399: client capabilities and truthful playlists]
+* https://github.com/streamarr/streamarr-adr/issues/15[Vocabulary issue #15: accepted structure and validation principle]
+* link:0013-stream-decision-architecture.adoc[ADR 0013: Stream Decision Architecture]
+* link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018: Live Playback Authority and Outbound Transcode Workers]
+* link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032: Media File Probe Results Are Persisted and Playback Reads Them]
+* https://github.com/jellyfin/jellyfin/blob/50866380c95758244f79bd4fbb01b9474e80bd81/MediaBrowser.Model/Entities/MediaStream.cs[Jellyfin: detailed source facts and derived range labels]
+* https://github.com/jellyfin/jellyfin/pull/17806[Jellyfin #17806: validate Dolby Vision transfer and retain the base picture's range]
+* https://github.com/jellyfin/jellyfin/pull/17804#issuecomment-5553433436[Jellyfin maintainer: valid Dolby Vision can have an SDR fallback base]
+* https://github.com/jellyfin/jellyfin/issues/18097#issuecomment-5700174991[Jellyfin maintainer: invalid profile combinations can crash some players]
+* https://github.com/jellyfin/jellyfin/issues/16687#issuecomment-4302314344[Jellyfin maintainer: combined HDR features need device-specific compatibility]
+* https://netflixtechblog.com/rebuilding-netflix-video-processing-pipeline-with-microservices-4e5e6310e359[Netflix: source, encoding recipe, produced output, and validation]

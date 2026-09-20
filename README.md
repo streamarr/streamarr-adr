@@ -2,6 +2,8 @@
 
 This repository is the canonical home for architecture decisions and diagrams shared across the Streamarr codebases.
 
+[CONTEXT.md](CONTEXT.md) defines shared domain terms.
+
 ## Decisions
 
 Architecture Decision Records live in [`adr/`](adr/). Start new decisions from [`adr/template.adoc`](adr/template.adoc) and assign the next available repository-wide number.

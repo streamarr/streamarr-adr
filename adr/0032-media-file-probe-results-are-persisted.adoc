@@ -85,7 +85,7 @@ It claims due tasks, executes probes, and recovers expired claims.
 Recovery does not bypass the retry time of a pending task.
 The per-file task completes only when an outcome exists for its requested source snapshot and `probe_version`.
 The dispatcher checks probe need again after claiming the task.
-It waits for source stability before probing.
+It probes an unchanged source without waiting for a quiet period.
 
 On success, the producer returns the complete container-and-stream result, including width, height, and frame rate for video streams and bitrate for any stream that reports it.
 On terminal media failure, it returns a typed error.
@@ -93,6 +93,26 @@ Replace `MediaProbe` as the producer's return type and derive it from the comple
 Extend the parser to retain the per-stream dimensions, frame rate, and video bitrate that today's `StreamInfo` omits.
 The server initially runs ffprobe.
 ADR 0033 moves execution to the worker using the same result contract.
+
+=== File events and quiet periods
+
+Only the watcher waits for file events to quiet down.
+It groups repeated events for a file and waits until they stop before it requests a probe.
+That wait runs before the request is enqueued.
+It never occupies a scheduler probe slot or reserves a worker.
+Other files proceed while a changing file waits.
+
+Bulk scans do not impose a quiet period.
+A scan requests a probe for an unchanged file that needs one, and the dispatcher probes it without waiting.
+A retry after a transient failure waits only for its backoff unless the server observes a new file change.
+Parking a virtual thread inside a claimed probe job does not release that job's slot, so any wait belongs before the claim.
+
+A quiet period or a successful probe does not prove that a copy has finished.
+A partially copied faststart MP4 or MKV can probe successfully.
+Source snapshots and the probe version protect saved results instead.
+The dispatcher saves an outcome only when the snapshots read before and after the probe equal the requested snapshot and the requested `probe_version` is current.
+A later observed change replaces the requested inputs, deletes the stored success or terminal error, and schedules a fresh probe.
+The server does not infer that a copy has finished from the file's age.
 
 === Source changes and probe versions
 
@@ -186,6 +206,9 @@ After ADR 0033, that producer is a worker.
 Transient execution failures remain retryable background work.
 The task coordinator gains a dispatcher and persisted retry scheduling.
 Task transitions and result publication reject expired or superseded claims.
+* Bulk scans probe unchanged files without a per-file quiet period.
+Probe requests therefore reach workers sooner, which exposes worker contention sooner.
+Release this behavior with https://github.com/streamarr/streamarr-server/issues/414[issue #414], which keeps probes pending while compatible workers are busy.
 * Scan completion and probe completion are separate.
 The scan waits for durable scheduling, while playback readiness depends on the stored probe outcome.
 * Each new probe column requires a version bump.
@@ -215,3 +238,4 @@ The pipeline itself is unchanged.
 * link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033: The Transcode Worker Is a Separate Service and Repository]
 * https://ffmpeg.org/ffprobe.html[ffprobe documentation]
 * https://github.com/streamarr/streamarr-server/issues/248[Issue #248: Restore Maven reactor]
+* https://github.com/streamarr/streamarr-server/issues/415[Issue #415: Probe existing library files without waiting for a quiet period]

@@ -52,7 +52,7 @@ None at present.
 - [ADR 0032: Media File Probe Results Are Persisted and Playback Reads Them](adr/0032-media-file-probe-results-are-persisted.adoc)
 - [ADR 0033: The Transcode Worker Is a Separate Service and Repository, and the Server Runs No FFmpeg](adr/0033-transcode-worker-is-a-separate-service.adoc)
 - [ADR 0034: Release Please Owns Maven Release Versions](adr/0034-release-please-owns-maven-release-versions.adoc)
-- [ADR 0035: The Worker Uses Spring Boot and Delegates Distributed Transport Security to the Mesh](adr/0035-worker-uses-spring-boot-and-mesh-transport-security.adoc) — proposed
+- [ADR 0035: The Worker Uses Spring Boot and Delegates Distributed Transport Security to the Mesh](adr/0035-worker-uses-spring-boot-and-mesh-transport-security.adoc)
 - [ADR 0036: Video Contracts Share One Vocabulary and Preserve Dynamic-Range Facts](adr/0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc)
 - [ADR 0037: The Worker Delivers Fragmented MP4 Segments From FFmpeg's Standard Output, and HLS Media Segments Are fMP4 Only](adr/0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc)
 

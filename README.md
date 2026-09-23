@@ -16,12 +16,6 @@ Documents in `proposals/` are discussion drafts. They are not accepted architect
 
 None at present.
 
-## Spikes
-
-Throwaway prototypes whose conclusion an ADR depends on live in [`spikes/`](spikes/). They are evidence, not product code, and are kept only while the decision they support is in force.
-
-- [`spikes/rebac-engine-comparison`](spikes/rebac-engine-comparison/) — Cedar versus OpenFGA, the basis for ADR 0025.
-
 ## Catalog
 
 - [ADR 0001: PostgreSQL Over Embedded Database](adr/0001-postgresql-over-embedded-db.adoc)

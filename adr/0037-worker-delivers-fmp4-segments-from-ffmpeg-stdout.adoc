@@ -17,8 +17,8 @@ The worker instead infers that a segment is complete from two independent side c
 The worker polls both channels every 50 ms and reads them at different moments, so each order in which the two facts can arrive produces a separate bug.
 Worker issue #36 is one such bug: FFmpeg renamed the last segment and exited between the worker's two reads, so the worker reported a successful attempt as `TRANSCODE_FAILED` while the segment sat on disk.
 Reviewing the fix in worker PR #38 surfaced a second bug: when the worker stops FFmpeg, FFmpeg flushes a final segment, the worker uploads that segment after it has sent `JobAttemptStopped`, the server rejects the upload, and the worker reports a failure for an attempt it has already reported as stopped.
-Jellyfin, PeerTube, Stash, Owncast and UnicornTranscoder each hit the same last-segment race.
-PeerTube now rescans the output directory after FFmpeg exits (2026), Owncast replaced its polling watcher in 2020 so that FFmpeg pushes each segment to Owncast over HTTP, and UnicornTranscoder never fixed the race.
+Five open-source media and live-streaming servers that watch FFmpeg's output directory hit the same last-segment race.
+One now rescans the output directory after FFmpeg exits (2026), one replaced its polling watcher in 2020 so that FFmpeg pushes each segment to the server over HTTP, and one never fixed the race.
 
 The research behind this decision compared five designs: a producer module that watches the output directory with inotify and treats exit as an event; a loopback HTTP receiver inside the worker that accepts the segments FFmpeg's HLS muxer `PUT`s; FFmpeg `PUT`ing segments straight to the server; the server reading segments from storage the worker shares; and the worker reading fragmented MP4 from FFmpeg's standard output.
 Two independent throwaway proofs of concept measured the HTTP receiver and the standard-output design against FFmpeg 8.1.2 in the pinned worker image; the second one added 17 timing cases, 13 gRPC scenarios and a playback matrix on real decoders.
@@ -262,7 +262,7 @@ The proofs of concept measured pacing and one retention budget; this decision ob
 * A producer module that watches the output directory with inotify and treats exit as an event removes the race by ordering the two facts, but it keeps two channels, needs a polling fallback on macOS, and the pipe would replace it anyway.
 * A pull-style producer with a `next()` method leaves the read loop with the caller, and a fake producer would have to duplicate the ordering rules.
 * Exit and segment-arrival callbacks on the existing process manager leave the stop logic in the worker under a different lock, so the worker would still upload a segment that FFmpeg flushed during a stop.
-* The first proof of concept measured a loopback HTTP receiver inside the worker, the design Owncast, datarhei and Ant Media use, and found that FFmpeg ignores the response status, never re-sends, exits with status 0 whatever the receiver did, and exits before a slow receiver has read its output.
+* The first proof of concept measured a loopback HTTP receiver inside the worker, the design that several live-streaming servers use, and found that FFmpeg ignores the response status, never re-sends, exits with status 0 whatever the receiver did, and exits before a slow receiver has read its output.
 The receiver would have to rebuild every delivery guarantee, and the worker would gain a listening port that ADR 0033 reserves for health checks.
 * FFmpeg `PUT`ing segments straight to the server adds a second transport beside gRPC, fences attempts by a URL token instead of by connection ownership, moves TLS into FFmpeg's HTTP client, and offers no per-segment retry.
 * Having the server read segments from storage the worker shares moves the same two-channel race onto the server and across a network filesystem, and ADR 0018 and ADR 0019 already defer that design.
@@ -297,6 +297,6 @@ The receiver would have to rebuild every delivery guarantee, and the worker woul
 * https://github.com/FFmpeg/FFmpeg/blob/n8.0/libavformat/hlsenc.c[FFmpeg `hlsenc.c`: the cut rule measures from the run's first packet] and https://github.com/FFmpeg/FFmpeg/blob/n8.0/libavformat/movenc.c[`movenc.c`: the mp4 muxer declares `AVFMT_VARIABLE_FPS`]
 * https://developer.apple.com/documentation/http-live-streaming/hls-authoring-specification-for-apple-devices/[Apple HLS authoring specification: container requirements per codec]
 * https://github.com/moq-dev/moq/blob/7ee2b0241ef3c2e942808c84f2dd39d8253e0f72/rs/moq-mux/src/container/fmp4/import.rs[moq-mux fMP4 importer]
-* https://github.com/owncast/owncast/pull/151[Owncast PR #151: FFmpeg HTTP output replaces the polling watcher]
-* https://github.com/Chocobozzz/PeerTube/commit/80a1c0b7ff4f2dfffb4d0ec7c1660d20f9228acd[PeerTube: rescan the output directory after FFmpeg exits]
+* https://github.com/owncast/owncast/pull/151[A live-streaming server's change from a polling watcher to FFmpeg HTTP output]
+* https://github.com/Chocobozzz/PeerTube/commit/80a1c0b7ff4f2dfffb4d0ec7c1660d20f9228acd[A video platform's fix: rescan the output directory after FFmpeg exits]
 * https://datatracker.ietf.org/doc/html/rfc8216[RFC 8216: HTTP Live Streaming]

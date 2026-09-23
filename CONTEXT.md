@@ -88,7 +88,7 @@ The `ftyp` and `moov` boxes a player needs before any media segment of a variant
 _Avoid_: init file, header, init.mp4
 
 **Media time**:
-Presentation time on the zero-based timeline that every attempt of a stream session shares: the source's timestamps with the source container's start time subtracted.
+Presentation time measured from the source container's start time, on the zero-based timeline that every attempt of a stream session shares.
 _Avoid_: PTS, source time, wall-clock time
 
 **Fragmentation target**:
@@ -126,5 +126,5 @@ The encoder a worker actually runs for a codec family, together with whether it 
 _Avoid_: encoder capability, codec
 
 **Completed attempt**:
-A job attempt whose FFmpeg exited cleanly with its output fully read and every delivered segment acknowledged while the attempt was still active. Completion does not mean the advertised timeline is covered; the server owns coverage.
+A job attempt whose FFmpeg exited cleanly after the producer read all of its output and the server acknowledged every delivered segment, while the attempt was still active. A completed attempt does not mean the run covered the advertised timeline; the server owns coverage.
 _Avoid_: finished, done, success

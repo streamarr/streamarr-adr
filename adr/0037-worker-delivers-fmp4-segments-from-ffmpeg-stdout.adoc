@@ -36,7 +36,7 @@ On a variable-frame-rate encode with the worker's own forced keyframes, the same
 With `min_frag_duration` set to exactly the period, FFmpeg merged two segments even at a constant 23.976 fps, because the forced-keyframe gap fell one frame short.
 Setting no minimum, so that every keyframe starts a fragment, and then grouping fragments by absolute presentation time reproduced the HLS muxer's cut points on all three fixtures (90 fragments into 30 segments for the NTSC copy, 11 into 11 for the irregular copy, 11 into 11 for the variable-frame-rate encode), and the pinned FFmpeg decoded every grouped playlist.
 Fragment decode times do not land on the nominal grid: at 23.976 fps a 144-frame period is 6.006 s, the `cmaf` flag writes negative composition offsets that shift `tfdt` by two frames, and the first audio `tfdt` is the unsigned wrap of −1024 ticks; a check of `tfdt` against segment number times period rejected 23 of 30 valid segment starts.
-A fragment's end cannot be computed from its own sample durations either: on a variable-frame-rate stream copy with B-frames, a fragment that starts at 6.0 s carries durations that sum to 12.0 s, yet the next fragment starts at 11.9 s, so a worker that closed the segment on the computed end would close it before its last fragment arrived.
+Nor can a worker compute a fragment's end from the fragment's own sample durations: on a variable-frame-rate stream copy with B-frames, a fragment that starts at 6.0 s carries durations that sum to 12.0 s, yet the next fragment starts at 11.9 s, so a worker that closed the segment on the computed end would close it before its last fragment arrived.
 The only reliable boundary signal is the next fragment's own start, and FFmpeg emits a fragment only when it closes it, so the worker learns that a segment is complete one fragment late.
 Adding `-frag_duration` bounds that lag: with a 1 s bound and `frag_keyframe`, the mp4 muxer still cut at every keyframe and also cut every 1.001 s (91 fragments over 90 s at 23.976 fps, 90 for a stream copy with 2.002 s keyframes), and every fragment that did not begin at a keyframe began with a non-sync sample.
 A fragment without a video track appears only after the last video sample, none, one or several (one per target of audio that outlasts the video; three AAC samples at 89.941 s on the 90 s fixture, five fragments when audio outlasts video by 5 s), and a video-only tail appears when video outlasts audio; `delay_moov` folds audio that starts before the video into the first fragment, so no fragment without video ever precedes the first segment.
@@ -48,7 +48,7 @@ Today's HLS muxer hides that origin by measuring from the run's first packet.
 FFmpeg's `-start_at_zero` subtracts the source container's start time under `-copyts`, and that start time does not move with `-ss`: with it, the same source's first fragment started at 0 for stream copy and for encode, an encoded seek to 30 s started at 30.030 s, and a stream-copy seek to 30 s started at 28.028 s.
 The container's start time is the earliest stream's first timestamp: on MPEG-TS sources it is the AAC priming frame, 21 ms before the first video frame, so video starts at 0.021 s (copy) or 0.042 s (encode) rather than at 0, and two MPEG-TS remuxes of the same content starting at 1.46 s and at 3601.38 s produced byte-identical outputs.
 MPEG-TS input seeking differs from MP4 seeking: FFmpeg lands on the next keyframe after the target, not the one at or before it, so `-ss 30` on an MPEG-TS source started video at 30.051 s (copy) and 30.072 s (encode) while audio still started near 30 s, and on a 10 s-GOP MPEG-TS source `-ss 25` started video at 30.07 s with five seconds of audio before it.
-`delay_moov` switches off the mp4 muxer's automatic insertion of the `aac_adtstoasc` bitstream filter, so a stream copy of AAC from an MPEG-TS source exits 255 with "Malformed AAC bitstream detected"; adding `-bsf:a aac_adtstoasc` fixes that copy and leaves copies from MP4 and MKV sources byte-identical.
+`delay_moov` stops the mp4 muxer from inserting the `aac_adtstoasc` bitstream filter on its own, so a stream copy of AAC from an MPEG-TS source exits 255 with "Malformed AAC bitstream detected"; adding `-bsf:a aac_adtstoasc` fixes that copy and leaves copies from MP4 and MKV sources byte-identical.
 `-max_delay 5000000`, which the worker passes today, changes nothing in mp4 output (byte-identical with and without it) while it moves the first MPEG-TS timestamp from 1.4 s to 10.0 s.
 A stream-copy seek lands on the keyframe at or before the requested time, so that 28.028 s fragment is preroll.
 The initialization segment does not depend on the start point: across start 0, a seek to 30 s and a seek to 60 s, every encode run produced one byte-identical `ftyp`+`moov` (1327 bytes) and every stream-copy run another (1347 bytes), with zero durations, empty sample tables, a zero edit list and zero `trex` defaults in each; pairing the start-0 init with a seek run's segments gave the same packets, and the same decoded frames, as that run's own init.
@@ -57,7 +57,7 @@ Two smaller facts hold across attempts as well: FFmpeg's demuxer presents every 
 Today's HLS muxer measures its cut points from that preroll keyframe, so the segments of a stream-copy replacement start at 28.028, 34.034 and 40.040 s while the server advertises them as 30, 36 and 42 s.
 With every keyframe as its own fragment, the preroll is a separate fragment that the worker can discard; the encode restart starts at 30.030 s and needs no discard.
 FFmpeg's automatic frame synchronization depends on the muxer: the mp4 muxer declares `AVFMT_VARIABLE_FPS`, so automatic mode passes variable frame rates through, while the HLS muxer does not, so automatic mode picks constant rate, and under `-copyts` FFmpeg turns that constant rate into an internal variant that keeps the first timestamp (`fftools/ffmpeg_mux_init.c`, `VSYNC_VSCFR`); the same variable-frame-rate source yielded 622 video packets through mp4 and 1976 through HLS.
-That internal variant cannot be requested on the command line, and the explicit `cfr` mode is a different thing: after a seek to 30 s it padded the output with 720 duplicate frames from time zero (2157 video packets instead of 1437), while the HLS recipe with automatic mode produced 1437 packets starting at 30.030 s.
+The command line cannot request that internal variant, and the explicit `cfr` mode is a different thing: after a seek to 30 s it padded the output with 720 duplicate frames from time zero (2157 video packets instead of 1437), while the HLS recipe with automatic mode produced 1437 packets starting at 30.030 s.
 Passing `-r` with the probed frame rate and no `-fps_mode` puts automatic mode back on the constant-rate path, and `-copyts` then selects that same internal variant: on an irregular variable-frame-rate source, SVT-AV1 with the worker's frame-count GOP produced a keyframe every 6.006 s and 1583 video packets, identical to the HLS muxer's output on the same source, and a seek to 30 s started at 30.113 s with no padding.
 The same encoder under `-fps_mode vfr` placed keyframes at 0.04, 9.43, 20.35, 30.86, 40.96, 51.30 and 61.23 s, leaving five of eleven segment numbers without a keyframe, because a GOP counted in frames only equals the period at a constant frame rate; the worker gives SVT-AV1 and the hardware encoders a frame-count GOP and no time-based forced keyframe.
 libx264 with time-based forced keyframes kept a keyframe in every interval under `vfr`.
@@ -89,7 +89,7 @@ ADR 0019 also rejects Low-Latency HLS blocking playlist reload as the way a clie
 The moq-dev media layer consumes keyframe-aligned fragments read from FFmpeg's standard output, which is the unit this decision produces.
 
 The playback capabilities epic (streamarr-server issue #399, with the vocabulary in ADR 0036) predates this decision and several of its sub-issues touch the same ground.
-Issue #66 with worker issue #16 adds keyframe timestamps to the probe so that the server can derive copy-mode segment boundaries, advertise real durations and seek to a boundary keyframe; it currently describes those boundaries as "the way the HLS muxer cuts them", which is the relative rule this decision measured to be misaligned after a seek.
+Issue #66 with worker issue #16 adds keyframe timestamps to the probe so that the server can derive copy-mode segment boundaries, advertise real durations and seek to a boundary keyframe; it currently describes those boundaries as "the way the HLS muxer cuts them", the relative rule that this decision found misaligns a stream-copy replacement after a seek.
 Issue #398 with worker issue #28 makes each worker advertise, per codec family, the encoder it will really use.
 Issue #396 with worker issue #25 makes the video decision explicit and has the worker assert the produced output against it.
 Worker issue #18 tags HEVC output `hvc1`, and worker issue #23 closes libx265's GOPs so that every forced keyframe is an IDR frame.
@@ -106,8 +106,8 @@ The worker sets no `min_frag_duration`, so every keyframe starts a fragment, and
 The worker forces a keyframe at every segment period with the time-based expression for every encoder it runs, including SVT-AV1 and the hardware encoders that today receive only a frame-count GOP, disables scene-cut keyframes, and passes `-copyts -avoid_negative_ts disabled`.
 The worker sets every encoder's frame-count GOP to the period times the probed frame rate rounded down, never up, so that an encoder that ignores the forced keyframe still places one keyframe inside every interval and never skips a segment; a segment then occasionally holds two keyframes, and never none.
 The worker adds `-start_at_zero`, so media time zero is the source container's start time, the earliest stream's first timestamp, for every attempt, whether it begins at the start or at a seek; the producer never shifts an attempt's timestamps on its own.
-When it copies AAC audio, the worker adds `-bsf:a aac_adtstoasc`, because `delay_moov` disables the mp4 muxer's automatic insertion of that filter; the filter converts the ADTS frames of MPEG-TS sources, which otherwise fail the copy, and passes raw AAC from MP4 and MKV sources through byte for byte.
-In the transcode modes the worker passes `-r:v:0` with the probed frame rate, the same number its frame-count GOP is computed from, and sets no `-fps_mode`.
+When it copies AAC audio, the worker adds `-bsf:a aac_adtstoasc`, because `delay_moov` stops the mp4 muxer from inserting that filter on its own; the filter converts the ADTS frames of MPEG-TS sources, which otherwise fail the copy, and passes raw AAC from MP4 and MKV sources through byte for byte.
+In the transcode modes the worker passes `-r:v:0` with the probed frame rate, the same number from which it computes its frame-count GOP, and sets no `-fps_mode`.
 FFmpeg's automatic mode then takes the constant-rate path and, under `-copyts`, the internal variant that keeps the first timestamp, so the pipe carries the same constant-rate frames the HLS muxer produced, keyframes from frame-count encoders land on the period, and a seek does not pad from zero.
 A recorded fixture pins that a seek under these flags starts at the seek point, so an FFmpeg upgrade cannot silently change the selection.
 The worker change removes the HLS muxer, the output directory, the predicted file names, the directory poll and the liveness poll.
@@ -123,13 +123,13 @@ The producer never compares a raw `tfdt` with the nominal grid, and it never com
 === A segment is the group of fragments that start inside its interval
 
 Segment `N` covers media time `[N × period, (N + 1) × period)` on the zero-based timeline, exactly as the server's playlist defines it, and that timeline is the same for the initial attempt and for every replacement.
-This partition is the one boundary rule for the whole system: segment `N` begins at the first keyframe whose presentation time lies inside its interval, and an interval without a keyframe cannot be produced by a stream copy.
+This partition is the one boundary rule for the whole system: segment `N` begins at the first keyframe whose presentation time lies inside its interval, and a stream copy cannot produce a segment whose interval holds no keyframe.
 Issue #66 applies the same rule on the server from probed keyframe timestamps, which lets the playlist advertise each copy-mode segment's real duration and lets a copy seek land on the segment's own first keyframe; that work replaces its "the way the HLS muxer cuts them" wording with this rule, and until it lands the server advertises fixed durations and the producer discards preroll as described below.
 A fragment that begins with a sync sample belongs to the segment whose interval contains its start; a fragment that begins with a non-sync sample, or that carries no video track at all, always joins the open segment, because a segment can only begin at a video keyframe.
-Such fragments appear only after the last video sample, one per fragmentation target of audio that outlasts the video, and the closed last segment keeps them; if one ever arrived before any segment was open, it would wait and join the first segment that opens.
+Such fragments appear only after the last video sample, one per fragmentation target of audio that outlasts the video, and the closed last segment keeps them; if one ever arrived before the producer had opened any segment, that fragment would wait and join the first segment that opens.
 The producer concatenates the fragments of one segment, byte for byte and in arrival order, into one media segment.
 The producer closes the open segment when it receives a sync-first fragment whose start reaches the next segment's start, and only then.
-`-frag_duration` is a fragmentation target and a measured mitigation, not a guarantee: the muxer cuts at the first packet after the target (measured spans of 1.001 s for H.264 and 1.033 s for SVT-AV1 at a 1 s target), so the closing fragment follows the boundary by about one target in media time rather than one whole segment, and wall-clock delivery further depends on encoder speed and on back-pressure from the server.
+`-frag_duration` is a fragmentation target that measurably shortens that lag, not a guarantee: the muxer cuts at the first packet after the target (measured spans of 1.001 s for H.264 and 1.033 s for SVT-AV1 at a 1 s target), so the closing fragment follows the boundary by about one target in media time rather than one whole segment, and wall-clock delivery further depends on encoder speed and on back-pressure from the server.
 End of file closes the last open segment.
 The producer discards a fragment whose segment number is below the job's start sequence number; that fragment is the preroll of a stream-copy seek, and the previous attempt already delivered its content.
 The producer fails the attempt when a fragment skips a segment number, because the source has no keyframe inside the skipped segment's interval and no retry can produce it.
@@ -144,15 +144,15 @@ MoQ's live importer drops stale groups instead; the worker keeps every fragment 
 An attempt completes only when four facts hold, in whatever order they arrive: the pipe reached end of file on a box boundary with no `moof` still waiting for its `mdat`; FFmpeg exited with status 0; the server acknowledged every segment the producer closed, with no segment number skipped; and the attempt is still active.
 The producer fails the attempt when the pipe ends inside a box header, inside a box body, or after a `moof` with no `mdat`; when FFmpeg exits with a non-zero status; or when the server has not acknowledged every closed segment.
 An exit with status 0 and no media segment also fails the attempt, which matches today's behaviour.
-A completed attempt means that FFmpeg finished cleanly and the server accepted everything it produced; it does not mean that the advertised timeline is covered.
+A completed attempt means that FFmpeg finished cleanly and the server accepted everything FFmpeg produced; it does not mean that the run covered the advertised timeline.
 The worker never learns the expected final segment, so the server owns coverage: under ADR 0019 the server's delivery coordinator treats an advertised segment that no attempt produced as a request-driven recovery, and it, not the worker, tolerates the rounding between the probed duration and the last segment.
 The worker settles an attempt's outcome once, under its own monitor, and a stop that is already in progress prevents the worker from also completing or failing the attempt.
 
-A stop is the attempt's terminal transition, and it changes what the producer admits, not what the server has already committed.
+A stop ends the attempt for good, and it changes what the producer admits, not what the server has already committed.
 When the worker stops an attempt, the producer records the stop under its own lock, then writes `q` to FFmpeg and cancels any upload in flight.
 The reader then drains the pipe to end of file and discards everything it reads, including the partial fragment FFmpeg flushes when it receives `q`.
 The producer delivers nothing after a stop.
-Cancelling an upload is not a rollback: the server may already have committed the cancelled segment, and the server's attempt fence at commit time decides whether that segment is published (ADR 0019).
+Cancelling an upload is not a rollback: the server may already have committed the cancelled segment, and the server's attempt fence at commit time decides whether the server publishes that segment (ADR 0019).
 The worker does not report a failure it observes after its own stop; it has already recorded the stop, and it reports only the stop.
 After writing `q`, the worker waits for FFmpeg to exit within the grace period and then destroys the process forcibly, as it does today, and it waits again for the exit after the forced kill.
 The worker sends `JobAttemptStopped` only after it has observed the process exit, on both paths, so that message always means the process is gone.
@@ -227,7 +227,7 @@ The server still chooses stream copy without reading the source's keyframe inter
 * Low-Latency HLS parts and a part-upload contract.
 A part's length stays unknown until the part ends, and ADR 0019 rejects LL-HLS blocking reload as the way a client waits for a segment.
 * MoQ transport and publication.
-* Retention-based retry (worker issue #1), which follows later behind the same producer interface and needs idempotent segment acceptance on the server.
+* Retention-based retry (worker issue #1), which follows later behind the same producer interface and needs the server to accept a re-sent segment idempotently.
 * The AAC gap of about 30 ms (26.7 ms and 32 ms on two fixtures) and the Chromium end stall after an encoded replacement.
 Both exist under the current HLS muxer and reproduced identically with bounded fragments; the player check records them as the baseline rather than fixing them here.
 * Playback on iOS and tvOS devices and on hardware encoders other than those exercised.
@@ -236,7 +236,7 @@ FFmpeg's MPEG-TS demuxer lands on the next keyframe after the target, so a repla
 * Init identity across FFmpeg builds.
 The init carries the muxer's version string, so a stream session that outlives a worker image upgrade could receive a replacement whose init differs from the one the server serves; nothing measured that case.
 * A production memory bound.
-The proofs of concept measured pacing and one retention budget; the per-producer budget above is a design obligation, not a measurement.
+The proofs of concept measured pacing and one retention budget; this decision obliges the per-producer budget above, and nothing has measured it.
 
 == Consequences
 
@@ -247,12 +247,12 @@ The proofs of concept measured pacing and one retention budget; the per-producer
 * A segment closes about one fragmentation target after its boundary in media time, where today's rename happens at the boundary itself; the target is configuration, and each segment carries about period-over-target `moof` boxes instead of one.
 * The worker holds one closed segment in memory instead of one closed segment on disk.
 * Variable-frame-rate sources are still padded to a constant rate, as today, but the rate is now the worker's own probed number rather than FFmpeg's guess, so the frame-count GOP and the output rate cannot disagree.
-* Every encoder receives time-based keyframes and a rounded-down frame-count ceiling, so segment boundaries stop drifting with the GOP; hardware encoders are verified against that rule when worker issue #14 brings hardware under test.
-* A replacement under ADR 0019 is pinned to the encoder backend that produced the variant's init, and a differing init is refused with a named failure; the H.264 flip removes the in-band parameter sets that MPEG-TS carried, and this is what replaces them.
+* Every encoder receives time-based keyframes and a rounded-down frame-count ceiling, so segment boundaries stop drifting with the GOP; worker issue #14 verifies the hardware encoders against that rule when it brings hardware under test.
+* The server pins a replacement under ADR 0019 to the encoder backend that produced the variant's init and refuses a differing init with a named failure; the H.264 flip removes the in-band parameter sets that MPEG-TS carried, and this pinning replaces them.
 * The upload loop gains `isReady` flow control, a readiness bound and an acknowledgement deadline, none of which it has today, and the worker starts enforcing the slot count it advertises.
 * The worker no longer writes media to disk, so it no longer needs a segment base path or the code that cleans that path up.
 * AAC stream copies gain an explicit `aac_adtstoasc` filter that the HLS muxer inserted on its own; without it every MPEG-TS source with AAC fails to copy under the new muxer flags.
-* MPEG-TS disappears end to end, and so does the container as a type: the server's `ContainerFormat` and the worker's counterpart are deleted rather than kept with one value, and ADR 0036's list of names to keep drops `ContainerFormat`; H.264 playback changes container, and the server pull request carries the player evidence for that change.
+* MPEG-TS disappears end to end, and so does the container as a type: the server change deletes `ContainerFormat` and the worker change deletes its counterpart, rather than keeping either with one value, and ADR 0036's list of names to keep drops `ContainerFormat`; H.264 playback changes container, and the server pull request carries the player evidence for that change.
 * The server and worker repositories change in lockstep once; the container switch, the pin bump, the scripted-FFmpeg fixture and the player check form one server change.
 * A stop can no longer end in a forced kill because the reader sat blocked in an upload; the producer must drain the pipe and cancel the upload, and neither step is optional.
 * A MoQ proof of concept needs `separate_moof`, a smaller fragment bound and a publisher adapter, not a second producer.
@@ -269,7 +269,7 @@ The receiver would have to rebuild every delivery guarantee, and the worker woul
 * Letting the mp4 muxer cut one fragment per segment with `-min_frag_duration` just under the period matched the HLS muxer only at a constant frame rate with keyframes exactly one period apart; it produced 7 fragments for 11 segments on an irregular stream copy and 9 for 11 on a variable-frame-rate encode, and no fixed minimum can hold for arbitrary keyframe spacing.
 * Setting `-min_frag_duration` to exactly the segment period merged two segments at 23.976 fps in the first proof of concept.
 * Checking each fragment's raw `tfdt` against segment number times period rejected 23 of 30 valid segment starts, because decode time carries composition offsets, a 144-frame period is 6.006 s, and the first audio `tfdt` wraps negative.
-* Keeping the preroll fragment of a stream-copy restart inside the restart's first segment reproduces today's misalignment, where the restart's segments overlap the previous attempt by one keyframe interval.
+* Keeping the preroll fragment of a stream-copy restart inside the restart's first segment reproduces today's behaviour, where the restart's segments overlap the previous attempt by one keyframe interval.
 * Closing a segment on a fragment's computed end, its start plus its sample durations, closed a segment before its last fragment arrived on a variable-frame-rate stream copy, where a fragment starting at 6.0 s summed to 12.0 s while the next fragment started at 11.9 s.
 * Cutting a fragment at every frame, so that the closing signal arrives within one frame, multiplies the `moof` count by the frame rate for a gain that the bounded `-frag_duration` already delivers.
 * Passing `-fps_mode:v:0 cfr` to keep the HLS muxer's constant-rate behaviour padded 720 duplicate frames from time zero after a seek to 30 s; the HLS muxer's behaviour is an internal variant that `-copyts` selects and that the command line cannot request.

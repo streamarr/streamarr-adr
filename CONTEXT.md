@@ -118,7 +118,7 @@ A job attempt that replaces an earlier one for the same variant under ADR 0019's
 _Avoid_: retry, restart, replacement (unqualified)
 
 **Format attempt**:
-A new variant that the server chooses after a client reports a format error in Auto. It has its own initialization segment and counts against the playback session's format budget.
+One output format that the server chooses within a playback session, delivered by its own stream session and initialization segment. The initial format is the first attempt, and each Auto recovery after a format error adds one to the playback session's budget.
 _Avoid_: fallback stream, replacement (unqualified)
 
 **Encoder backend**:

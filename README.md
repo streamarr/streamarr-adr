@@ -16,12 +16,6 @@ Documents in `proposals/` are discussion drafts. They are not accepted architect
 
 None at present.
 
-## Spikes
-
-Throwaway prototypes whose conclusion an ADR depends on live in [`spikes/`](spikes/). They are evidence, not product code, and are kept only while the decision they support is in force.
-
-- [`spikes/rebac-engine-comparison`](spikes/rebac-engine-comparison/) — Cedar versus OpenFGA, the basis for ADR 0025.
-
 ## Catalog
 
 - [ADR 0001: PostgreSQL Over Embedded Database](adr/0001-postgresql-over-embedded-db.adoc)
@@ -38,27 +32,27 @@ Throwaway prototypes whose conclusion an ADR depends on live in [`spikes/`](spik
 - [ADR 0012: Filepath URI Encoding](adr/0012-filepath-uri-encoding.adoc)
 - [ADR 0013: Stream Decision Architecture](adr/0013-stream-decision-architecture.adoc)
 - [ADR 0014: Protocol-Agnostic Pagination](adr/0014-protocol-agnostic-pagination.adoc)
-- [ADR 0015: Authorization, Profiles, and Content Controls](adr/0015-authorization-profiles-and-content-controls.adoc)
+- [ADR 0015: Authorization, Profiles, and Content Controls](adr/0015-authorization-profiles-and-content-controls.adoc) — proposed
 - [ADR 0016: Authentication Mechanisms and Session Security](adr/0016-authentication-mechanisms-and-session-security.adoc)
-- [ADR 0017: Persisted Playback-Enforcement Lifecycle](adr/0017-playback-enforcement-lifecycle.adoc)
+- [ADR 0017: Persisted Playback-Enforcement Lifecycle](adr/0017-playback-enforcement-lifecycle.adoc) — superseded by ADR 0018
 - [ADR 0018: Live Playback Authority and Outbound Transcode Workers](adr/0018-live-playback-authority-and-outbound-workers.adoc)
 - [ADR 0019: Recoverable Just-In-Time HLS Segment Delivery](adr/0019-recoverable-jit-hls-segment-delivery.adoc)
 - [ADR 0020: TMDB Reachability Does Not Gate Aggregate Health](adr/0020-tmdb-reachability-does-not-gate-aggregate-health.adoc)
-- [ADR 0021: Device Pairing over Streamarr Transport](adr/0021-device-pairing-over-streamarr-transport.adoc)
+- [ADR 0021: Device Pairing Follows RFC 8628 Semantics over Streamarr Transport](adr/0021-device-pairing-over-streamarr-transport.adoc)
 - [ADR 0022: Accounts Have One Home Household and Profiles Are Portable](adr/0022-single-home-accounts-and-portable-profile-sharing.adoc) — superseded by ADR 0024
 - [ADR 0023: `startLetter` Is a Seek Anchor under TITLE Sort](adr/0023-start-letter-seek-pagination.adoc)
 - [ADR 0024: Identity Authority: One Household per Account, One Personal Profile per Account, Portable Profiles Facilitate Sharing by Relationship](adr/0024-identity-authority-by-relationship.adoc)
 - [ADR 0025: Cedar Decides Authorization; PostgreSQL Keeps the Relationships](adr/0025-cedar-decides-authorization.adoc)
 - [ADR 0026: Mutations Return Payloads Whose Expected Errors Are Typed Unions; Top-Level Errors Carry Failure](adr/0026-mutation-payloads-and-error-channels.adoc)
-- [ADR 0027: Library Scan and Refresh Are Claimed Atomically in the Database and Run on a Single Instance](adr/0027-library-work-claimed-in-database-single-instance.adoc)
+- [ADR 0027: Library Scan and Refresh Are Claimed Atomically in the Database and Run on a Single Instance](adr/0027-library-work-claimed-in-database-single-instance.adoc) — proposed
 - [ADR 0028: Credential Attempts Are Journaled and Throttled in PostgreSQL](adr/0028-credential-attempts-are-journaled-and-throttled-in-postgresql.adoc)
 - [ADR 0029: Pin Jellyfin FFmpeg Releases and Resolve Updates Before Building](adr/0029-pin-jellyfin-ffmpeg-releases.adoc)
 - [ADR 0030: Credential Attempts Use PostgreSQL Time and Pairing Successes Preserve Failures](adr/0030-credential-budgets-use-shared-time-and-explicit-success-reset.adoc)
 - [ADR 0031: Artwork Replacement Uses a Bounded Transaction-Scoped Advisory Lock](adr/0031-transaction-scoped-artwork-replacement-locking.adoc)
 - [ADR 0032: Media File Probe Results Are Persisted and Playback Reads Them](adr/0032-media-file-probe-results-are-persisted.adoc)
 - [ADR 0033: The Transcode Worker Is a Separate Service and Repository, and the Server Runs No FFmpeg](adr/0033-transcode-worker-is-a-separate-service.adoc)
-- [ADR 0034: Release Please Owns Maven Release Versions](adr/0034-release-please-owns-maven-release-versions.adoc)
-- [ADR 0035: The Worker Uses Spring Boot and Delegates Distributed Transport Security to the Mesh](adr/0035-worker-uses-spring-boot-and-mesh-transport-security.adoc) — proposed
+- [ADR 0034: Release Please Owns Maven Release Versions](adr/0034-release-please-owns-maven-release-versions.adoc) — proposed
+- [ADR 0035: The Worker Uses Spring Boot and Delegates Distributed Transport Security to the Mesh](adr/0035-worker-uses-spring-boot-and-mesh-transport-security.adoc)
 - [ADR 0036: Video Contracts Share One Vocabulary and Preserve Dynamic-Range Facts](adr/0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc)
 - [ADR 0037: The Worker Delivers Fragmented MP4 Segments From FFmpeg's Standard Output, and HLS Media Segments Are fMP4 Only](adr/0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc)
 

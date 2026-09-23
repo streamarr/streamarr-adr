@@ -59,4 +59,4 @@ Throwaway prototypes whose conclusion an ADR depends on live in [`spikes/`](spik
 - [ADR 0033: The Transcode Worker Is a Separate Service and Repository, and the Server Runs No FFmpeg](adr/0033-transcode-worker-is-a-separate-service.adoc)
 - [ADR 0034: Release Please Owns Maven Release Versions](adr/0034-release-please-owns-maven-release-versions.adoc)
 - [ADR 0035: The Worker Uses Spring Boot and Delegates Distributed Transport Security to the Mesh](adr/0035-worker-uses-spring-boot-and-mesh-transport-security.adoc) — proposed
-- [ADR 0036: Video Contracts Share One Vocabulary and Preserve Dynamic-Range Facts](adr/0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc) — proposed
+- [ADR 0036: Video Contracts Share One Vocabulary and Preserve Dynamic-Range Facts](adr/0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc)

@@ -68,3 +68,63 @@ _Avoid_: target format, requested output
 The media that the worker actually produces and that the playlist must describe.
 Under fragmented MP4 delivery, the initialization segment describes it on its own.
 _Avoid_: actual output, transcoded output
+
+### Segment delivery
+
+**Producer**:
+The worker module that owns one job attempt's FFmpeg process, reads its standard output, and delivers that attempt's initialization segment and media segments.
+_Avoid_: engine, transcoder, pipeline
+
+**Fragment**:
+One movie-fragment pair (`moof` and `mdat`) that FFmpeg emits, and the smallest unit the producer reads. A fragment starts at a keyframe or when the fragmentation target elapses.
+_Avoid_: chunk, part
+
+**Media segment**:
+The unit an HLS playlist advertises, always fragmented MP4. Segment N is the fragments whose first video sample is a keyframe inside media time [N × period, (N + 1) × period), together with the fragments that follow them before the next such keyframe.
+_Avoid_: chunk, segment file, .ts, container format
+
+**Initialization segment**:
+The `ftyp` and `moov` boxes a player needs before any media segment of a variant. There is one per variant, and it is identical across every attempt that the same encoder backend produces.
+_Avoid_: init file, header, init.mp4
+
+**Media time**:
+Presentation time on the zero-based timeline that every attempt of a stream session shares: the source's timestamps with the source container's start time subtracted.
+_Avoid_: PTS, source time, wall-clock time
+
+**Fragmentation target**:
+The configured maximum media duration of a fragment. The muxer honours it at the next packet, so it is a target, never a hard bound.
+_Avoid_: fragment bound, chunk size
+
+**Preroll**:
+Media before the requested seek point that a stream copy emits, because a seek lands on the keyframe at or before the target. The previous attempt already delivered it, so the producer discards it.
+_Avoid_: overlap, lead-in
+
+**Stream copy**:
+Any transcode mode that passes the source video through unchanged (REMUX and AUDIO_TRANSCODE). Its segment boundaries depend on the source's own keyframes.
+_Avoid_: passthrough, remux (when only the video is copied)
+
+**Source container**:
+The container of a media file as the probe found it, such as Matroska, MP4 or MPEG-TS. It is a source fact that decides direct-play eligibility, and it never describes HLS delivery, which is always fragmented MP4.
+_Avoid_: container format, ContainerFormat, output container
+
+### Attempts
+
+**Job attempt**:
+One dispatch of a variant's job to a worker, with its own FFmpeg process, producer and outcome: completed, failed or stopped.
+_Avoid_: dispatch attempt, run, session
+
+**Replacement attempt**:
+A job attempt that replaces an earlier one for the same variant under ADR 0019's recovery. It keeps the variant's initialization segment, media time and encoder backend.
+_Avoid_: retry, restart, replacement (unqualified)
+
+**Format attempt**:
+A new variant that the server chooses after a client reports a format error in Auto. It has its own initialization segment and counts against the playback session's format budget.
+_Avoid_: fallback stream, replacement (unqualified)
+
+**Encoder backend**:
+The encoder a worker actually runs for a codec family, together with whether it is hardware or software. A variant's first job attempt pins the backend for every replacement attempt.
+_Avoid_: encoder capability, codec
+
+**Completed attempt**:
+A job attempt whose FFmpeg exited cleanly with its output fully read and every delivered segment acknowledged while the attempt was still active. Completion does not mean the advertised timeline is covered; the server owns coverage.
+_Avoid_: finished, done, success

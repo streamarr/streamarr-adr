@@ -1,0 +1,283 @@
+= ADR 0039: Durable Catalog Entries Hold Metadata Edits and User Data; Library Items Hold What Scans Produce
+
+== Status
+
+Proposed
+
+== Context
+
+A library item is a movie, series, season or episode row that belongs to one library.
+Items are deleted and created again during ordinary operation:
+
+* A library is removed and added back.
+* Sonarr or Radarr replaces a file, and a scan deletes the item before the new file matches it.
+* A renamed file matches a different title.
+* Orphan cleanup deletes an item whose files are gone. That cleanup is proposed to become stricter in ADR 0038 (streamarr-server issue #449).
+
+A new item gets a new id, so anything stored against the old item is lost or left pointing at nothing.
+
+Streamarr has no metadata editing yet.
+A library refresh overwrites every descriptive field and replaces credit lists wholesale.
+Watch history references the item without a foreign key, so it goes stale when the item is recreated.
+Resume positions cascade from the media file, so a file upgrade discards them.
+
+Plex and Jellyfin lose user edits in the same situations, for different reasons:
+
+* **Plex** keeps edits and field locks on the item's database row.
+** Deleting a library, moving an item between libraries, clearing cached metadata or losing the database loses them.
+** Poster locks have no visible indicator.
+** Edits made before an item matches are lost when it matches.
+** Actors and people cannot be edited at all.
+** No endpoint exports user edits.
+* **Jellyfin** saves the whole item object.
+** Its metadata editor and its refresh queue both change the same cached instance, with no item lock, transaction or version check.
+** Only 9 fields can be locked, while about 18 are merged from providers.
+** There is no image lock.
+** A cast member the user removed comes back on refresh unless the whole cast is locked.
+** NFO sidecar files act as a second source of truth, and several open issues trace lost edits to them.
+** Jellyfin reattaches watch state to a recreated item by a key derived from provider ids, but metadata edits die with the item.
+
+Provider identities are not permanent:
+
+* TMDB deletes duplicate ids with no redirect.
+* IMDb and TheTVDB report merged ids through `canonicalId` and `mergeToId`.
+* TMDB movie and TV ids share number ranges; this is why V024 had to widen `external_identifier` uniqueness.
+* Providers number episodes differently.
+
+`external_identifier` began as a mapping from one provider id to one entity.
+V024 added the entity id to its uniqueness, and V022 cascades its rows from the item.
+
+Two libraries holding the same title shared one item until streamarr-server #445.
+Seven code paths write descriptive fields.
+Library refresh saved an entity copy loaded before its provider calls.
+
+== Decision
+
+=== The catalog
+
+The catalog is the server-wide set of catalog entries.
+A catalog entry is the server's durable record of a matched title, person or company.
+Titles are movies, series, seasons and episodes.
+Libraries hold items. Each item points at one catalog entry, and at most one item per library points at a given entry.
+An entry outlives its items: removing every item leaves the entry in place.
+Versions of a title inside one library share one item; libraries never share items.
+
+`external_identifier` becomes the catalog entry's provider-id table.
+Each provider id, qualified by provider and media type, belongs to exactly one catalog entry, and its rows no longer cascade from items.
+A match finds its catalog entry by any provider id it knows and records the provider ids it learns.
+Seasons and episodes are identified by provider ids, not by their numbers, so a different episode ordering cannot attach data to the wrong episode.
+The server stores TMDB's season and episode ids, which it discards today.
+An unmatched item gets a catalog entry with no provider ids.
+Person and company rows are server-wide rather than per library. Each points at its own catalog entry, just as items do.
+
+A catalog entry stores its current provider values once, shared by every item attached to it.
+It records when those values were fetched, and a write applies provider values only when they were fetched later than the stored ones.
+This mirrors ADR 0031's distinction between atomic replacement and provider freshness.
+A blank title from a provider never replaces a stored provider title.
+
+=== What users author belongs to the catalog entry
+
+Anything a user authors attaches to the catalog entry. That covers:
+
+* metadata edits and edited artwork;
+* collection membership;
+* watch history and resume positions;
+* the profile watchlist.
+
+Anything a scan produces attaches to the item:
+
+* media files;
+* provider artwork image rows;
+* probe results;
+* item results.
+
+A catalog entry with no items and no user-authored data is deleted by a scheduled sweep.
+An entry that still holds user-authored data is kept with no item attached. It is not deleted, and returns when an item matches it again.
+
+=== Metadata edits
+
+A metadata edit is a value a ServerAdmin sets for one field of a catalog entry.
+Edits are server-wide. There are no per-household or per-profile metadata edits, and personalisation such as hiding titles or custom lists is a separate concern.
+
+Every field has a provider value and at most one metadata edit.
+The effective value is the edit when one exists, otherwise the provider value.
+Effective values are written onto every attached item row, so existing reads, sorting and search use them unchanged.
+"Effective value" is a server-side term: GraphQL clients read `Movie.title` as before.
+
+Each edit is one row holding:
+
+* its id;
+* the edited value;
+* the provider value at the time of the edit;
+* audit columns.
+
+Replacing an edit creates a new id, and removing an id that no longer exists succeeds.
+The API reports `providerValueChanged` when the provider's current value differs from the value at the time of the edit, comparing typed values rather than strings.
+
+Refresh only updates provider values. No refresh mode discards a metadata edit, including a forced artwork refresh; only removing the edit returns a field to the provider value.
+
+Edits are patches:
+
+* A field left out of an edit is unchanged.
+* A value sent is stored exactly as sent, so an empty string blanks a text field.
+* `null` is rejected with an error that points at removing the edit.
+* Dates and content ratings can be set or removed, but not blanked.
+
+Keeping the provider's current value is an edit whose value equals it; there is no separate pin or lock operation.
+The sort title derives from the effective title unless the sort title has its own edit.
+
+The first release covers descriptive fields and artwork on movies, series, seasons and episodes.
+People, companies and credits follow the same rules, as described below.
+Metadata edits are removed by edit id, not by field name, so the set of removable fields always matches the stored edits.
+
+=== People, companies and credits
+
+A ServerAdmin can edit a person's name and photo, and a company's name and logo.
+Those edits live on the person's or company's catalog entry, and photos and logos follow the artwork edit rules below.
+The scheduled sweep still deletes person and company rows that nothing credits.
+Their catalog entries keep any edits, and the edits return when a scan credits that person or company again.
+
+A credit edit is a metadata edit that adds or removes one person, company or genre on a movie's or series' credits.
+Each credit edit has its own id, and removing that edit undoes it.
+The effective credit list is the provider's list without the removed credits, plus the added ones at their given positions.
+New credits from the provider still arrive; a removed credit stays removed and an added one stays added.
+A whole credit list is never locked.
+
+People are added to a title's credits in the title's context, inside the same credit edit, never through a separate creation step.
+Each addition names its person in exactly one of three ways:
+
+* an existing person in the catalog, who is simply added;
+* a provider search result. If that provider id already belongs to a catalog entry, the existing person is added. Otherwise the person's catalog entry is created from the provider's values.
+* a new unmatched person with only a name. The name is stored as a metadata edit, so the entry is kept like any other user data.
+
+A person is created only when they don't already exist.
+Any person created is created in the same transaction as the credit, so a failed edit creates nothing.
+A person's identity is their catalog entry, never their name: two people with the same name stay two people.
+Companies are added to studios the same way.
+Genres are added from existing genres or the provider's genre list, and are never invented. A custom grouping such as "Christmas" belongs in a collection or a tag.
+
+=== Artwork edits
+
+Choosing a provider image or uploading one creates an artwork edit on the catalog entry.
+The original file stays on disk in an `uploads/` folder under the artwork storage path. PostgreSQL stores facts about the upload, never its bytes.
+Item image rows hold the effective artwork, so the existing image reads are unchanged:
+
+* While an artwork edit exists, refresh records the provider's latest image key and downloads nothing.
+* Removing the edit downloads the provider's current image.
+* A recreated item rebuilds its image rows from the entry's original file.
+* Because the original is kept, an image the provider later drops still survives.
+
+Building edited artwork runs on the durable artwork jobs from streamarr-server #412, so an interrupted build resumes.
+
+An upload arrives in two steps:
+
+1. A dedicated HTTP endpoint checks ServerAdmin before reading the body, streams the file under a size cap, and returns an upload id.
+2. A GraphQL mutation attaches that upload to an item's catalog entry.
+
+Uploads that are never attached are deleted by a scheduled sweep.
+`/graphql` accepts only JSON.
+ADR 0002 governs commands and queries; file bytes travel over plain HTTP in both directions, as image reads already do under ADR 0012.
+
+Uploads and provider downloads pass the same image checks:
+
+* JPEG or PNG only, detected from the bytes;
+* a byte cap;
+* a pixel cap checked before decoding;
+* decoding that fails closed.
+
+A production server refuses to start without a durable artwork storage path.
+Operators back up the whole data directory, which includes the uploaded originals.
+
+=== Fix match and changing identities
+
+Only a ServerAdmin can fix a match.
+Fix match runs in the background and moves an item to another catalog entry:
+
+* The request names the metadata edits to copy, and an empty list copies none.
+* A copied edit replaces the destination's edit for the same field.
+* The originals stay on the old entry.
+* Clients pre-select every edit when the old entry had no provider match, because those edits were the item's only metadata.
+* Every profile's watch state is copied to the new entry automatically, because it records what the person watched rather than what the title was matched to.
+
+A scan that re-matches a file to a different title leaves the edits on the old entry as unattached metadata edits.
+A ServerAdmin can list unattached metadata edits, delete them, or copy them onto an item.
+A provider changing its own id for the same title is not a rematch, and edits follow the title.
+
+=== One writer
+
+One module is the only writer of provider-sourced descriptive fields and credit lists on items:
+
+* Scan and library refresh hand it provider values, as records rather than entities.
+* Admin code hands it metadata edits.
+* Fix match hands it the edits to copy.
+
+It recalculates effective values for every item attached to the affected catalog entries in one transaction, under row locks taken after provider calls complete.
+It uses no optimistic locking.
+It publishes an event naming the changed fields after commit.
+Callers never pass it entities, so a stale entity copy cannot be saved.
+
+=== Explicitly deferred
+
+* Reordering the provider's credits, and editing a provider credit's character name. Until then, removing a credit and adding it again changes its character name.
+* A person's biography, birth and death dates, and other fields Streamarr does not fetch today.
+* Matching an unmatched person or company to a provider later.
+* Choosing which provider's values win when a catalog entry has values from more than one provider.
+* Switching a library's metadata provider. The provider stays fixed at library creation. When switching is added, it starts a full rescan and re-match of the library, and edits and watch state carry over through the catalog entry's provider ids.
+* Per-library metadata language.
+* Re-keying catalog entries automatically from IMDb `canonicalId` or TheTVDB `mergeToId`, and re-resolving deleted TMDB ids through IMDb or Wikidata.
+* Exporting and importing metadata edits.
+* Presenting a title that several libraries hold as one title.
+
+== Consequences
+
+* The following no longer lose metadata edits, edited artwork, collection membership, watch history or resume positions:
+** removing and re-adding a library;
+** a Sonarr or Radarr file upgrade;
+** a scan that recreates an item.
+* Refreshing a title in one library updates its copies in every library, because they share one catalog entry.
+* User-authored data for titles that no library holds accumulates. It is small, and ServerAdmins can review unattached metadata edits.
+* Every writer of descriptive fields goes through one module. Tests that assert "the provider value wins on refresh" are rewritten to assert that edits survive refresh.
+* Library-scoped item identity is enforced by a unique constraint, not by lookup order.
+* Season and episode catalog entries appear at each series' next refresh, so an upgraded server needs a refresh before season and episode edits are possible.
+* The scheduled sweep for people, companies and genres that no item credits (streamarr-server #444) waits seven days before deleting. That grace period avoids deleting and re-downloading shared artwork when a credit briefly disappears. It is not a safety net against a filesystem wrongly reporting files as missing; ADR 0038 handles that and rejects a timer for that purpose.
+
+== Rejected Alternatives
+
+* Field locks on the item row, as Plex and Jellyfin use: they die with the item, the provider value they hide cannot be shown, and reverting needs another provider call.
+* Keying edits by one provider id: provider merges, provider switches and numeric ids shared across media types would orphan or mis-attach them.
+* Keeping an item's id stable across removal: items are per library and per file set, and the catalog entry is the record that must survive.
+* Keeping edits on person and company rows: an edited person could never be deleted, repeating Jellyfin's locked people that are never cleaned up, and edits would need a second place to live.
+* Locking a whole credit list, as Jellyfin does: the provider's new credits stop arriving.
+* Custom genres: a custom grouping belongs in a collection or a tag.
+* Identifying people by name, as Jellyfin and Plex do: different people with the same name merge, and case-only duplicates appear.
+* Creating a person in a separate step before crediting them: a failed credit edit would leave a person no title credits.
+* Treating audit columns as protection: they are row-level, background writers overwrite them, and they cannot tell an edit from any other authenticated write.
+* NFO or other sidecar files in media folders: they need write access to media mounts, and Jellyfin shows they become a second source of truth that overwrites edits.
+* Per-household or per-profile metadata edits: they multiply storage and make search, artwork cleanup and the canonical poster ambiguous.
+* One item per title across all libraries: library browsing, library removal and library-scoped access control would all have to go through files.
+* `null` meaning "make this field empty": absent and `null` are too easily confused in generated clients.
+* A separate pin or lock operation: keeping the provider's value is an ordinary edit.
+* A refresh mode that also replaces metadata edits.
+* GraphQL multipart uploads: Spring for GraphQL declined multipart on the GraphQL endpoint, and DGS 12's upload classes are no longer wired. Supporting it would widen servlet size limits for every request and read files before the ServerAdmin check.
+* Base64 uploads in GraphQL variables: about a third larger, with no streaming and the whole image held in memory.
+* Storing uploaded originals in PostgreSQL: files stay on disk, and the database keeps only facts about them.
+
+== References
+
+* link:0002-graphql-over-rest.adoc[ADR 0002: GraphQL Over REST]
+* link:0006-tmdb-metadata-abstraction.adoc[ADR 0006: TMDB Metadata Provider Abstraction]
+* link:0010-spring-application-events.adoc[ADR 0010: Spring Application Events for Service Decoupling]
+* link:0012-filepath-uri-encoding.adoc[ADR 0012: Filepath URI Encoding]
+* link:0024-identity-authority-by-relationship.adoc[ADR 0024: Identity Authority by Relationship]
+* link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026: Mutation Payloads and Error Channels]
+* link:0031-transaction-scoped-artwork-replacement-locking.adoc[ADR 0031: Artwork Replacement Uses a Bounded Transaction-Scoped Advisory Lock]
+* link:0040-media-read-resolvers-return-dtos-mapped-by-mapstruct.adoc[ADR 0040: Media Read Resolvers Return DTOs Mapped by MapStruct]
+* https://github.com/streamarr/streamarr-server/issues/444[streamarr-server #444], https://github.com/streamarr/streamarr-server/issues/445[#445], https://github.com/streamarr/streamarr-server/issues/412[#412], https://github.com/streamarr/streamarr-server/issues/430[#430], https://github.com/streamarr/streamarr-server/issues/449[#449], https://github.com/streamarr/streamarr-server/issues/54[#54]
+* https://support.plex.tv/articles/201272763-edit-details/[Plex: Edit details (field locks)]
+* https://support.plex.tv/articles/200289286-deleting-libraries/[Plex: Deleting libraries]
+* https://forums.plex.tv/t/plex-wont-save-movie-music-tv-show-file-edits/919397/3[Plex forums: edits live on the item row]
+* https://github.com/jellyfin/jellyfin/issues/8532[Jellyfin #8532], https://github.com/jellyfin/jellyfin/issues/15596[#15596], https://github.com/jellyfin/jellyfin/issues/9104[#9104], https://github.com/jellyfin/jellyfin/issues/11619[#11619]: lost or overwritten edits
+* https://developer.themoviedb.org/reference/find-by-id[TMDB: Find by external id]
+* https://data.imdb.com/documentation/key-concepts[IMDb: canonicalId]
+* https://thetvdb.github.io/v4-api/swagger.yml[TheTVDB v4: mergeToId]
+* https://github.com/spring-projects/spring-graphql/issues/69[Spring for GraphQL #69: file uploads]

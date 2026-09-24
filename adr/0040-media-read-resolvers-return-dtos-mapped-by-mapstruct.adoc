@@ -1,0 +1,81 @@
+= ADR 0040: Media Read Resolvers Return DTOs Mapped by MapStruct
+
+== Status
+
+Proposed
+
+When accepted, this ADR supersedes link:0011-remove-mapstruct.adoc[ADR 0011].
+
+== Context
+
+Movie, series, season and episode queries, and their field resolvers, return JPA entities to GraphQL.
+Lazy associations, entity refactors and Hibernate proxies therefore reach the GraphQL layer, and the schema follows the entity shape.
+ADR 0026 deliberately left read resolvers out of scope: replacing entities with DTOs in read resolvers was "a separate concern with its own blast radius".
+The identity and administration types (`AccountAdministration`, `ProfileAdministration`, and others) already use purpose-built records.
+
+ADR 0039 needs two kinds of mapping:
+
+* Catalog entries write effective values onto items, and the metadata administration views return provider values and metadata edits beside them.
+* Metadata providers return provider value records instead of JPA entities.
+
+The metadata code maps TMDB responses into entities by hand today.
+About a quarter of those mapping lines repeat the same field lists across the movie and series paths.
+
+ADR 0011 removed MapStruct in February 2026.
+The mappers then were trivial, and because the entities had no setters, MapStruct's default warning policy let them skip every field they were meant to update.
+ADR 0011 named the conditions for bringing MapStruct back, among them "domain objects diverge significantly from entity structure" and "the number of mapped fields per entity grows large enough that manual setters become a maintenance risk".
+Read DTOs, metadata administration views and provider value records meet both conditions.
+
+This repository compiled with MapStruct 1.6.3, Lombok 1.18.42 and `lombok-mapstruct-binding` 0.2.0 on Java 25 until ADR 0011.
+
+== Decision
+
+Media read resolvers return records mapped from entities; no JPA entity crosses into a media read resolver.
+This covers movie, series, season, episode and library reads, together with their field resolvers and data loaders.
+Resolvers read through services, as streamarr-server #154, #155 and #156 require, before they adopt the records.
+
+MapStruct returns for two uses:
+
+* entity to read record;
+* metadata provider response to metadata provider value record.
+
+Every mapper follows these rules:
+
+* It uses MapStruct 1.6.3 with the Lombok binding, ordered Lombok, then the binding, then the MapStruct processor.
+* It declares `unmappedTargetPolicy = ReportingPolicy.ERROR`, so adding a field to a record fails the build until the field is mapped or explicitly ignored. This closes the silent gap ADR 0011 recorded.
+* A provider mapper ignores unmapped source properties, because provider responses carry many fields Streamarr does not use.
+* Logic lives only in `@Named` methods or in methods MapStruct selects by type, written in Streamarr's own source, never in `expression` strings.
+* It is tested through its mapping methods with fully populated fixtures.
+
+Mutation payloads keep the hand-written exhaustive switches that ADR 0026 requires; MapStruct does not map service outcomes to payloads.
+
+=== Explicitly deferred
+
+* Upgrading to MapStruct 1.7 once it is released as stable.
+* Records for non-media read resolvers that still return entities.
+
+== Consequences
+
+* GraphQL media types stop depending on entity shape, lazy loading and Hibernate proxies.
+* Batched data loaders can load parent records directly (streamarr-server #191).
+* Adding a field to a read record or a provider value record fails the build until it is mapped.
+* The build runs an annotation processor again, with the ordering constraint above.
+* Generated mapper implementations sit in generated sources, which Sonar already excludes. Logic in `@Named` methods stays in Streamarr's source and counts towards coverage.
+* ArchUnit keeps metadata provider response types inside the metadata provider package, so only provider value records leave it.
+
+== Rejected Alternatives
+
+* Keeping JPA entities in read resolvers: the schema stays coupled to entity shape and lazy loading.
+* Hand-written static factory methods: nothing proves every field is mapped, and the repeated field lists remain.
+* Reflection-based mappers such as ModelMapper: mapping errors surface at runtime instead of compile time.
+* MapStruct for mutation payloads: it cannot prove an exhaustive switch over Java sealed types, which ADR 0026 relies on.
+* `expression` strings for mapping logic: they are not checked until the generated code compiles, and they are hard to debug.
+
+== References
+
+* link:0006-tmdb-metadata-abstraction.adoc[ADR 0006: TMDB Metadata Provider Abstraction]
+* link:0011-remove-mapstruct.adoc[ADR 0011: Remove MapStruct]
+* link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026: Mutation Payloads and Error Channels]
+* link:0039-catalog-entries-hold-metadata-edits-and-user-data.adoc[ADR 0039: Durable Catalog Entries Hold Metadata Edits and User Data]
+* https://mapstruct.org/documentation/stable/reference/html/[MapStruct reference guide]
+* https://github.com/streamarr/streamarr-server/issues/154[streamarr-server #154], https://github.com/streamarr/streamarr-server/issues/155[#155], https://github.com/streamarr/streamarr-server/issues/156[#156], https://github.com/streamarr/streamarr-server/issues/191[#191]

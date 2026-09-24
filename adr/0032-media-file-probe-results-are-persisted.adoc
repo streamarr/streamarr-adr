@@ -90,7 +90,8 @@ The scan does not wait for further retries after an attempt that it requested re
 The scan tracks only the probes that it requested, so pending probes of other libraries and later requests for the same files do not delay it.
 
 Probes run in db-scheduler, possibly after a restart, so the scan reads the stored results at a configured interval rather than waiting for an in-process signal.
-The server always runs the probe dispatcher; no setting disables it.
+Streamarr adds no setting that disables the probe dispatcher.
+Deployments leave the db-scheduler starter's own `db-scheduler.enabled` property on; only tests turn it off, and they start their own schedulers.
 The server never reads the scheduler's table for this; the result tables and the probe request hold everything the scan needs.
 If the scan cannot read those results, or cannot save a result of its own, it fails through ADR 0027's failure path.
 The scan does not save probe failures; the dispatcher does.
@@ -130,9 +131,13 @@ Other files proceed while a changing file waits.
 
 Bulk scans do not impose a quiet period.
 A scan requests a probe for an unchanged file that needs one, and the dispatcher probes it without waiting.
+The scan requests the probe with the size and modification time it read while listing the library, so it does not read the source again.
+A source that becomes unreadable after the listing fails its probe attempt, not the scan.
 A retry for a `probe_version` bump runs without waiting.
 Newly requested inputs replace a pending probe's inputs but never move it earlier.
-One exception applies: when a scan or file discovery requests a probe that is waiting out the backoff of a failed attempt, the retry runs at once and its backoff starts again.
+One exception applies: when a scan or file discovery requests a probe whose last attempt saved a failure, the probe runs at once and its backoff starts again.
+The rule reads that saved failure, not db-scheduler's failure count, which busy-worker deferrals keep and replacing a pending probe's inputs resets.
+A cancelled attempt saves no failure, so its backoff stays.
 A playback request keeps the backoff.
 A probe that observed a change keeps its quiet period even when newer inputs were requested while it ran.
 A request does not record whether its sender waited for the file to go quiet, so no request can shorten the wait.
@@ -196,6 +201,7 @@ Record these failures and the next retry time on the per-file task without writi
 The failure handler stores the reason on the file's probe request, `media_file_probe_task_request`, in the transaction that reschedules the retry.
 It stores the reason only while the failed attempt's inputs are still the requested inputs.
 When a newer request replaced them while the attempt ran, the handler stores nothing and retries the requested inputs at once, because the failure says nothing about them.
+When no probe is requested any more, for example because the media file was deleted during the attempt, the handler removes the execution.
 The reason uses the item failure reasons from https://github.com/streamarr/streamarr-server/issues/417[issue #417]:
 
 * `SOURCE_INACCESSIBLE` when the worker reports `PROBE_FAILURE_SOURCE_UNAVAILABLE`, such as for an unmounted share or a file it cannot read, or when the server cannot read the source attributes.
@@ -287,6 +293,8 @@ The pipeline itself is unchanged.
 * Waiting for the retries of a failed attempt — a file on an unreadable share would keep the scan open indefinitely.
 * Retrying a failed attempt's own inputs after a newer request replaced them — an attempt that fails before it compares the source snapshot never reaches the requested inputs, so a scan waiting for them would stay open indefinitely.
 * Counting a failure recorded before the scan — a rescan after a share comes back would report the file as failed while its retry waited out the backoff.
+* Deciding a rescan's retry from db-scheduler's failure count — busy-worker deferrals keep the count, so a rescan would pull a busy wait forward, and replacing a pending probe's inputs resets it, so a rescan with new inputs would wait out the backoff.
+* Reading the source again when a scan requests a probe — a source that became unreadable after the listing would fail the whole scan instead of its own probe attempt.
 Jellyfin probes a failed file again on every scan but records nothing; Streamarr retries on each scan and keeps the reason and the backoff between scans.
 
 == References

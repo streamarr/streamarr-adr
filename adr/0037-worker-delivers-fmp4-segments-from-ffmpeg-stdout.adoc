@@ -133,7 +133,11 @@ The producer closes the open segment when it receives a sync-first fragment whos
 `-frag_duration` is a fragmentation target that measurably shortens that lag, not a guarantee: the muxer cuts at the first packet after the target (measured spans of 1.001 s for H.264 and 1.033 s for SVT-AV1 at a 1 s target), so the closing fragment follows the boundary by about one target in media time rather than one whole segment, and wall-clock delivery further depends on encoder speed and on back-pressure from the server.
 End of file closes the last open segment.
 The producer discards a fragment whose segment number is below the job's start sequence number; that fragment is the preroll of a stream-copy seek, and the previous attempt already delivered its content.
-The producer fails the attempt when a fragment skips a segment number, because the source has no keyframe inside the skipped segment's interval and no retry can produce it.
+The producer fails the attempt with the named reason `SKIPPED_SEGMENT_NUMBER` when a sync-first fragment skips a segment number, because the source has no keyframe inside the skipped segment's interval and no retry can produce it.
+The failure is decided at that fragment: the producer admits nothing from it on and reads nothing after it into a segment.
+The same fragment is the boundary that closes the open segment, so the producer closes that segment and delivers it as at any other boundary before it reports the failure.
+It is the only segment the producer closes after detecting the skip, and all of its content precedes the skipping fragment; dropping it would only defer the same bytes to a replacement attempt that fails at the same fragment.
+A segment that runs past the end of its interval is not itself a failure; whether it conforms to the duration the playlist advertises is issue #66's policy, not the producer's.
 The producer assembles one segment in memory, bounded by the server's segment cap, and starts the upload only after it closes the segment, so the upload contract does not change: the worker sends the metadata message with `content_length_bytes` first, then the chunks, and the server acknowledges the segment.
 The worker sends the next chunk only when the gRPC stream reports `isReady`.
 The reader admits a new fragment only while the assembling segment and the segment awaiting acknowledgement fit inside the producer's budget of two segments; otherwise the reader stops reading and the pipe blocks FFmpeg.
@@ -181,7 +185,7 @@ That retry sits behind the same producer interface and needs no new buffer.
 === Tests substitute the process
 
 Tests substitute the process, not the producer: production uses `ProcessBuilder`, and the worker-session tests supply a scripted `Process`, so the real producer and its grouping and ordering rules run in every test.
-Recorded fixtures pin the grouping against the HLS muxer's cut points for a constant 23.976 fps encode, a stream copy with irregular keyframes, a variable-frame-rate encode, a variable-frame-rate stream copy with B-frames, an irregular variable-frame-rate source through a frame-count-GOP encoder with and without a seek, a source whose timestamps begin after zero, a run that ends in an audio-only fragment, a stream-copy restart whose preroll the producer discards, the init segment's byte identity between a start-0 run and a seek run, and a run longer than 1000 segments through each software encoder to show that no interval is ever skipped.
+Recorded fixtures pin the grouping against the HLS muxer's cut points for a constant 23.976 fps encode, a stream copy with irregular keyframes, a variable-frame-rate encode, a variable-frame-rate stream copy with B-frames, an irregular variable-frame-rate source through a frame-count-GOP encoder with and without a seek, a source whose timestamps begin after zero, a run that ends in an audio-only fragment, a stream-copy restart whose preroll the producer discards, a stream copy whose keyframe gap exceeds the period and that delivers its complete segments before it fails with `SKIPPED_SEGMENT_NUMBER`, the init segment's byte identity between a start-0 run and a seek run, and a run longer than 1000 segments through each software encoder to show that no interval is ever skipped.
 Smoke and image tests keep real FFmpeg.
 The server's scripted FFmpeg test fixture writes a recorded fMP4 stream to standard output instead of writing segment files.
 
@@ -223,7 +227,8 @@ Worker PR #38 remains the interim fix for issue #36 until the producer lands.
 Explicitly deferred:
 
 * A remux gate on keyframe spacing (issue #66 with worker issue #16).
-The server still chooses stream copy without reading the source's keyframe interval, and `align_keyframes_to_segments` is still unread; a source whose keyframe gap exceeds the period fails under this producer with a named reason instead of producing misnumbered segments, until the probed keyframe timestamps let the server refuse the copy up front.
+The server still chooses stream copy without reading the source's keyframe interval, and `align_keyframes_to_segments` is still unread; a source whose keyframe gap exceeds the period delivers its segments up to the gap and then fails under this producer with `SKIPPED_SEGMENT_NUMBER` instead of producing misnumbered segments, until the probed keyframe timestamps let the server refuse the copy up front.
+Whether a copy segment longer than the period, such as each 10.01 s segment before that gap, conforms to the advertised duration is also issue #66's policy.
 * Encoder-backend affinity for ADR 0019 replacements (issue #398 with worker issue #28); the init comparison above stands alone until then.
 * Low-Latency HLS parts and a part-upload contract.
 A part's length stays unknown until the part ends, and ADR 0019 rejects LL-HLS blocking reload as the way a client waits for a segment.
@@ -271,6 +276,7 @@ The receiver would have to rebuild every delivery guarantee, and the worker woul
 * Setting `-min_frag_duration` to exactly the segment period merged two segments at 23.976 fps in the first proof of concept.
 * Checking each fragment's raw `tfdt` against segment number times period rejected 23 of 30 valid segment starts, because decode time carries composition offsets, a 144-frame period is 6.006 s, and the first audio `tfdt` wraps negative.
 * Keeping the preroll fragment of a stream-copy restart inside the restart's first segment reproduces today's behaviour, where the restart's segments overlap the previous attempt by one keyframe interval.
+* Failing the attempt before closing the open segment when a fragment skips a segment number discards a complete segment whose number is correct; every replacement attempt that starts at that segment reproduces the same bytes and fails at the same fragment, so no attempt could ever deliver it.
 * Closing a segment on a fragment's computed end, its start plus its sample durations, closed a segment before its last fragment arrived on a variable-frame-rate stream copy, where a fragment starting at 6.0 s summed to 12.0 s while the next fragment started at 11.9 s.
 * Cutting a fragment at every frame, so that the closing signal arrives within one frame, multiplies the `moof` count by the frame rate for a gain that the bounded `-frag_duration` already delivers.
 * Passing `-fps_mode:v:0 cfr` to keep the HLS muxer's constant-rate behaviour padded 720 duplicate frames from time zero after a seek to 30 s; the HLS muxer's behaviour is an internal variant that `-copyts` selects and that the command line cannot request.

@@ -151,8 +151,9 @@ The worker sets no `min_frag_duration`, so every keyframe starts a fragment, and
 The worker forces a keyframe at every segment boundary for every encoder it runs, including SVT-AV1 and the hardware encoders that today receive only a frame-count GOP, disables scene-cut keyframes, and passes `-copyts -avoid_negative_ts disabled`.
 It forces them with FFmpeg's list mode, never an expression: `-force_key_frames:0` receives the boundaries `k × period` in whole seconds for every `k` from the job's start sequence number up to, but not including, the media segment count that the server advertises for the variant, so every attempt forces the same frame at every boundary it shares with another attempt, the first frame at or after that boundary on the zero-based timeline.
 The list starts at the start sequence number rather than at zero, because FFmpeg consumes at most one entry per frame and would force an extra keyframe for every entry before the attempt's first frame.
-The server sends that count in a new, additive `TranscodeExecution` field.
-The worker refuses a job without the count, or with a start sequence number that is not below it, with `JOB_ATTEMPT_FAILURE_INVALID_SPECIFICATION`; it keeps no expression as a fallback, because Streamarr has no production instances.
+The server sends that count on every job attempt in `TranscodeExecution.media_segment_count`, a new, additive field number 5, and computes it with the same code that counts the media playlist's `EXTINF` entries: the probed duration in whole milliseconds divided by the period, rounded up.
+Zero is not a valid count, and it is also what the worker reads from a server that omits the field.
+The worker refuses a job whose count is zero, or whose start sequence number is not below its count, with `JOB_ATTEMPT_FAILURE_INVALID_SPECIFICATION`; it keeps no expression as a fallback, because Streamarr has no production instances.
 The worker ends the list early at the last entry that keeps the argument within 131,071 bytes, Linux's per-argument limit with 4 KiB pages, which a list from zero reaches after 12.65 h at a 2 s period and 35.6 h at 6 s.
 The worker sets each encoder's frame-count GOP by whether that encoder is verified.
 An encoder is verified when recordings of this recipe under the pinned FFmpeg (link:0029-pin-jellyfin-ffmpeg-releases.adoc[ADR 0029]), at a fractional frame rate from the start and after a seek, show three things: every forced keyframe comes out as a sync sample; the encoder restarts its GOP count there; and every forced keyframe, and the keyframe the GOP places when one forced keyframe is suppressed, starts a closed GOP.
@@ -290,7 +291,7 @@ This ADR does not adopt MoQ, its transport or its live retention policy.
 === Rollout
 
 The worker change and the server change land as separate pull requests.
-Before either, a server pull request adds the media segment count to `TranscodeExecution` and sends it; the current worker ignores the new field, and the new worker refuses a job without it.
+Before either, a server pull request adds `media_segment_count` to `TranscodeExecution` and sends it on every job attempt; the current worker ignores the new field, and the new worker refuses a job without it.
 The worker pull request merges first.
 The server pull request then merges the container switch, the worker image pin bump, the test fixture change and the player check together.
 Between the two merges, a server built from `main` fails H.264 jobs against the new worker image.
@@ -335,7 +336,7 @@ A verified encoder's frame-count ceiling never fires, so each of its segments ho
 The producer then fails that attempt with `SKIPPED_SEGMENT_NUMBER` instead of misnumbering segments, and the verification recordings exist to catch that regression when FFmpeg is updated under ADR 0029.
 * Under the verified GOP the forced keyframes alone place every boundary, and the list puts each one on the first frame at or after its boundary in every attempt, so a splice between two attempts at any boundary after a replacement attempt's first neither drops nor repeats a frame.
 The expression, which measured from each attempt's first frame, had put 202 of 360 shared boundaries one or two frames apart, and 7 of 11 segments at 23.976 fps and 9 of 11 at 29.97 fps in the GOP recordings' seek; the floored GOP's extra keyframe had hidden that difference.
-* The worker contract gains the advertised media segment count, and the worker uses it only to end its list; coverage stays the server's under ADR 0019.
+* The worker contract gains `TranscodeExecution.media_segment_count`, the count the playlist advertises, and the worker uses it only to end its list; coverage stays the server's under ADR 0019.
 * An FFmpeg command line carries up to 131,071 bytes of keyframe times, one argument that FFmpeg parses in no measurable time.
 * SVT-AV1 attempts in the pinned runtime still fail under CPU contention, 10 of 420 contended runs in the study; the stall watchdog and the short-sample rule turn a hung FFmpeg or undecodable segments into a failed attempt that ADR 0019 replaces, and both rules stay after worker issue #42 pins a fixed runtime, because they cover every encoder.
 * A media file that outlasts its list, more than 12.65 h at a 2 s period or 35.6 h at 6 s from zero, drifts after the list ends, and through a verified encoder its attempt fails with `SKIPPED_SEGMENT_NUMBER`; the replacement attempt starts a new list on the grid, and its first segment repeats about one period of media that the last drifted segment already held.

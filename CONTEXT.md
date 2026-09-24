@@ -146,10 +146,19 @@ The server-wide set of catalog entries, independent of any library.
 _Avoid_: library; `Catalog` as a type name (jOOQ generates one)
 
 **Catalog entry**:
-The server's durable record of a matched title.
-Items in any number of libraries point at it, and it holds the title's provider ids, provider values and everything users author about the title.
-It outlives its items.
+The server's durable record of a matched title, person or company.
+Items in any number of libraries point at a title's entry, and person and company rows point at theirs.
+It holds the provider ids, provider values and everything users author about that title, person or company, and it outlives the rows that point at it.
 _Avoid_: work, title (as a type name), metadata entry, catalog item
+
+**Credit edit**:
+A metadata edit that adds or removes one person, company or genre on a title's credits.
+The effective credit list is the provider's list without the removed credits, plus the added ones.
+_Avoid_: cast lock, credit override
+
+**Unmatched person**:
+A person with a catalog entry but no provider ids, created by a ServerAdmin with only a name.
+_Avoid_: local person, custom actor
 
 **Provider id**:
 One identifier that a metadata provider assigns to a title, qualified by provider and media type, such as TMDB movie 603.

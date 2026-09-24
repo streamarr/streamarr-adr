@@ -96,7 +96,7 @@ The configured maximum media duration of a fragment. The muxer honours it at the
 _Avoid_: fragment bound, chunk size
 
 **Preroll**:
-Media before the requested seek point that a stream copy emits, because a seek lands on the keyframe at or before the target. The previous attempt already delivered it, so the producer discards it.
+Media before a job attempt's first media segment, which the producer discards because that segment belongs to another attempt. A stream copy emits it because a seek lands on the keyframe at or before the target; an encoded attempt that starts after segment 0 seeks one period early on purpose, so that its first segment starts on the same frame as the start-0 attempt's.
 _Avoid_: overlap, lead-in
 
 **Stream copy**:

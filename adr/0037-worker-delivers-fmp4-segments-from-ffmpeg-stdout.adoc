@@ -262,8 +262,10 @@ Each producer holds at most two segment caps of FFmpeg's output plus one fixed s
 The budget counts bytes rather than segments, because at a boundary the reader holds the segment it has just closed and the fragment that closed it while the previous segment still awaits acknowledgement, and together they still fit within two caps.
 The worker enforces the slot count it advertises: a job that arrives while every slot holds an active job attempt fails with `JOB_ATTEMPT_FAILURE_STARTUP_FAILED` before FFmpeg starts, because that value says this worker could not start the attempt, where `JOB_ATTEMPT_FAILURE_INVALID_SPECIFICATION` would say that no worker could run the job; the contract has no failure value for capacity.
 Only active job attempts count against the slots: the server also counts probes against them when it dispatches, but here the slots bound segment memory, and a probe holds none.
-A stopping attempt does not count: the stop cancels its upload in flight and its producer discards everything it reads after the stop, so the producer admits no segment memory and only releases what it already holds, and the server has already freed that slot when it sent `StopVariant`.
-The worker's segment memory stays within the slot count times two segments because the budget charges each producer until it has released its segments, a stopping producer included; a job that takes a stopping attempt's slot can therefore wait, its reader paused and its FFmpeg blocked on the pipe, until the stopping producer releases its segments.
+A stopping attempt does not count against the slots: the stop cancels its upload in flight and its producer discards everything it reads after the stop, so the producer admits no segment memory, and the server has already freed that slot when it sent `StopVariant`.
+The worker's segment memory stays within one worker-wide budget of the slot count times two segment caps, which charges every producer, a stopping producer included, until that producer has released its segments.
+A stopping producer releases the segment it was assembling at the stop, because it will never deliver it, and the segment in delivery as soon as the cancelled upload returns, without waiting for FFmpeg to exit.
+A job that takes a stopping attempt's slot can therefore wait for memory, its reader paused and its FFmpeg blocked on the pipe, but only until those cancellations return, never for another attempt's FFmpeg to exit.
 FFmpeg's own memory, the kernel pipe buffer and gRPC's flow-control window sit outside that budget; the container runtime bounds them, and this decision does not claim to.
 
 === Retry follows the same producer interface
@@ -354,7 +356,7 @@ FFmpeg's MPEG-TS demuxer lands on the next keyframe after the target, so the one
 * Init identity across FFmpeg builds.
 The init carries the muxer's version string, so a stream session that outlives a worker image upgrade could receive a replacement attempt whose init differs from the one the server serves; nothing measured that case.
 * A production memory bound.
-The proofs of concept measured pacing and one retention budget; this decision obliges the per-producer budget above, and nothing has measured it.
+The proofs of concept measured pacing and one retention budget; this decision obliges the per-producer and worker-wide budgets above, and nothing has measured them.
 
 == Consequences
 
@@ -364,7 +366,7 @@ The proofs of concept measured pacing and one retention budget; this decision ob
 * A stream-copy replacement attempt now starts on the advertised segment boundary because the producer discards the preroll fragment; today's HLS muxer starts it one keyframe early, which the server never noticed because it reads no segment timing.
 * An encoded replacement attempt starts its first segment on the start-0 attempt's frame, and the audio at that junction left no gap as long as one AAC frame in the recordings or the player check, so Chromium no longer buffers a hole there; in exchange it encodes one period that the producer discards, and nothing has measured what that adds to the time before a replacement attempt's first segment on real content.
 * A segment closes about one fragmentation target after its boundary in media time, where today's rename happens at the boundary itself; the target is configuration, and each segment carries about period-over-target `moof` boxes instead of one.
-* Each producer holds up to two segment caps in memory, the segment awaiting acknowledgement and the next one assembling, where today one closed segment waits on disk.
+* Each producer holds up to two segment caps in memory, the segment awaiting acknowledgement and the next one assembling, where today one closed segment waits on disk; the worker holds at most the slot count times two segment caps, and a stop releases a producer's share without waiting for FFmpeg to exit.
 * Variable-frame-rate sources are still padded to a constant rate, as today, but the rate is now the worker's own probed number rather than FFmpeg's guess, so the frame-count GOP and the output rate cannot disagree.
 * Every encoder receives time-based keyframes, so segment boundaries stop drifting with the GOP.
 A keyframe-verified encoder's extended GOP never fires, so each of its segments holds one keyframe instead of the two that most segments hold under the floored GOP; any other encoder keeps the floored GOP and its extra keyframe until it is keyframe-verified, libx265 after worker issue #23 and each hardware encoder under worker issue #14.
@@ -422,6 +424,8 @@ The receiver would have to rebuild every delivery guarantee, and the worker woul
 * Having the worker probe the source's start time and subtract it duplicates what `-start_at_zero` already does inside FFmpeg.
 * Exempting the upload wait from every bound, on the grounds that back-pressure is not a stall, leaves an attempt that a silent receiver can hold forever.
 * Counting a stopping attempt against the slots until the worker sends `JobAttemptStopped` would make the worker refuse a job that the server dispatched into the slot it freed when it sent `StopVariant`, although the stopping producer admits no new memory.
+* Giving each producer only its own budget lets a job in a freed slot start at once, but it leaves the worker's segment memory unbounded by the slot count: each stopping producer holds up to two segment caps until FFmpeg exits, which for a hung FFmpeg takes the grace period and a forced kill, and a burst of seeks can stop attempts faster than their FFmpeg processes exit.
+* Releasing a stopping producer's segments only when its stop settles after FFmpeg exits keeps the worker-wide bound, but it holds a new attempt's FFmpeg behind another attempt's exit, up to the grace period and a forced kill, for segments that the stop has already abandoned.
 * Keeping MPEG-TS behind a worker capability flag changes nothing for the server, which would stop requesting MPEG-TS anyway, and both repositories would have to keep two container paths correct.
 * Keeping a one-value `ContainerFormat` type as a slot for a future container preserves a decision that no code makes; a future container would need its own ADR, and its type can return then.
 * Parsing FFmpeg's playlist or its `EXT-X-ENDLIST` tag as the completion signal appears in none of the surveyed projects, depends on a playlist the server already generates itself, and still reads a filesystem side channel.

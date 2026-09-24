@@ -238,7 +238,7 @@ MoQ's importer skips no fragment either: it publishes every fragment of the trac
 === The attempt owns completion, stop and stall
 
 An attempt completes only when four facts hold, in whatever order they arrive: the pipe reached end of file on a box boundary with no `moof` still waiting for its `mdat`; FFmpeg exited with status 0; the server acknowledged every segment the producer closed, with no segment number skipped; and the attempt is still active.
-The producer fails the attempt when the pipe ends inside a box header, inside a box body, or after a `moof` with no `mdat`; when FFmpeg exits with a non-zero status; or when the server has not acknowledged every closed segment.
+The producer fails the attempt when the pipe ends inside a box header, inside a box body, or after a `moof` with no `mdat`; when FFmpeg exits with a non-zero status, or has not exited within the grace period once its output has ended and its last segment is acknowledged; or when the server has not acknowledged every closed segment.
 An exit with status 0 and no media segment also fails the attempt, which matches today's behaviour.
 When the producer fails the attempt on FFmpeg's output itself, because that output is truncated, malformed or over the segment cap, skips a segment number or holds a short video sample, or because reading the pipe fails, it lets the complete segment already awaiting acknowledgement finish before it records the failure, and a stop that arrives meanwhile takes over; the producer records a failed upload, a stall or an unexpected error at once and cancels any upload in flight.
 A completed attempt means that FFmpeg finished cleanly and the server accepted everything FFmpeg produced; it does not mean that the attempt covered the advertised timeline.
@@ -257,13 +257,17 @@ The producer settles every outcome only after FFmpeg has exited and no upload is
 A stop waits for that exit without holding the worker's control stream, so the worker keeps each job attempt's messages in order but not the messages of different attempts: a replacement attempt's `JobAttemptStarted` can reach the server before the `JobAttemptStopped` of the attempt it replaces.
 Draining the pipe is what lets FFmpeg finish its flush inside the grace period; a pipe nobody reads would otherwise hold FFmpeg until the forced kill.
 
-Three waits bound an attempt's progress, and each is separately configured and cancellable by a stop.
+Four waits bound an attempt's progress, and a stop takes precedence over each: three have their own configured bounds, and the fourth, on FFmpeg's exit, reuses the stop's grace period.
 An encoder-stall watchdog fails the attempt when no byte has arrived from the pipe within the stall threshold while the reader was reading; a blocking pipe read cannot time out on its own.
 The watchdog measures liveness only by bytes on standard output, never by standard error or by the process being alive, because a hung FFmpeg keeps printing its progress line.
 When the watchdog fires, the worker sends FFmpeg SIGTERM, destroys it forcibly with SIGKILL once the stop's grace period passes, and waits for the exit, because a hung FFmpeg exits on neither `q` nor SIGTERM.
 A readiness wait fails the upload when the gRPC stream has not reported `isReady` within its bound.
 An acknowledgement deadline on each upload call fails the upload when the server has not acknowledged the segment within its bound, counted from the first byte sent, not from the last.
 Back-pressure from the server therefore pauses the encoder-stall watchdog but never exempts the attempt from every bound.
+An exit wait follows the output: once the pipe has ended and the server has acknowledged the last segment, FFmpeg must exit within the stop's grace period, because the watchdog ends with the reading, and an FFmpeg that closed its output and then hung would otherwise hold its attempt until a stop arrived.
+This wait watches the process, not the pipe.
+When FFmpeg outlives it, the producer fails the attempt with the named reason `PROCESS_DID_NOT_EXIT` and ends FFmpeg as it ends a stalled one.
+A truncated output keeps its `TRUNCATED_OUTPUT` failure instead, because that output fails whether or not FFmpeg exits, and a stop recorded during the wait takes over from either.
 The producer never holds its lock across a pipe read, a process wait, an upload or a call into the worker.
 
 === A producer and a worker each admit memory within a budget
@@ -440,6 +444,7 @@ The receiver would have to rebuild every delivery guarantee, and the worker woul
 * Zeroing each attempt's timeline at its own first fragment gives a replacement attempt a different origin from the initial attempt, so the same segment number would name different media.
 * Having the worker probe the source's start time and subtract it duplicates what `-start_at_zero` already does inside FFmpeg.
 * Exempting the upload wait from every bound, on the grounds that back-pressure is not a stall, leaves an attempt that a silent receiver can hold forever.
+* Waiting for FFmpeg's exit without a bound once its output has ended, on the grounds that the output is complete, leaves an attempt that an FFmpeg hung after its last byte can hold until a stop arrives, because nothing else watches the process once the reading ends.
 * Counting a stopping attempt against the slots until the worker sends `JobAttemptStopped` would make the worker refuse a job that the server dispatched into the slot it freed when it sent `StopVariant`, although the stopping producer admits no new memory.
 * Giving each producer only its own budget lets a job in a freed slot start at once, but it leaves the worker's segment memory unbounded by the slot count: each stopping producer holds up to two segment caps until FFmpeg exits, which for a hung FFmpeg takes the grace period and a forced kill, and a burst of seeks can stop attempts faster than their FFmpeg processes exit.
 * Releasing a stopping producer's segments only when its stop settles after FFmpeg exits keeps the worker-wide bound, but it holds a new attempt's FFmpeg behind another attempt's exit, up to the grace period and a forced kill, for segments that the stop has already abandoned.

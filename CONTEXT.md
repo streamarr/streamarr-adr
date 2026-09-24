@@ -157,7 +157,7 @@ The effective credit list is the provider's list without the removed credits, pl
 _Avoid_: cast lock, credit override
 
 **Unmatched person**:
-A person with a catalog entry but no provider ids, created by a ServerAdmin with only a name.
+A person with a catalog entry but no provider ids, created by a ServerAdmin with only a name while adding them to a title's credits.
 _Avoid_: local person, custom actor
 
 **Provider id**:

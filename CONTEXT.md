@@ -134,12 +134,12 @@ _Avoid_: finished, done, success
 **Library**:
 A set of folders the server scans, together with the items built from their files.
 Removing a library deletes its items but never touches the catalog.
-_Avoid_: collection (a user-curated grouping), section (Plex's term)
+_Avoid_: collection (a user-curated grouping), section
 
 **Item**:
 A movie, series, season or episode that belongs to one library and is built from that library's files.
 Versions of a title inside one library share one item; libraries never share items.
-_Avoid_: title, catalog entry, metadata item (Plex's term for the same concept)
+_Avoid_: title, catalog entry, metadata item
 
 **Catalog**:
 The server-wide set of catalog entries, independent of any library.
@@ -191,4 +191,4 @@ _Avoid_: orphaned edit, dangling edit
 **Fix match**:
 Moving an item to a different catalog entry because it matched the wrong title.
 The ServerAdmin chooses which metadata edits to copy, and watch state is copied automatically.
-_Avoid_: rematch (unqualified), identify (Jellyfin's term), unmatch
+_Avoid_: rematch (unqualified), identify, unmatch

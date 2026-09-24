@@ -83,6 +83,16 @@ libx265, under its default open GOP, wrote every forced keyframe after the first
 A CRA picture may be followed in decode order by RASL pictures, which precede it in presentation order and reference the GOP before it; a decoder that starts at the CRA picture must discard them, so a segment that starts there does not decode on its own.
 Under the rounded-up-plus-one GOP no RASL picture followed a forced CRA picture, but with one forced keyframe suppressed, the keyframe that libx265's GOP placed instead was a CRA picture followed by one or two RASL pictures in three of the four recordings, and under the floored GOP each recording held 3 to 23 RASL pictures.
 
+A separate study ran SVT-AV1 through the recipe 1,170 times, in the pinned runtime and in Homebrew FFmpeg 8.0.1 with SVT-AV1 4.0.1 and 4.1.0, at periods of 1 s and 6 s under both GOPs: in every run whose packets left the encoder in order, every forced keyframe was a shown AV1 key frame, a sync sample and a fragment start, and under the rounded-up-plus-one GOP no other keyframe appeared.
+The same runs found that the pinned runtime, FFmpeg 8.1.2-Jellyfin with SVT-AV1 4.1.0, carries upstream SVT-AV1 bug #2385: when the encoder's oldest picture is slow, a later picture overwrites its slot in the packetization reorder queue, and the encoder runs out of output buffers.
+SVT-AV1 4.0.x, 4.1.0 and 4.2.0 all have the bug; its fix, commit `ae2658e5`, is on SVT-AV1's master branch and in no release, and in interleaved runs under load it took 4.0.1 from 13 failures in 40 to none.
+Under production threading the pinned image failed 10 of 740 runs, all 10 among the 420 that ran under CPU contention and none among the 320 that did not; the GOP does not cause it, since at two contended CPUs 5 of 150 runs failed under the floored GOP and 4 of 200 under the rounded-up-plus-one GOP.
+The bug fails an attempt in one of two ways.
+FFmpeg hangs at zero CPU while it keeps printing a progress line whose frame count no longer changes, and neither `q` nor SIGTERM ends it, because both only end FFmpeg's main loop, which then joins the stuck encoder thread; only SIGKILL or a fourth signal does.
+Or the encoder emits packets out of decode order: FFmpeg rewrites each such packet's decode time to the previous one plus one tick, the output carries one-tick video samples, and the keyframes of 30 to 150 frames crowd into one or two intervals, so the producer fails with `SKIPPED_SEGMENT_NUMBER`, or FFmpeg exits 0 with segments that dav1d cannot decode, as 2 of the 10 pinned failures did.
+Across the 1,170 runs a video sample shorter than half the nominal frame duration appeared only in runs where FFmpeg logged a non-monotonic decode time, and in every such run except one that hung before FFmpeg wrote the reordered fragment.
+Only `-svtav1-params lp=1` avoided the bug, in 90 runs without a failure, but it encodes 1080p at 0.78 times real time, too slow to stream.
+
 `force_key_frames` chooses the frames it forces differently in its two modes (FFmpeg n8.1 `fftools/ffmpeg_enc.c`, `forced_kf_apply`).
 An expression sees `t`, the time since the first frame that reached the encoder, and the counters `n`, `n_forced`, `prev_forced_n` and `prev_forced_t`, which count from that frame as well; no constant carries an absolute time, so no expression can name a point on the zero-based timeline.
 A list compares each frame's own timestamp, which `-copyts -start_at_zero` places on the zero-based timeline whatever `-ss` is, with absolute times, and consumes at most one entry per frame.
@@ -148,6 +158,7 @@ An encoder is verified when recordings of this recipe under the pinned FFmpeg (l
 A keyframe starts a closed GOP when no frame after it in decode order references a frame before it, and its picture type must guarantee that: an H.264 or HEVC IDR picture, or an AV1 key frame that is shown.
 An HEVC CRA picture does not qualify even where no RASL picture follows it, because the encoder may place RASL pictures after any CRA picture, and the mp4 muxer marks a CRA picture as a sync sample either way.
 libx264 and SVT-AV1 are verified.
+SVT-AV1 stays verified although the pinned runtime's encoder library has upstream bug #2385 (worker issue #42), because that bug stalls or reorders the encoder's output rather than dropping a forced keyframe; the stall watchdog and the short-sample rule below turn each of its failures into a failed attempt that ADR 0019 replaces, and worker issue #42 pins a runtime with the fix.
 libx265 is not: under its default open GOP its forced keyframes are CRA pictures, and the keyframe its GOP placed for a suppressed one was followed by a RASL picture; it stays unverified until worker issue #23 closes its GOPs and a new recording shows every forced keyframe and that backstop as an IDR picture.
 The floored GOP keeps a keyframe in every interval for libx265 but does not close its GOPs; worker issue #23 does.
 Each hardware encoder stays unverified until worker issue #14 records it the same way when it brings that encoder under test.
@@ -172,6 +183,8 @@ The producer validates every box size against the server's segment cap before it
 When a fragment carries a video track, the producer reads the fragment's start on the zero-based timeline as the presentation time of that track's first sample (`tfdt` plus that sample's composition offset from `trun`, in the track's timescale, with no edit list applied) and whether that sample is a sync sample (from the `trun` first-sample flags or the `tfhd` and `trex` defaults).
 A fragment without a video track has no start and no sync status of its own; every audio sample is a sync sample, and an audio sync flag never opens a segment.
 The producer never compares a raw `tfdt` with the nominal grid, and it never computes a fragment's end from its sample durations.
+In the transcode modes the producer fails the attempt with a named reason when a video sample's duration, from `trun` or the `tfhd` and `trex` defaults, is shorter than half the nominal frame duration at the probed frame rate: such a sample marks a packet whose decode time FFmpeg rewrote after the encoder emitted it out of order, and the attempt's segments may then fail to decode even though FFmpeg exits 0.
+A stream copy is exempt, because a variable-frame-rate source's own sample durations vary.
 
 === A segment is the group of fragments that start inside its interval
 
@@ -211,12 +224,14 @@ The reader then drains the pipe to end of file and discards everything it reads,
 The producer delivers nothing after a stop.
 Cancelling an upload is not a rollback: the server may already have committed the cancelled segment, and the server's attempt fence at commit time decides whether the server publishes that segment (ADR 0019).
 The worker does not report a failure it observes after its own stop; it has already recorded the stop, and it reports only the stop.
-After writing `q`, the worker waits for FFmpeg to exit within the grace period and then destroys the process forcibly, as it does today, and it waits again for the exit after the forced kill.
+After writing `q`, the worker waits for FFmpeg to exit within the grace period and then destroys the process forcibly with SIGKILL, as it does today, and it waits again for the exit after the forced kill.
 The worker sends `JobAttemptStopped` only after it has observed the process exit, on both paths, so that message always means the process is gone.
 Draining the pipe is what lets FFmpeg finish its flush inside the grace period; a pipe nobody reads would otherwise hold FFmpeg until the forced kill.
 
 Three waits bound an attempt's progress, and each is separately configured and cancellable by a stop.
 An encoder-stall watchdog fails the attempt when no byte has arrived from the pipe within the stall threshold while the reader was reading; a blocking pipe read cannot time out on its own.
+The watchdog measures liveness only by bytes on standard output, never by standard error or by the process being alive, because a hung FFmpeg keeps printing its progress line.
+When the watchdog fires, the worker ends FFmpeg as a stop does and destroys it forcibly with SIGKILL once the grace period passes, because a hung FFmpeg exits on neither `q` nor SIGTERM.
 A readiness wait fails the upload when the gRPC stream has not reported `isReady` within its bound.
 An acknowledgement deadline on each upload call fails the upload when the server has not acknowledged the segment within its bound, counted from the first byte sent, not from the last.
 Back-pressure from the server therefore pauses the encoder-stall watchdog but never exempts the attempt from every bound.
@@ -292,6 +307,8 @@ A part's length stays unknown until the part ends, and ADR 0019 rejects LL-HLS b
 * The AAC gap of about 30 ms (26.7 ms and 32 ms on two fixtures) and the Chromium end stall after an encoded replacement.
 Both exist under the current HLS muxer and reproduced identically with bounded fragments; the player check records them as the baseline rather than fixing them here.
 * Playback on iOS and tvOS devices and on hardware encoders other than those exercised.
+* A runtime whose SVT-AV1 fixes upstream bug #2385 (worker issue #42).
+The worker takes jellyfin-ffmpeg as a pinned prebuilt release under ADR 0029, and no SVT-AV1 release contains commit `ae2658e5` yet.
 * Accurate input seeking on MPEG-TS sources whose keyframes lie more than one period apart.
 FFmpeg's MPEG-TS demuxer lands on the next keyframe after the target, so the one-period-early seek of an encoded replacement attempt still lands after its first boundary when no source keyframe lies within that period, and a stream-copy replacement of an MPEG-TS source starts its video up to one keyframe interval late while its audio starts on time, exactly as today; a two-stage seek that lands before the target and discards up to it is a follow-up.
 * Init identity across FFmpeg builds.
@@ -317,6 +334,7 @@ The producer then fails that attempt with `SKIPPED_SEGMENT_NUMBER` instead of mi
 The expression, which measured from each attempt's first frame, had put 202 of 360 shared boundaries one or two frames apart, and 7 of 11 segments at 23.976 fps and 9 of 11 at 29.97 fps in the GOP recordings' seek; the floored GOP's extra keyframe had hidden that difference.
 * The worker contract gains the advertised media segment count, and the worker uses it only to end its list; coverage stays the server's under ADR 0019.
 * An FFmpeg command line carries up to 131,071 bytes of keyframe times, one argument that FFmpeg parses in no measurable time.
+* SVT-AV1 attempts in the pinned runtime still fail under CPU contention, 10 of 420 contended runs in the study; the stall watchdog and the short-sample rule turn a hung FFmpeg or undecodable segments into a failed attempt that ADR 0019 replaces, and both rules stay after worker issue #42 pins a fixed runtime, because they cover every encoder.
 * A media file that outlasts its list, more than 12.65 h at a 2 s period or 35.6 h at 6 s from zero, drifts after the list ends, and through a verified encoder its attempt fails with `SKIPPED_SEGMENT_NUMBER`; the replacement attempt starts a new list on the grid, and its first segment repeats about one period of media that the last drifted segment already held.
 * The server pins a replacement under ADR 0019 to the encoder backend that produced the variant's init and refuses a differing init with a named failure; the H.264 flip removes the in-band parameter sets that MPEG-TS carried, and this pinning replaces them.
 * The upload loop gains `isReady` flow control, a readiness bound and an acknowledgement deadline, none of which it has today, and the worker starts enforcing the slot count it advertises.
@@ -379,6 +397,8 @@ The receiver would have to rebuild every delivery guarantee, and the worker woul
 * https://ffmpeg.org/ffmpeg-formats.html#mov_002c-mp4_002c-ismv[FFmpeg mov/mp4 muxer options: `movflags`, `frag_keyframe`, `min_frag_duration`, `frag_discont`]
 * https://github.com/FFmpeg/FFmpeg/blob/n8.1/libavformat/hlsenc.c#L2450-L2489[FFmpeg n8.1 `hlsenc.c`: the cut rule measures from the run's first packet, whose pts it keeps in that packet's own time base] and https://github.com/FFmpeg/FFmpeg/blob/n8.0/libavformat/movenc.c[`movenc.c`: the mp4 muxer declares `AVFMT_VARIABLE_FPS`]
 * https://github.com/FFmpeg/FFmpeg/blob/n8.1/fftools/ffmpeg_enc.c#L734-L781[FFmpeg n8.1 `ffmpeg_enc.c`, `forced_kf_apply`: a list compares each frame's own timestamp with absolute times and consumes one entry per frame, while an expression's `t` counts from the first frame] and https://github.com/FFmpeg/FFmpeg/blob/n8.1/fftools/ffmpeg_mux_init.c#L3175-L3299[`ffmpeg_mux_init.c`: parsing the list and choosing the mode]
+* Worker issue #42 and https://gitlab.com/AOMediaCodec/SVT-AV1/-/work_items/2385[SVT-AV1 issue #2385: the packetization reorder queue overruns and the output buffers run out], fixed by commit `ae2658e5` (merge request !2765) on SVT-AV1's master branch.
+* https://github.com/FFmpeg/FFmpeg/blob/n8.1/fftools/ffmpeg.c#L147-L160[FFmpeg n8.1 `ffmpeg.c`: the signal handler counts signals and exits only on the fourth], https://github.com/FFmpeg/FFmpeg/blob/n8.1/fftools/ffmpeg.c#L906-L921[its main loop ends on a signal or `q` and then stops the scheduler], https://github.com/FFmpeg/FFmpeg/blob/n8.1/fftools/ffmpeg_sched.c#L2699-L2716[`ffmpeg_sched.c`: stopping joins every thread] and https://github.com/FFmpeg/FFmpeg/blob/n8.1/fftools/ffmpeg_mux.c#L177-L199[`ffmpeg_mux.c`: a non-monotonic decode time becomes the previous one plus one]
 * https://developer.apple.com/documentation/http-live-streaming/hls-authoring-specification-for-apple-devices/[Apple HLS authoring specification: container requirements per codec]
 * https://github.com/moq-dev/moq/blob/7ee2b0241ef3c2e942808c84f2dd39d8253e0f72/rs/moq-mux/src/container/fmp4/import.rs[moq-mux fMP4 importer] and https://github.com/moq-dev/moq/blob/7ee2b0241ef3c2e942808c84f2dd39d8253e0f72/rs/moq-mux/src/container/consumer.rs[its container consumer, which skips stale groups]
 * https://datatracker.ietf.org/doc/html/rfc8216[RFC 8216: HTTP Live Streaming]

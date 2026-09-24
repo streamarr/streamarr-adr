@@ -128,3 +128,58 @@ _Avoid_: encoder capability, codec
 **Completed attempt**:
 A job attempt whose FFmpeg exited cleanly after the producer read all of its output and the server acknowledged every delivered segment, while the attempt was still active. A completed attempt does not mean the run covered the advertised timeline; the server owns coverage.
 _Avoid_: finished, done, success
+
+### Catalog
+
+**Library**:
+A set of folders the server scans, together with the items built from their files.
+Removing a library deletes its items but never touches the catalog.
+_Avoid_: collection (a user-curated grouping), section (Plex's term)
+
+**Item**:
+A movie, series, season or episode that belongs to one library and is built from that library's files.
+Versions of a title inside one library share one item; libraries never share items.
+_Avoid_: title, catalog entry, metadata item (Plex's term for the same concept)
+
+**Catalog**:
+The server-wide set of catalog entries, independent of any library.
+_Avoid_: library; `Catalog` as a type name (jOOQ generates one)
+
+**Catalog entry**:
+The server's durable record of a matched title.
+Items in any number of libraries point at it, and it holds the title's provider ids, provider values and everything users author about the title.
+It outlives its items.
+_Avoid_: work, title (as a type name), metadata entry, catalog item
+
+**Provider id**:
+One identifier that a metadata provider assigns to a title, qualified by provider and media type, such as TMDB movie 603.
+Each provider id belongs to exactly one catalog entry.
+_Avoid_: GUID, external id (unqualified)
+
+**Provider value**:
+The value a metadata provider last supplied for one field of a catalog entry.
+_Avoid_: original value, default value
+
+**Metadata provider values**:
+The record a metadata provider returns for one title, such as `MovieMetadataProviderValues`, carrying provider ids and provider values but never entities.
+_Avoid_: provider result, provider entity, DTO (unqualified)
+
+**Metadata edit**:
+A value a ServerAdmin sets for one field of a catalog entry.
+It applies server-wide, and refresh never discards it.
+_Avoid_: override (reserved for administrative overrides in ADR 0024), lock, pin, custom value
+
+**Effective value**:
+The metadata edit for a field when one exists, otherwise the field's provider value, and the value every attached item shows.
+It is a server-side term; clients read the ordinary fields.
+_Avoid_: shown value, display value, resolved value
+
+**Unattached metadata edit**:
+A metadata edit whose catalog entry no item points at.
+It is kept, and a ServerAdmin can delete it or copy it onto an item.
+_Avoid_: orphaned edit, dangling edit
+
+**Fix match**:
+Moving an item to a different catalog entry because it matched the wrong title.
+The ServerAdmin chooses which metadata edits to copy, and watch state is copied automatically.
+_Avoid_: rematch (unqualified), identify (Jellyfin's term), unmatch

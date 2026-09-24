@@ -123,6 +123,10 @@ _Avoid_: passthrough, remux (when only the video is copied)
 An encoder that passed a worker's test encode and that the worker advertises. It can be a hardware or a software encoder. A worker-verified encoder is not necessarily keyframe-verified.
 _Avoid_: verified encoder (unqualified)
 
+**Keyframe-verified encoder**:
+An encoder whose recordings under the pinned FFmpeg show every forced keyframe as a sync sample that starts a closed GOP, with the encoder's GOP count restarting there. It says nothing about whether a worker can run the encoder, which the verified worker capabilities describe.
+_Avoid_: verified encoder (unqualified), GOP-verified encoder
+
 **Source container**:
 The container of a media file as the probe found it, such as Matroska, MP4 or MPEG-TS. It is a source fact that decides direct-play eligibility, and it never describes HLS delivery, which is always fragmented MP4.
 _Avoid_: container format, ContainerFormat, output container

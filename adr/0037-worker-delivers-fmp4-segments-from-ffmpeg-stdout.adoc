@@ -196,6 +196,7 @@ A fragment without a video track has no start and no sync status of its own; eve
 The producer never compares a raw `tfdt` with the nominal grid, and it never computes a fragment's end from its sample durations.
 In the transcode modes the producer fails the attempt with a named reason when a video sample's duration, from `trun` or the `tfhd` and `trex` defaults, is shorter than half the nominal frame duration at the probed frame rate: such a sample marks a packet whose decode time FFmpeg rewrote after the encoder emitted it out of order, and the attempt's segments may then fail to decode even though FFmpeg exits 0.
 A stream copy is exempt, because a variable-frame-rate source's own sample durations vary.
+Unlike a skipped segment number, a short sample fails the attempt without closing the open segment: the encoder fault behind it is intermittent, so the replacement attempt can deliver that segment.
 
 === A segment is the group of fragments that start inside its interval
 
@@ -216,7 +217,7 @@ It is the only segment the producer closes after detecting the skip, and all of 
 A segment that runs past the end of its interval is not itself a failure; whether it conforms to the duration the playlist advertises is issue #66's policy, not the producer's.
 The producer assembles one segment in memory, bounded by the server's segment cap, and starts the upload only after it closes the segment, so the upload contract does not change: the worker sends the metadata message with `content_length_bytes` first, then the chunks, and the server acknowledges the segment.
 The worker sends the next chunk only when the gRPC stream reports `isReady`.
-The reader admits a new fragment only while the assembling segment and the segment awaiting acknowledgement fit inside the producer's budget of two segments; otherwise the reader stops reading and the pipe blocks FFmpeg.
+The reader admits each box only while its bytes, with everything the producer already holds, fit inside the producer's budget of two segment caps, and it hands over a closed segment only once the server has acknowledged the previous one; otherwise the reader stops reading and the pipe blocks FFmpeg.
 This back-pressure loses nothing: the worker never skips or drops a fragment.
 MoQ's importer skips no fragment either: it publishes every fragment of the tracks it publishes or fails, and skipping a stale or missing group is the behaviour of its live consumer; the worker keeps every fragment because the server has already advertised each segment to on-demand clients.
 
@@ -225,6 +226,7 @@ MoQ's importer skips no fragment either: it publishes every fragment of the trac
 An attempt completes only when four facts hold, in whatever order they arrive: the pipe reached end of file on a box boundary with no `moof` still waiting for its `mdat`; FFmpeg exited with status 0; the server acknowledged every segment the producer closed, with no segment number skipped; and the attempt is still active.
 The producer fails the attempt when the pipe ends inside a box header, inside a box body, or after a `moof` with no `mdat`; when FFmpeg exits with a non-zero status; or when the server has not acknowledged every closed segment.
 An exit with status 0 and no media segment also fails the attempt, which matches today's behaviour.
+When the reader finds the failure in FFmpeg's output, a truncated or malformed box, a skipped segment number or a short video sample, the producer lets the complete segment already awaiting acknowledgement finish before it records the failure, and a stop that arrives meanwhile takes over; a failed upload, a stall or an unexpected error is recorded at once and cancels any upload in flight.
 A completed attempt means that FFmpeg finished cleanly and the server accepted everything FFmpeg produced; it does not mean that the run covered the advertised timeline.
 The worker learns the media segment count that the server advertises only to end its list of forced keyframes; it neither checks that a run reached the last segment nor fails a run that ended before it, so the server owns coverage: under ADR 0019 the server's delivery coordinator treats an advertised segment that no attempt produced as a request-driven recovery, and it, not the worker, tolerates the rounding between the probed duration and the last segment.
 The worker settles an attempt's outcome once, under its own monitor, and a stop that is already in progress prevents the worker from also completing or failing the attempt.
@@ -234,24 +236,28 @@ When the worker stops an attempt, the producer records the stop under its own lo
 The reader then drains the pipe to end of file and discards everything it reads, including the partial fragment FFmpeg flushes when it receives `q`.
 The producer delivers nothing after a stop.
 Cancelling an upload is not a rollback: the server may already have committed the cancelled segment, and the server's attempt fence at commit time decides whether the server publishes that segment (ADR 0019).
-The worker does not report a failure it observes after its own stop; it has already recorded the stop, and it reports only the stop.
+The attempt keeps whichever outcome the producer records first: a failure observed after the stop is never reported, and an attempt that had already completed or failed when the stop arrived is reported as completed or failed, not stopped, in reply to `StopVariant`.
 After writing `q`, the worker waits for FFmpeg to exit within the grace period and then destroys the process forcibly with SIGKILL, as it does today, and it waits again for the exit after the forced kill.
 The worker sends `JobAttemptStopped` only after it has observed the process exit, on both paths, so that message always means the process is gone.
+The producer settles every outcome only after FFmpeg has exited and no upload is left in flight, so no upload follows an attempt's report.
+A stop waits for that exit without holding the worker's control stream, so the worker keeps each job attempt's messages in order but not the messages of different attempts: a replacement attempt's `JobAttemptStarted` can reach the server before the `JobAttemptStopped` of the attempt it replaces.
 Draining the pipe is what lets FFmpeg finish its flush inside the grace period; a pipe nobody reads would otherwise hold FFmpeg until the forced kill.
 
 Three waits bound an attempt's progress, and each is separately configured and cancellable by a stop.
 An encoder-stall watchdog fails the attempt when no byte has arrived from the pipe within the stall threshold while the reader was reading; a blocking pipe read cannot time out on its own.
 The watchdog measures liveness only by bytes on standard output, never by standard error or by the process being alive, because a hung FFmpeg keeps printing its progress line.
-When the watchdog fires, the worker ends FFmpeg as a stop does and destroys it forcibly with SIGKILL once the grace period passes, because a hung FFmpeg exits on neither `q` nor SIGTERM.
+When the watchdog fires, the worker sends FFmpeg SIGTERM, destroys it forcibly with SIGKILL once the stop's grace period passes, and waits for the exit, because a hung FFmpeg exits on neither `q` nor SIGTERM.
 A readiness wait fails the upload when the gRPC stream has not reported `isReady` within its bound.
 An acknowledgement deadline on each upload call fails the upload when the server has not acknowledged the segment within its bound, counted from the first byte sent, not from the last.
 Back-pressure from the server therefore pauses the encoder-stall watchdog but never exempts the attempt from every bound.
-The producer never holds its lock across a pipe read, a process wait or an upload, and it never calls back into the worker.
+The producer never holds its lock across a pipe read, a process wait, an upload or a call into the worker.
 
 === A producer and a worker each admit memory within a budget
 
-Each producer holds at most two segments, one assembling and one awaiting acknowledgement, each bounded by the server's segment cap, plus one fixed scratch buffer; the producer reserves a segment's bytes before it admits the payload and never holds a whole fragment twice.
-The worker enforces the slot count it advertises: it refuses a job that would exceed that count, and only active attempts count against it.
+Each producer holds at most two segment caps of FFmpeg's output plus one fixed scratch buffer for box headers; it reserves each box's bytes against that budget before it allocates the box, and it never holds a whole fragment twice.
+The budget counts bytes rather than segments, because at a boundary the reader holds the segment it has just closed and the fragment that closed it while the previous segment still awaits acknowledgement, and together they still fit within two caps.
+The worker enforces the slot count it advertises: a job that arrives while every slot holds an active job attempt fails with `JOB_ATTEMPT_FAILURE_STARTUP_FAILED` before FFmpeg starts, because that value says this worker could not start the attempt, where `JOB_ATTEMPT_FAILURE_INVALID_SPECIFICATION` would say that no worker could run the job; the contract has no failure value for capacity.
+Only active job attempts count against the slots: the server also counts probes against them when it dispatches, but here the slots bound segment memory, and a probe holds none.
 A stopping attempt does not count: the stop cancels its upload in flight and its producer discards everything it reads after the stop, so the producer admits no segment memory and only releases what it already holds, and the server has already freed that slot when it sent `StopVariant`.
 The worker's segment memory stays within the slot count times two segments because the budget charges each producer until it has released its segments, a stopping producer included; a job that takes a stopping attempt's slot can therefore wait, its reader paused and its FFmpeg blocked on the pipe, until the stopping producer releases its segments.
 FFmpeg's own memory, the kernel pipe buffer and gRPC's flow-control window sit outside that budget; the container runtime bounds them, and this decision does not claim to.
@@ -338,7 +344,7 @@ The proofs of concept measured pacing and one retention budget; this decision ob
 * A stream-copy replacement now starts on the advertised segment boundary because the producer discards the preroll fragment; today's HLS muxer starts it one keyframe early, which the server never noticed because it reads no segment timing.
 * An encoded replacement attempt starts its first segment on the start-0 attempt's frame, and the audio at that junction moved from as much as 58.7 ms of gap or overlap to at most 32 ms of overlap and 10.7 ms of gap in the recordings, and to −16.0 to +5.3 ms in the player check, where Chromium no longer buffers a hole; in exchange it encodes one period that the producer discards, and nothing has measured what that adds to the time before a replacement's first segment on real content.
 * A segment closes about one fragmentation target after its boundary in media time, where today's rename happens at the boundary itself; the target is configuration, and each segment carries about period-over-target `moof` boxes instead of one.
-* The worker holds one closed segment in memory instead of one closed segment on disk.
+* Each producer holds up to two segment caps in memory, the segment awaiting acknowledgement and the next one assembling, where today one closed segment waits on disk.
 * Variable-frame-rate sources are still padded to a constant rate, as today, but the rate is now the worker's own probed number rather than FFmpeg's guess, so the frame-count GOP and the output rate cannot disagree.
 * Every encoder receives time-based keyframes, so segment boundaries stop drifting with the GOP.
 A verified encoder's frame-count ceiling never fires, so each of its segments holds one keyframe instead of the two that most segments hold under the floor; an unverified encoder keeps the rounded-down ceiling and its extra keyframe until it is verified, libx265 after worker issue #23 and each hardware encoder under worker issue #14.

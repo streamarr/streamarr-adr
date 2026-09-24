@@ -96,12 +96,16 @@ The configured maximum media duration of a fragment. The muxer honours it at the
 _Avoid_: fragment bound, chunk size
 
 **Preroll**:
-Media before the requested seek point that a stream copy emits, because a seek lands on the keyframe at or before the target. The previous attempt already delivered it, so the producer discards it.
+Media that a job attempt's seek emits before the attempt's first media segment: a stream copy's seek lands on the keyframe at or before the target, and an attempt that encodes video and starts after segment 0 seeks one period early on purpose. It belongs to earlier segments, so the producer discards it.
 _Avoid_: overlap, lead-in
 
 **Stream copy**:
 Any transcode mode that passes the source video through unchanged (REMUX and AUDIO_TRANSCODE). Its segment boundaries depend on the source's own keyframes.
 _Avoid_: passthrough, remux (when only the video is copied)
+
+**Keyframe-verified encoder**:
+An encoder whose recordings under the pinned FFmpeg show every forced keyframe as a sync sample that starts a closed GOP, with the encoder's GOP count restarting there. It says nothing about whether a worker can run the encoder, which the verified worker capabilities describe.
+_Avoid_: verified encoder (unqualified), GOP-verified encoder
 
 **Source container**:
 The container of a media file as the probe found it, such as Matroska, MP4 or MPEG-TS. It is a source fact that decides direct-play eligibility, and it never describes HLS delivery, which is always fragmented MP4.

@@ -56,6 +56,7 @@ None at present.
 - [ADR 0036: Video Contracts Share One Vocabulary and Preserve Dynamic-Range Facts](adr/0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc)
 - [ADR 0037: The Worker Delivers Fragmented MP4 Segments From FFmpeg's Standard Output, and HLS Media Segments Are fMP4 Only](adr/0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc)
 - [ADR 0039: Durable Catalog Entries Hold Metadata Edits and User Data; Library Items Hold What Scans Produce](adr/0039-catalog-entries-hold-metadata-edits-and-user-data.adoc) — proposed
+- [ADR 0040: Media Read Resolvers Return DTOs Mapped by MapStruct](adr/0040-media-read-resolvers-return-dtos-mapped-by-mapstruct.adoc) — proposed
 
 ## Domain language
 

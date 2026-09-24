@@ -118,6 +118,7 @@ Every start, seek, resume and replacement seeks to segment index times period an
 The server caps a segment at 16 MiB, admits at most 8 concurrent uploads per worker and 64 MiB of buffered upload bytes fleet-wide, and reclaims an upload older than 120 s only when a later upload asks for admission.
 The worker sends chunks in a plain `onNext` loop with no `isReady` check, starts its 5 s acknowledgement timer only after it has sent the last chunk, and sets no gRPC deadline; a stalled receiver therefore never times the worker out.
 The worker advertises a slot count to the server and never enforces it.
+The server frees an attempt's slot when it sends `StopVariant`, before the worker has stopped that attempt.
 On the stop path, the worker sends `JobAttemptStopped` after `q` and a bounded wait, and on the forced-kill path it sends that message without waiting for the process to exit.
 
 ADR 0009 ties H.264 to MPEG-TS, and the server selects MPEG-TS for every codec except AV1 and HEVC.
@@ -240,7 +241,9 @@ The producer never holds its lock across a pipe read, a process wait or an uploa
 === A producer and a worker each admit memory within a budget
 
 Each producer holds at most two segments, one assembling and one awaiting acknowledgement, each bounded by the server's segment cap, plus one fixed scratch buffer; the producer reserves a segment's bytes before it admits the payload and never holds a whole fragment twice.
-The worker enforces the slot count it advertises: it refuses a job that would exceed that count, so the worker's segment memory stays within the slot count times two segments.
+The worker enforces the slot count it advertises: it refuses a job that would exceed that count, and only active attempts count against it.
+A stopping attempt does not count: the stop cancels its upload in flight and its producer discards everything it reads after the stop, so the producer admits no segment memory and only releases what it already holds, and the server has already freed that slot when it sent `StopVariant`.
+The worker's segment memory stays within the slot count times two segments because the budget charges each producer until it has released its segments, a stopping producer included; a job that takes a stopping attempt's slot can therefore wait, its reader paused and its FFmpeg blocked on the pipe, until the stopping producer releases its segments.
 FFmpeg's own memory, the kernel pipe buffer and gRPC's flow-control window sit outside that budget; the container runtime bounds them, and this decision does not claim to.
 
 === Retry follows the same producer interface
@@ -337,7 +340,7 @@ The expression, which measured from each attempt's first frame, had put 202 of 3
 * SVT-AV1 attempts in the pinned runtime still fail under CPU contention, 10 of 420 contended runs in the study; the stall watchdog and the short-sample rule turn a hung FFmpeg or undecodable segments into a failed attempt that ADR 0019 replaces, and both rules stay after worker issue #42 pins a fixed runtime, because they cover every encoder.
 * A media file that outlasts its list, more than 12.65 h at a 2 s period or 35.6 h at 6 s from zero, drifts after the list ends, and through a verified encoder its attempt fails with `SKIPPED_SEGMENT_NUMBER`; the replacement attempt starts a new list on the grid, and its first segment repeats about one period of media that the last drifted segment already held.
 * The server pins a replacement under ADR 0019 to the encoder backend that produced the variant's init and refuses a differing init with a named failure; the H.264 flip removes the in-band parameter sets that MPEG-TS carried, and this pinning replaces them.
-* The upload loop gains `isReady` flow control, a readiness bound and an acknowledgement deadline, none of which it has today, and the worker starts enforcing the slot count it advertises.
+* The upload loop gains `isReady` flow control, a readiness bound and an acknowledgement deadline, none of which it has today, and the worker starts enforcing the slot count it advertises, counting only active attempts.
 * The worker no longer writes media to disk, so it no longer needs a segment base path or the code that cleans that path up.
 * AAC stream copies gain an explicit `aac_adtstoasc` filter that the HLS muxer inserted on its own; without it every MPEG-TS source with AAC fails to copy under the new muxer flags.
 * MPEG-TS disappears end to end, and so does the container as a type: the server change deletes `ContainerFormat` and the worker change deletes its counterpart, rather than keeping either with one value, and ADR 0036's list of names to keep drops `ContainerFormat`; H.264 playback changes container, and the server pull request carries the player evidence for that change.
@@ -380,6 +383,7 @@ The receiver would have to rebuild every delivery guarantee, and the worker woul
 * Zeroing each attempt's timeline at its own first fragment gives a replacement a different origin from the initial attempt, so the same segment number would name different media.
 * Having the worker probe the source's start time and subtract it duplicates what `-start_at_zero` already does inside FFmpeg.
 * Exempting the upload wait from every bound, on the grounds that back-pressure is not a stall, leaves an attempt that a silent receiver can hold forever.
+* Counting a stopping attempt against the slots until the worker sends `JobAttemptStopped` would make the worker refuse a job that the server dispatched into the slot it freed when it sent `StopVariant`, although the stopping producer admits no new memory.
 * Keeping MPEG-TS behind a worker capability flag changes nothing for the server, which would stop requesting MPEG-TS anyway, and both repositories would have to keep two container paths correct.
 * Keeping a one-value `ContainerFormat` type as a slot for a future container preserves a decision that no code makes; a future container would need its own ADR, and its type can return then.
 * Parsing FFmpeg's playlist or its `EXT-X-ENDLIST` tag as the completion signal appears in none of the surveyed projects, depends on a playlist the server already generates itself, and still reads a filesystem side channel.

@@ -1,0 +1,48 @@
+= ADR 0042: GraphQL Subscriptions Run over WebSocket and End When Their Access Token Expires
+
+== Status
+
+Proposed
+
+== Context
+
+The server has no GraphQL subscriptions, so clients poll or refetch to see changes.
+link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026] had a client poll a library's status while a scan runs.
+Library status (https://github.com/streamarr/streamarr-server/issues/411[#411]), watch state (https://github.com/streamarr/streamarr-server/issues/165[#165]) and library contents (https://github.com/streamarr/streamarr-server/issues/166[#166]) need changes pushed as they commit.
+`graphql-transport-ws` over WebSocket is the only subscription protocol that Spring for GraphQL, the web client's Apollo Client and Apollo iOS all support.
+link:0016-authentication-mechanisms-and-session-security.adoc[ADR 0016] bounds a session's authority by its access token's expiry, and a long-lived connection must not outlive it.
+
+== Decision
+
+* Subscriptions use the `graphql-transport-ws` protocol over a WebSocket on `/graphql`, with the same schema as queries and mutations.
+* The WebSocket handshake authenticates with the same access token cookie or Bearer token as HTTP requests, and keeps the origin check.
+  Authorization is decided when a client subscribes, as for any other operation (link:0025-cedar-decides-authorization.adoc[ADR 0025]).
+* A subscription ends when the access token that opened it expires.
+  The client renews its session as usual and subscribes again.
+* The server serves subscriptions only over WebSocket and refuses them over HTTP and server-sent events, so there is one connection lifetime to bound.
+* A subscriber that falls behind is disconnected, not waited for.
+  A subscription to state starts with a snapshot, so a client that subscribes again catches up without replaying missed changes.
+
+== Consequences
+
+* Clients reconnect at least once per access token lifetime.
+* Changes reach subscribers through the one server process, which holds while one server runs (link:0027-library-operations-are-durable-jobs.adoc[ADR 0027]).
+  More than one server needs a shared broker.
+* A reverse proxy in front of the server must pass WebSocket upgrades on `/graphql`.
+
+== Rejected Alternatives
+
+* Polling — the delay and load that subscriptions remove.
+* Server-sent events — Apollo iOS does not support them, and a second transport needs its own expiry bound.
+* Apollo's multipart HTTP subscriptions — Spring for GraphQL does not serve them.
+* The older `subscriptions-transport-ws` protocol — unmaintained, and replaced by `graphql-transport-ws`.
+* Buffering for a slow subscriber, or slowing publishing to its pace — one slow client would hold memory or delay every other subscriber.
+
+== References
+
+* link:0016-authentication-mechanisms-and-session-security.adoc[ADR 0016: Authentication Mechanisms and Session Security]
+* link:0025-cedar-decides-authorization.adoc[ADR 0025: Cedar Decides Authorization; PostgreSQL Keeps the Relationships]
+* link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026: Mutations Return Payloads Whose Expected Errors Are Typed Unions; Top-Level Errors Carry Failure]
+* link:0027-library-operations-are-durable-jobs.adoc[ADR 0027: Library Operations Are Durable Jobs; a Restart Runs Them Again, and a Stop Leaves the Library Usable]
+* https://github.com/enisdenjo/graphql-ws/blob/master/PROTOCOL.md[The `graphql-transport-ws` protocol]
+* https://docs.spring.io/spring-graphql/reference/transports.html[Spring for GraphQL: Server Transports]

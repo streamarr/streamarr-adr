@@ -57,6 +57,7 @@ None at present.
 - [ADR 0037: The Worker Delivers Fragmented MP4 Segments From FFmpeg's Standard Output, and HLS Media Segments Are fMP4 Only](adr/0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc)
 - [ADR 0038: Streamarr Removes Media Only When a Finished Scan Confirms Every File Is Missing](adr/0038-scans-remove-media-only-when-files-are-confirmed-missing.adoc)
 - [ADR 0041: Scans and Refreshes Admit Tasks Through an Adaptive Concurrency Limit](adr/0041-scans-and-refreshes-admit-tasks-through-an-adaptive-limit.adoc)
+- [ADR 0042: GraphQL Subscriptions Run over WebSocket and End When Their Access Token Expires](adr/0042-graphql-subscriptions-run-over-websocket-until-token-expiry.adoc) — proposed
 
 ## Domain language
 

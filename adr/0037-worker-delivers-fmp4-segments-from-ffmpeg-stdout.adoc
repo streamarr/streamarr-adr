@@ -113,7 +113,7 @@ The worker forces the boundaries with the list, never an expression.
 `-force_key_frames:0` receives `k × period` in whole seconds for every `k` from the start sequence number up to, but not including, the variant's media segment count.
 Every attempt thus forces the same frame at each boundary it shares with another attempt: the first frame at or after that boundary on the zero-based timeline.
 The list starts at the start sequence number, because FFmpeg consumes at most one entry per frame and would force an extra keyframe for each entry before the attempt's first frame.
-The worker ends the list early at the last entry that keeps the argument within 131,071 bytes, Linux's per-argument limit with 4 KiB pages.
+The worker ends the list early at the last entry that keeps the argument within Linux's per-argument limit.
 The server sends the count on every job attempt in `TranscodeExecution.media_segment_count`, a new, additive field number 5.
 It computes the count with the code that counts the playlist's `EXTINF` entries: the probed duration in whole milliseconds divided by the period, rounded up.
 Zero is not a valid count, and it is also what the worker reads from a server that omits the field.
@@ -225,8 +225,6 @@ Evidence: <<evidence-grouping>>.
 === The producer fails an attempt on output it cannot trust
 
 The producer checks every box size against the segment cap before it allocates the box, and it fails the attempt on a box that exceeds the cap.
-It fails the attempt when a `trun`'s samples, placed at its data offset, do not lie inside the body of the `mdat` that follows its `moof`.
-The producer delivers each fragment as that pair of boxes, so a sample outside them would not travel with its fragment.
 It fails the attempt with the named reason `TRUNCATED_OUTPUT` when the pipe ends inside a box header, inside a box body, or after a `moof` with no `mdat`.
 In a video encode the producer fails the attempt with the named reason `SHORT_VIDEO_SAMPLE` when a video sample is shorter than half the nominal frame duration at the probed frame rate.
 It reads that duration from `trun` or from the `tfhd` and `trex` defaults.
@@ -315,7 +313,6 @@ When FFmpeg outlives it, the producer fails the attempt with the named reason `P
 A truncated output keeps its `TRUNCATED_OUTPUT` failure instead, because that output fails whether or not FFmpeg exits, and a stop recorded during the wait takes over from either.
 
 Back-pressure from the server therefore pauses the encoder-stall watchdog but never exempts the attempt from every bound.
-The producer never holds its lock across a pipe read, a process wait, an upload or a call into the worker.
 
 *Why:* A blocking pipe read cannot time out on its own, and a hung FFmpeg keeps printing its progress line and exits on neither `q` nor SIGTERM.
 The watchdog ends with the reading, so only the exit wait catches an FFmpeg that hangs after its last byte.
@@ -325,19 +322,11 @@ Evidence: <<evidence-svt-av1>>.
 
 Each producer holds at most two segment caps of FFmpeg's output plus one fixed scratch buffer.
 It reserves each box's bytes against that budget before it allocates the box, and it never holds a whole fragment twice.
-The budget counts bytes rather than segments.
-At a boundary the reader holds the segment it has just closed and the fragment that closed it while the previous segment still awaits acknowledgement, and together they still fit within two caps.
 The worker enforces the slot count it advertises.
 A job that arrives while every slot holds an active job attempt fails with `JOB_ATTEMPT_FAILURE_STARTUP_FAILED` before FFmpeg starts.
 That value says this worker could not start the attempt, where `JOB_ATTEMPT_FAILURE_INVALID_SPECIFICATION` would say that no worker could run the job, and the contract has no failure value for capacity.
-Only active job attempts count: the server also counts probes when it dispatches, but here the slots bound segment memory, and a probe holds none.
-A stopping attempt does not count: its upload is cancelled, its producer admits no segment memory after the stop, and the server freed its slot when it sent `StopVariant`.
-The worker-wide budget, not the slot, bounds a stopping producer's memory.
-The worker's segment memory stays within that one worker-wide budget of the slot count times two segment caps.
+The worker's segment memory stays within one worker-wide budget of the slot count times two segment caps.
 That budget charges every producer, a stopping producer included, until that producer has released its segments.
-A stopping producer releases the segment it was assembling at the stop, because it will never deliver it.
-It releases the segment in delivery as soon as the cancelled upload returns, without waiting for FFmpeg to exit.
-A job in a stopping attempt's slot can therefore wait for memory, reader paused and FFmpeg blocked on the pipe, but only until those cancellations return, never for another attempt's FFmpeg to exit.
 FFmpeg's own memory, the kernel pipe buffer and gRPC's flow-control window sit outside that budget; the container runtime bounds them, and this decision does not claim to.
 
 *Why:* A hung FFmpeg can take the grace period and a forced kill to exit, and a burst of seeks can stop attempts faster than their FFmpeg processes exit.
@@ -347,21 +336,7 @@ Evidence: <<evidence-svt-av1>>.
 
 Tests substitute the process, not the producer.
 Production uses `ProcessBuilder`, and the worker-session tests supply a scripted `Process`, so the real producer and its grouping and ordering rules run in every test.
-Recorded fixtures pin the zero-based grid rule for these cases:
-
-* a constant 23.976 fps encode;
-* a stream copy with irregular keyframes;
-* a variable-frame-rate encode;
-* a variable-frame-rate stream copy with B-frames;
-* an irregular variable-frame-rate source through SVT-AV1 under the list and the extended GOP, with and without a seek;
-* a source whose timestamps begin after zero;
-* an attempt whose output ends in an audio-only fragment;
-* a stream-copy replacement attempt whose preroll the producer discards;
-* a stream copy whose keyframe gap exceeds the period and that delivers its complete segments before it fails with `SKIPPED_SEGMENT_NUMBER`;
-* each software encoder with every forced keyframe and with one suppressed, with the picture that starts each keyframe;
-* a start-0 encode of a source whose first frame is after zero, with every forced keyframe on the first frame at or after its boundary;
-* an encoded replacement attempt whose forced keyframes land on the start-0 attempt's frames and whose one-period preroll the producer discards;
-* the init segment's byte identity between a start-0 attempt and an attempt that seeks.
+Recorded fixtures pin the zero-based grid rule, and the fixtures README in the worker repository, cited in References, lists each recording and what it pins.
 
 The recorder reads the picture that starts each keyframe: the NAL unit type for H.264 and HEVC, and the frame header for AV1.
 The fixtures therefore pin libx264's IDR pictures, SVT-AV1's shown key frames and libx265's CRA pictures.
@@ -494,7 +469,7 @@ It costs one encoded period that the producer discards, and nothing has measured
 Wall-clock delivery further depends on encoder speed and on back-pressure from the server.
 The target is configuration, and each segment carries about period-over-target `moof` boxes instead of one.
 * Each producer holds up to two segment caps in memory, the segment awaiting acknowledgement and the next one assembling, where today one closed segment waits on disk.
-The worker holds at most the slot count times two segment caps, and a stop releases a producer's share without waiting for FFmpeg to exit.
+The worker holds at most the slot count times two segment caps.
 * Variable-frame-rate sources are still padded to a constant rate, but the rate is now the worker's probed number rather than FFmpeg's guess, so the frame-count GOP and the output rate cannot disagree.
 * Every encoder receives time-based keyframes, so segment boundaries stop drifting with the GOP.
 * A keyframe-verified encoder's segments hold one keyframe instead of the two that most segments hold under the floored GOP.
@@ -507,7 +482,7 @@ The keyframe verification recordings exist to catch that regression when FFmpeg 
 A junction between two attempts at any listed boundary after a replacement attempt's first junction therefore neither drops nor repeats a frame.
 The expression had put shared boundaries one or two frames apart, and the floored GOP's extra keyframe had hidden that difference.
 * The worker contract gains `TranscodeExecution.media_segment_count`, the advertised count, while coverage stays the server's under ADR 0019.
-* An FFmpeg command line carries up to 131,071 bytes of keyframe times in one argument, which FFmpeg parses in no measurable time.
+* An FFmpeg command line carries its keyframe times in one argument, up to Linux's per-argument limit, and FFmpeg parses that argument in no measurable time.
 * SVT-AV1 attempts in the pinned runtime still fail under CPU contention, as the study found.
 The stall watchdog and the short-sample rule turn a hung FFmpeg or undecodable segments into a failed attempt that ADR 0019 replaces.
 Both rules stay after worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/42[#42] pins a fixed runtime, because they cover every encoder.
@@ -515,7 +490,7 @@ Both rules stay after worker issue https://github.com/streamarr/streamarr-transc
 Its first segment repeats about one period of media that the last drifted segment already held.
 ADR 0019's recovery cannot withdraw that repeat once the server has published it.
 * The H.264 flip removes the in-band parameter sets that MPEG-TS carried, and pinning replacement attempts to the init's encoder backend replaces them.
-* The upload loop gains `isReady` flow control, a readiness bound and an acknowledgement deadline, and the worker starts enforcing the slot count it advertises, counting only active attempts.
+* The upload loop gains `isReady` flow control, a readiness bound and an acknowledgement deadline, and the worker starts enforcing the slot count it advertises.
 * AAC stream copies gain an explicit `aac_adtstoasc` filter that the HLS muxer inserted on its own; without it every MPEG-TS source with AAC fails to copy under the new muxer flags.
 * MPEG-TS disappears end to end, and the container as a type goes with it rather than surviving with one value.
 ADR 0036's list of names to keep drops `ContainerFormat`.
@@ -574,11 +549,6 @@ Standard input carries the stop command, and `ProcessBuilder` passes FFmpeg no o
 * Having the worker probe the source's start time and subtract it duplicates what `-start_at_zero` already does inside FFmpeg.
 * Exempting the upload wait from every bound, on the grounds that back-pressure is not a stall, leaves an attempt that a silent receiver can hold forever.
 * Waiting without a bound for FFmpeg's exit once its output has ended leaves an attempt that an FFmpeg hung after its last byte can hold until a stop arrives, because nothing else watches the process once the reading ends.
-* Counting a stopping attempt against the slots until the worker sends `JobAttemptStopped` would refuse a job that the server dispatched into the slot it freed with `StopVariant`, although the stopping producer admits no new memory.
-* Giving each producer only its own budget lets a job in a freed slot start at once, but leaves the worker's segment memory unbounded by the slot count.
-Each stopping producer would hold up to two segment caps until its FFmpeg exits, which for a hung FFmpeg takes the grace period and a forced kill.
-* Releasing a stopping producer's segments only when its stop settles keeps the worker-wide bound.
-It holds a new attempt's FFmpeg behind another attempt's exit, up to the grace period and a forced kill, for segments that the stop has already abandoned.
 * Keeping MPEG-TS behind a worker capability flag changes nothing for the server, which would stop requesting MPEG-TS anyway, and both repositories would have to keep two container paths correct.
 * Keeping a one-value `ContainerFormat` type as a slot for a future container preserves a decision that no code makes.
 A future container would need its own ADR, and its type can return then.

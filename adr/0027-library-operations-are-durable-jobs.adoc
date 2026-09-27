@@ -1,89 +1,211 @@
-= ADR 0027: Library Scan and Refresh Are Claimed Atomically in the Database and Run on a Single Instance
+= ADR 0027: Library Operations Are Durable Jobs; a Restart Runs Them Again, and a Stop Leaves the Library Usable
 
 == Status
 
 Proposed
 
+NOTE: This text replaces the first proposal of ADR 0027, "Library Scan and Refresh Are Claimed Atomically in the Database and Run on a Single Instance", which Streamarr never built or accepted.
+The ADR keeps its number, and its file name follows the new decision.
+
 == Context
 
-link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026] fixes the public contract of `scanLibrary` and `refreshLibrary`: the mutation returns the `Library` node, accepted is not completed, `Library.status` is what a client observes afterwards, a same-kind request while the work is running is an idempotent success, a different-kind request is a `LibraryBusyError`, and a failure to start the work after it was accepted is a top-level `UNAVAILABLE` error.
-That ADR deliberately stops at the contract.
-This ADR is the execution protocol behind it — how a request claims the work, when the worker starts, what happens when it cannot, and why the whole thing is correct only on one instance today.
+link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026] fixes the contract of `scanLibrary` and `refreshLibrary`: each returns the `Library` node, accepted is not completed, and a client observes `Library.status` afterwards.
+ADR 0026 leaves the execution protocol to this ADR.
 
-The current implementation cannot honor the contract.
-`triggerAsyncScan` starts a virtual thread first; the worker then performs a read-check-save of `Library.status` under a single-JVM mutex (`transitionToScanning`), so a mutation that returned the row would return `HEALTHY` before anything was claimed.
-The worker catches only `LibraryScanFailedException`; any other exception leaves the row `SCANNING`.
-An in-memory `activeScans` set is the only record of running work.
-`LibraryCrashRecoveryService` resets every `REFRESHING` row, and every `SCANNING` row absent from that in-memory set, at startup and shutdown — a process-local view of a shared table.
-The same library mutex has a third user: `removeLibrary` takes it, reads the status, rejects a busy library, and deletes the row and its media files.
+Library work runs in memory today:
 
-The server runs as one replica today: in-memory stream-session state already precludes a second, and no deployment runs two.
-`FileProcessingTaskCoordinator` already shows the multi-instance shape Streamarr uses when it needs one — `SELECT … FOR UPDATE SKIP LOCKED` with lease-based heartbeats.
+* A scan or a refresh starts on a bare virtual thread, in-memory sets and a per-library mutex decide whether a library is busy, and only a log line reports a failure.
+* At startup and at shutdown, a crash-recovery service marks every library left `SCANNING` or `REFRESHING` as `UNHEALTHY`, so a restart discards the work and reports a failure that nobody caused.
+
+https://github.com/streamarr/streamarr-server/issues/418[#418] keeps a scan `SCANNING` until every required result is recorded, so a first scan of a large library runs for hours.
+link:0038-scans-remove-media-only-when-files-are-confirmed-missing.adoc[ADR 0038] adds a third kind of library operation, removal of items with missing files, and needs every kind to stop on request and scans to run on a schedule.
+
+Probes already run as durable db-scheduler work, and link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032] persists their results; https://github.com/streamarr/streamarr-server/issues/412[#412] moves artwork to db-scheduler as well.
+db-scheduler has no notion of a job that owns several scheduled tasks, cannot report when a group of them has finished, and keeps no history of attempts.
+A job that spans many tasks therefore belongs to Streamarr.
 
 == Decision
 
-Library work is claimed by one atomic database decision made synchronously in the mutation, the worker starts only after that claim commits, every recoverable scheduling or worker failure (`Exception`) after the claim moves the row out of its busy state, and the deployment runs one instance — configured as such, guarded at startup, and detected on loss.
+A library operation is a durable job that Streamarr owns.
+The mutation that requests it claims the library in its transaction, and one scheduled task runs it.
+A restart runs the operation again from the start, and its tasks run in memory.
+A stop admits no new tasks, lets running tasks finish, and leaves the library usable.
 
-=== The claim
+=== Vocabulary
 
-* The claim is one atomic decision against a row whose state cannot change until the decision commits: a single `UPDATE … RETURNING old.status, new.status` (PostgreSQL 18), or `SELECT … FOR UPDATE` on the library row followed by the update in the same transaction.
-* The outcome table is total, decided on the previous status: no row → `LibraryNotFoundError`; `HEALTHY` or `UNHEALTHY` → this request claimed the work and the row is now `SCANNING` or `REFRESHING`; equal to the requested kind → idempotent, the row is returned unchanged; the other kind → `LibraryBusyError` carrying it.
-* The service outcome keeps the two successes apart even though GraphQL does not: `LibraryWorkOutcome permits Claimed, AlreadyRunning, Busy, NotFound`. Only `Claimed` publishes the scheduling event, inside the claim transaction; `AlreadyRunning` maps to the same successful payload and publishes nothing. A contract test drives concurrent same-kind requests and asserts exactly one scheduling event and one worker.
-* There is no zero-row re-read and so no window in which a concurrent completion or deletion falls between branches; a concurrency contract test commits a completion against a concurrent claim.
-* `removeLibrary` joins the same row protocol: it locks the library row with `SELECT … FOR UPDATE` in its transaction before reading the status, rejects a busy library with the `LibraryBusyError` member and a missing one with `LibraryNotFoundError`, and holds the lock through the delete, so a claim cannot slip between removal's status read and its delete — a claim that arrives during removal blocks on the row and then finds no row. `LibraryRemovedEvent` is published inside the deletion transaction, as today, and its consumers are `@TransactionalEventListener(AFTER_COMMIT)`, so they run only if the delete commits; publishing after the transaction has ended would never invoke them, because a transactional listener needs an active transaction to bind to. An integration test proves the listeners run after commit and not after rollback.
-* The library mutex is removed only when all three of its users — scan claim, refresh claim, and removal — are on the row protocol; until then a partially migrated mutex is a race, not a refactor. The claim replaces the read-check-save; `LibraryScanInProgressException` and `LibraryRefreshInProgressException` are gone. The separate filepath mutex used when adding a library is unchanged by this ADR.
+Library processing is described as Job -> Task -> Step -> Attempt.
+This combines the conventional decomposition of jobs into tasks with Spring Batch's distinction between a processing step and an execution of that step.
+Spring Batch separates a job's definition, one logical run identified by its parameters, and one execution of that run; a library operation run again after a restart is another execution of the same logical run, and Streamarr does not record executions separately.
+In Streamarr, tasks group work for a file, title or library item.
 
-=== Scheduling and its failure protocol
+Job:: A requested operation with an overall completion criterion.
+A library operation is one kind of job; a transcode job is another, and it has attempts directly, with no tasks or steps.
+Library operation:: The job that scans a library, refreshes it, or removes its items with missing files.
+Streamarr stores it as a durable row from its claim to its end.
+Task:: A distinct portion of a job's work, grouped around one subject: a file in a scan, a title in a refresh, a library item in a removal.
+A task is defined by its work, not by the thread that runs it, and it requires one or more steps.
+Step:: A logical operation that can be executed and retried independently, such as identify, fetch poster, fetch backdrop, probe, or fetch person or company artwork.
+A step keyed by its subject, such as a probe today and artwork after https://github.com/streamarr/streamarr-server/issues/412[#412], can be required by several tasks and jobs; they require it without owning it, and stopping a job never cancels it.
+Attempt:: One execution of a retryable unit of work: a step in library processing, and the transcode job itself in transcoding.
+Item result:: The latest recorded outcome of a step for a subject (https://github.com/streamarr/streamarr-server/issues/417[#417]).
+It is not an attempt history: an attempt that crashes records nothing.
+Scheduled task:: A persisted db-scheduler task instance, as distinct from its registered task definition: the one that runs each library operation, or a step that must survive a restart.
+Streamarr uses the term only at the scheduling boundary.
 
-* The worker starts only after the claim commits (`@TransactionalEventListener(AFTER_COMMIT)`).
-* The listener catches a recoverable scheduling `Exception` (not `Throwable` — a JVM `Error` is not compensated), moves the row to `UNHEALTHY` in a new transaction (`REQUIRES_NEW`), logs the cause with the library id, and rethrows a classified scheduling exception that ADR 0026's handler maps to `errorType` `UNAVAILABLE`, `code` `LIBRARY_WORK_NOT_SCHEDULED`. Swallowing it would return the claimed `SCANNING` row as accepted while the process knows no worker exists; propagating without compensating would leave the row busy.
-* Every exit path of the worker that ends in an `Exception` moves the row out of its busy state (`UNHEALTHY` on failure); no such exit leaves `SCANNING` or `REFRESHING` behind for recovery to find.
-* The cleanup invariant is stated for `Exception` and no wider. A JVM `Error` in the scheduling listener or the worker — an uncaught `Error` in a virtual thread ends that thread, not the process — is not compensated: the worker's `finally` still attempts to clear the busy state, but nothing is promised, and the row is recovered by `LibraryCrashRecoveryService` at the next startup. Streamarr has no fatal-error shutdown policy and this ADR does not introduce one; catching `Throwable` and continuing to serve is rejected.
+Independent retry of each step is a design target: probes and identification are retried independently today, and artwork becomes independently retryable with https://github.com/streamarr/streamarr-server/issues/412[#412].
+Streamarr does not use the terms "operation item" or "subtask".
+A group of items processed together is a batch, never a page, and library operations have no batches: admission is per task (link:0041-scans-and-refreshes-admit-tasks-through-an-adaptive-limit.adoc[ADR 0041]).
 
-=== Acceptance and concurrent requests
+=== Claiming an operation
 
-* Acceptance means the committed claim, and the client contract is to observe `status` afterwards.
-* A same-kind request that observes the claimed row is correctly told accepted even when the first request's scheduling then fails: the row moves to `UNHEALTHY` and the second caller sees that on its next read exactly as it would had the worker started and failed at its first step. The timing of a post-claim failure is not observable to a client and does not change its contract; only the request whose own scheduling failed learns synchronously, because that request knows.
-* The concurrency contract tests include this interleaving: claim commits, a second same-kind request is accepted, scheduling fails, the second caller's next read shows `UNHEALTHY`.
+A library has at most one library operation.
+`Library.status` shows the running kind, `SCANNING`, `REFRESHING` or `REMOVING_ITEMS_WITH_MISSING_FILES`, and shows `STOPPING` after a ServerAdmin stops it; `HEALTHY` and `UNHEALTHY` mean that no operation runs.
+The mutation that requests an operation claims the library, stores the operation and schedules its scheduled task in one transaction, deciding atomically on the library's row.
+An operation therefore never exists without its scheduled task, and a failed transaction claims nothing and returns ADR 0026's top-level `UNAVAILABLE` error.
 
-=== Single instance, enforced
+* A library that does not exist returns `LibraryNotFoundError`.
+* An idle library is claimed, and the payload returns it in its busy status.
+* A busy library refuses every request for library work with `LibraryBusyError`, which carries the current status and a message that names the running kind, such as "A library scan is already in progress."
 
-* The protocol above is correct within one process. `LibraryCrashRecoveryService` remains a startup-and-shutdown reconciler with a process-local view; a second instance starting or stopping would reset the first instance's running work and free the row for a duplicate claim.
-* The deployment's one-replica configuration is therefore authoritative, and the server adds a guard against misconfiguration: a dedicated, non-pooled database connection is opened at startup, takes a session-scoped PostgreSQL advisory lock on a fixed key, and is held for the process lifetime, so a second instance started against the same database fails fast at startup.
-* Loss of that connection — database restart, failover, network break, or the session being terminated — revokes readiness and terminates the process. The lock is never transparently reacquired, because a session lock is released the moment its session ends, even ungracefully, and another instance may already own it. A pooled connection is not acceptable for this purpose: the pool retires connections (`maxLifetime`), which would release the lock while the process kept running.
-* This is failure detection, not fencing. Between PostgreSQL releasing the session and the old process noticing, a second instance can acquire the lock and both can run for that interval; only a database fencing token checked by every library mutation — the deferred lease design — would close it. The guard's promise is that a misconfigured second replica does not start while the first holds the lock and that a process which has lost the lock does not keep running; zero-overlap at runtime is the one-replica configuration's promise, not the lock's.
-* Deployment documentation states the full invariant: one replica, replaced stop-before-start (a recreate strategy, no surge), because a rolling replacement that starts the new process before stopping the old one is exactly the overlap the lock cannot fence. The advisory lock is a misconfiguration guard on top of that invariant, not a substitute for it.
+The refusal covers an identical request and a stronger one, such as a refresh that replaces artwork while a refresh that keeps artwork runs.
+An identical request succeeds only when the server itself runs the operation again after a restart, which users never trigger.
+Streamarr never queues library work.
+When this ADR is accepted, ADR 0026 gets a note that narrows its idempotent success for a same-kind request, retires `LIBRARY_WORK_NOT_SCHEDULED`, which has no cause once the claim and its scheduled task commit together, and replaces its description of compensation and single-instance execution.
 
-Explicitly deferred:
+Adding a library claims its first scan in the transaction that adds the library, and removing a library returns `LibraryBusyError` while an operation runs.
+Each mutation that starts or stops an operation, or changes the scan schedule, has its own typed intent and Cedar action, which the service layer checks through the authorization service (link:0025-cedar-decides-authorization.adoc[ADR 0025]).
 
-* Multi-instance library work: a durable owner and lease with heartbeat on the busy row, compare-and-set completion and recovery, and a periodic reconciler — the `FileProcessingTaskCoordinator` pattern applied to libraries.
-* Durable dispatch of accepted work, which would let a scheduling failure be retried instead of reported.
-* A first-class operation handle (`LibraryOperation`), already deferred in ADR 0026.
+=== Running an operation
+
+The claim schedules the operation's one-time scheduled task through the scheduler that the db-scheduler starter creates, inside the claim's transaction.
+An operation's execution waits for probes and artwork, so it must not hold the scheduler threads that run them.
+Every execution walks the library from the start and skips completed work by the normal rules: a scan skips a matched file whose stored facts are current, and a refresh skips a title whose item result was recorded after the operation was claimed.
+Streamarr keeps no checkpoints.
+When an execution ends before the operation ends, the scheduled task runs the operation again: at startup after a graceful shutdown, after a crash once db-scheduler finds the lost scheduled task dead, and with backoff after a failure that the execution could not record.
+
+Tasks run in memory: a scan or a refresh admits each task through ADR 0041's adaptive limit and forks and joins its tasks with structured concurrency; a removal of items with missing files removes one item at a time.
+Each task records its outcome in its own transaction, and an execution keeps no result in memory.
+A task whose failure is recorded does not fail the operation.
+An unexpected failure, or an outcome that cannot be recorded, fails the operation: it admits no further tasks, lets running tasks finish, and ends as failed.
+
+A task requests the subject-keyed steps it needs, such as a probe and, after https://github.com/streamarr/streamarr-server/issues/412[#412], artwork, in the transaction that records its outcome.
+Those steps do not belong to the operation: the file watcher, playback and other operations require the same steps, and requests for one subject merge.
+A task stays admitted until the poster and backdrop that it requested are recorded, so a stop waits only for admitted tasks.
+A task or an operation waits by reading recorded results, never for an in-process signal, because a result can arrive after a restart or through a path that sends no signal.
+
+=== Finishing
+
+An operation finishes when every result that its tasks require has been recorded after the operation was claimed, as https://github.com/streamarr/streamarr-server/issues/418[#418] defines.
+A scan requires probe results and primary artwork, which is the posters and backdrops of movies and series plus the required season and episode artwork; a refresh requires primary artwork, and a removal of items with missing files requires no result.
+Person and company artwork is background work, which an operation requests and never waits for.
+
+Once the walk is done and no required step is pending, the finishing steps run in a fixed order.
+A scan updates file availability, removes items with missing files when the library's setting allows it (ADR 0038), and recalculates the letter index; a refresh or a removal recalculates the letter index, which fixes https://github.com/streamarr/streamarr-server/issues/447[#447] for refreshes.
+Each finishing step is keyed by the operation's id and is idempotent, so a step that a restart interrupted has the same effect when it runs again.
+A finishing step for an operation that has ended does nothing, so a stale execution cannot apply a step to a later operation.
+The end sets the library's final status and deletes the operation in one transaction: `HEALTHY` for a finished operation, the library's status from before the claim for a stopped one, and `UNHEALTHY` for a failed one.
+A stopped or failed operation skips the finishing steps that it has not started, except that it still recalculates the letter index, because tasks that finished can change titles.
+
+=== Stopping an operation
+
+A ServerAdmin stops an operation with `stopScanningLibrary`, `stopRefreshingLibrary` or `stopRemovingItemsWithMissingFiles`, and the library shows `STOPPING`.
+A stop leaves the library usable, as it was before the operation except for the tasks and finishing steps that the operation already finished and the items that it already removed:
+
+* The library returns to the status that it had before the operation was claimed.
+* Every library item is either untouched or fully through its foreground steps: identify, fetch poster and fetch backdrop.
+* No task is stopped halfway, and the letter index is recalculated.
+* A scan stopped before its finishing steps changes no file's availability and removes nothing (ADR 0038).
+
+A stop is not a rollback: it admits no new tasks and lets the tasks already running finish their foreground steps.
+It never cancels running work, because cancelling interrupts running tasks and breaks the pooled database connections that they hold.
+A graceful stop is meant to take seconds and at most about a minute: only the few admitted tasks drain, and each step has its own timeouts.
+A stop does not wait for probes or background artwork; they keep running, and their results appear afterwards.
+A stopped operation requests no new background artwork, and the interface distinguishes a stopped operation from details that are still arriving.
+
+A stop during a scan's finishing removal halts the removal between items: items already removed stay removed, and no item is ever half-removed.
+A stop of the running kind returns the library in `STOPPING`, and a repeated stop returns it unchanged while it stops, as ADR 0026's rule for naturally idempotent mutations requires.
+A stop of a kind that is not running returns a typed rejection with a helpful message, such as "No library scan is in progress, so there is nothing to stop.", which names the running kind when another kind runs.
+
+Server shutdown drains for a bounded, configured time before it cancels the remaining tasks.
+Shutdown is the only path that cancels running work, because the process ends and the operation runs again at startup; the library keeps its busy status until then.
+
+=== Scheduled library scans
+
+One server-wide schedule scans every library, stored in the one-row server settings:
+
+* whether scheduled scans run, on by default and changed with `enableLibraryScanSchedule` and `disableLibraryScanSchedule`;
+* an interval in whole hours that divides 24, 24 by default, so scans start at the same times every day;
+* a start time, 00:00 by default, in the server's time zone; the schedule stores no zone of its own.
+
+`changeLibraryScanSchedule` changes the interval and the start time, and the next firing moves to match.
+A recurring scheduled task runs the schedule, and db-scheduler reschedules it under one identity, so each firing requests one scan operation per library, each a separate job, as a cron schedule creates a separate job for each occurrence.
+A firing skips a busy library and never queues a scan for it.
+When the server was down at one or more scheduled times, the schedule runs once at startup.
+A ServerAdmin turns the schedule on or off or changes it through mutations that the authorization service checks, and the audit trail records that ServerAdmin on the change.
+A firing is not a ServerAdmin's request: it requests scans as the System actor, a reserved identity that cannot sign in and holds no Household or Profile, and the audit trail records the System actor on each scheduled scan.
+A scheduled scan follows every rule of a scan that a ServerAdmin starts.
+Every library operation records who requested it, a ServerAdmin's account or the System actor, and an execution after a restart keeps the original requester.
+
+=== One active server
+
+Exactly one Streamarr server runs against a database at a time, as link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018]'s one-replica topology already requires.
+Deployments stop the old server before they start the new one, and link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033]'s server deployment follows this rule.
+Stream sessions, the file watcher and caches act within one process and depend on this rule.
+
+A startup guard is deferred.
+The guard would hold a session-level PostgreSQL advisory lock for the process lifetime, so that a second server refuses to start with a clear message, and PostgreSQL would release the lock automatically if the holder crashed.
+It is deferred because:
+
+* db-scheduler already keeps two servers from running the same library operation, so durable library work does not need the guard;
+* what the guard would protect is in-memory state: stream sessions, the file watcher and caches;
+* a home server is rarely started twice, and the deployment rule covers that case;
+* the guard would have to be removed or reworked if several servers ever run on purpose.
+
+Streamarr revisits the guard before any deployment can run overlapping servers, including rolling updates, not only when horizontal scaling begins.
+
+=== Build order
+
+* The lifecycle ships after https://github.com/streamarr/streamarr-server/issues/412[#412], so that pending artwork survives a restart and an execution after a restart can wait for it.
+* Scheduled scans ship after ADR 0038's rules, so that a share that unmounts cannot empty a library overnight.
+
+=== Explicitly deferred
+
+* Durable per-task request rows that record which pending steps each operation requested.
+They return when an operation needs its own membership, such as an execution after a restart that waits only for the steps that its operation requested, or a per-title status for a single-title refresh (https://github.com/streamarr/streamarr-server/issues/429[#429]) or fix match (https://github.com/streamarr/streamarr-server/issues/430[#430]).
+* The single-server startup guard, until a deployment can run overlapping servers.
 
 == Consequences
 
-* The mutation's response is the claimed row, so a client can never be shown `HEALTHY` for work it just started; the response race disappears with the mutex.
-* The claim holds across instances in principle, but this ADR does not claim that until recovery does too; the honest statement today is single-instance, and it is the deployment invariant — one replica, stop-before-start replacement — that makes it a fact, with the startup guard catching a misconfigured second replica.
-* A new startup component owns one long-lived connection outside the pool and ties readiness to it; the process supervisor restarts a terminated instance, and a second instance cannot start while the first holds the lock. In the interval between session loss and detection two instances can overlap; the deployment's one-replica configuration, not the lock, is what rules that out.
-* A JVM `Error` in the scheduling listener or a worker may leave the row busy until the process is restarted and startup recovery runs; this is the accepted limit of the cleanup invariant.
-* Two exception classes and the library mutex are removed once scan, refresh, and removal are all on the row protocol; one classified scheduling exception and one `LibraryBusyError` member are added.
-* Five contract tests are obligated, on real PostgreSQL: completion against a concurrent claim; removal serialized against a claim in both orders (claim locks first: removal waits, then rejects the busy library; removal locks first: the claim waits until the delete commits, then returns `NotFound` — the test proves blocking, not a race the design has removed); concurrent same-kind requests producing exactly one scheduling event; the accepted-then-scheduling-fails interleaving; and the singleton guard under both contention and loss — a second instance fails at startup, and terminating the dedicated advisory-lock session (`pg_terminate_backend` from another connection) revokes readiness, requests shutdown, and never reacquires the lock or resumes work.
+* A restart no longer turns a busy library `UNHEALTHY`; the operation runs again, and the normal rules skip completed work.
+* After a crash, a library stays busy without progress until db-scheduler finds the lost scheduled task dead.
+* An execution after a restart cannot tell which pending steps the earlier execution requested, so it waits for every pending step that its tasks require, including steps that the file watcher or playback requested, and can finish later than an uninterrupted execution.
+* Scheduled scans read every library's storage on schedule, even when nothing changed.
+* When the end itself keeps failing, the library stays busy, and the operation runs again with backoff until the database accepts the end.
 
 == Rejected Alternatives
 
-* Keep the JVM mutex and read-check-save (status quo) — a check-then-act that returns the pre-claim row and coordinates only one process.
-* Move scan and refresh claims to the database while removal keeps the mutex — removal would read `HEALTHY` under a mutex the claim no longer takes, a claim would commit `SCANNING`, and removal would delete the busy library from its stale managed entity.
-* Conditional `UPDATE`, then a zero-row re-read with a retry loop — the re-read leaves a window in which a concurrent completion or deletion falls between branches; deciding on the previous status in one locked statement has no window.
-* Gate an idempotent reply on a JVM-local "worker running" record — reintroduces the process-local state named as the weakness above and answers a benign retry in the claim-to-start window with a spurious `LibraryBusyError`.
-* Swallow a scheduling failure after compensating — returns the claimed row as accepted while the process knows no worker exists.
-* Hold the singleton advisory lock on a pooled connection — the pool retires the connection and the lock is released silently.
-* Transparent lock reacquisition after reconnect — another instance may already own the lock; only fail-fast is safe.
-* Build the lease-and-heartbeat multi-instance protocol now — no deployment runs two instances and the rest of the server cannot either; the pattern exists to copy when one does.
+* Durable fan-in now, with per-task request rows and dependency tracking between steps — counting completions durably is a protocol of its own, and nothing needs per-operation membership yet.
+* A scheduled task for each task — db-scheduler cannot report when a group finishes and deletes a successful one-time execution, so the operation could not tell when its tasks finished.
+* A workflow engine beside db-scheduler — it adds a second durable engine with its own replay model, and a caller could not share a subject-keyed step that another caller requested.
+* Queueing a second operation, or upgrading the running operation to a stronger request — a queue needs its own durable state and ordering, the ServerAdmin cannot see when queued work will start, and an upgraded refresh would refresh some titles twice.
+* Checkpointing progress inside an operation — a checkpoint must stay valid while files change between executions, and walking the library again reads its current state.
+* Cancelling running work on a stop — cancelling interrupts running tasks, breaks the pooled connections that they hold, and leaves items half done.
+* Crash-recovery markers that turn interrupted work `UNHEALTHY` at startup — they discard accepted work and report a failure that nobody caused.
+* Starting the work in memory after the claim and compensating when it cannot start, as the first proposal did — scheduling the scheduled task in the claim's transaction leaves no gap to compensate.
+* Running every missed scheduled scan after downtime — the scans would repeat back to back and find the same state.
+* Intervals that do not divide 24, or cron expressions — start times would move from day to day, and cron adds a syntax for one setting.
+* Storing a time zone with the schedule — the schedule would disagree with the server's clock and logs.
 
 == References
 
+* link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018: Live Playback Authority and Outbound Transcode Workers]
+* link:0025-cedar-decides-authorization.adoc[ADR 0025: Cedar Decides Authorization; PostgreSQL Keeps the Relationships]
 * link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026: Mutations Return Payloads Whose Expected Errors Are Typed Unions; Top-Level Errors Carry Failure]
-* https://www.postgresql.org/docs/18/sql-update.html[PostgreSQL 18 — UPDATE, RETURNING old and new]
-* https://www.postgresql.org/docs/18/explicit-locking.html#ADVISORY-LOCKS[PostgreSQL 18 — Advisory Locks]
-* https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/transaction/support/TransactionSynchronization.html[Spring — TransactionSynchronization]
-* streamarr-server `FileProcessingTaskCoordinator` — lease-based multi-instance coordination pattern
+* link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032: Media File Probe Results Are Persisted and Playback Reads Them]
+* link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033: The Transcode Worker Is a Separate Service and Repository, and the Server Runs No FFmpeg]
+* link:0038-scans-remove-media-only-when-files-are-confirmed-missing.adoc[ADR 0038: Streamarr Removes Media Only When a Finished Scan Confirms Every File Is Missing]
+* link:0041-scans-and-refreshes-admit-tasks-through-an-adaptive-limit.adoc[ADR 0041: Scans and Refreshes Admit Tasks Through an Adaptive Concurrency Limit]
+* https://docs.spring.io/spring-batch/reference/domain.html[Spring Batch: The Domain Language of Batch]
+* https://github.com/kagkarlsson/db-scheduler/blob/master/db-scheduler/src/main/java/com/github/kagkarlsson/scheduler/task/Execution.java[db-scheduler: the execution model]
+* https://github.com/kagkarlsson/db-scheduler#recurring-tasks[db-scheduler: recurring tasks]
+* https://www.postgresql.org/docs/current/explicit-locking.html#ADVISORY-LOCKS[PostgreSQL: advisory locks]

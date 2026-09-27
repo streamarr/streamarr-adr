@@ -48,6 +48,7 @@ Step:: A logical operation that can be executed and retried independently, such 
 A step keyed by its subject, such as a probe today and artwork after https://github.com/streamarr/streamarr-server/issues/412[#412], can be required by several tasks and jobs; they require it without owning it, and stopping a job never cancels it.
 Attempt:: One execution of a retryable unit of work: a step in library processing, and the transcode job itself in transcoding.
 Item result:: The latest recorded outcome of a step for a subject (https://github.com/streamarr/streamarr-server/issues/417[#417]).
+It carries the id of the operation that it was produced for, if any.
 It is not an attempt history: an attempt that crashes records nothing.
 Scheduled task:: A persisted db-scheduler task instance, as distinct from its registered task definition: the one that runs each library operation, or a step that must survive a restart.
 Streamarr uses the term only at the scheduling boundary.
@@ -79,7 +80,7 @@ Each mutation that starts or stops an operation, or changes the scan schedule, h
 
 The claim schedules the operation's one-time scheduled task, inside the claim's transaction, on a scheduler dedicated to library operations.
 An operation's execution waits for probes and artwork, so it never runs on, or holds, the scheduler threads that run them.
-Every execution walks the library from the start and skips completed work by the normal rules: a scan skips a matched file whose stored facts are current, and a refresh skips a title whose item result was recorded after the operation was claimed.
+Every execution walks the library from the start and skips completed work by the normal rules: a scan skips a matched file whose stored facts are current, and a refresh skips a title whose item result for fetching metadata carries the operation's id.
 Streamarr keeps no checkpoints.
 When an execution ends before the operation ends, the scheduled task runs the operation again: at startup after a graceful shutdown, after a crash once db-scheduler finds the lost scheduled task dead, and with backoff after a failure that the execution could not record.
 
@@ -90,13 +91,18 @@ An unexpected failure, or an outcome that cannot be recorded, fails the operatio
 
 A task requests the subject-keyed steps it needs, such as a probe and, after https://github.com/streamarr/streamarr-server/issues/412[#412], artwork, in the transaction that records its outcome.
 Those steps do not belong to the operation: the file watcher, playback and other operations require the same steps, and requests for one subject merge.
+An artwork request carries the id of the operation that waits for it, and a request that merges with it keeps that id.
+A request with changed sources or a stronger refresh mode starts a new generation of the request, and an attempt of an older generation records no result.
+Each item result carries the operation id that its request carried when the result was recorded, so an operation reads only results produced for it.
 A task stays admitted until the poster and backdrop that it requested are recorded, so a stop waits only for admitted tasks.
 A task or an operation waits by reading recorded results, never for an in-process signal, because a result can arrive after a restart or through a path that sends no signal.
 
 === Finishing
 
-An operation finishes when every result that its tasks require has been recorded after the operation was claimed, as https://github.com/streamarr/streamarr-server/issues/418[#418] defines.
-A scan requires probe results and primary artwork, which is the posters and backdrops of movies and series plus the required season and episode artwork; a refresh requires primary artwork, and a removal of items with missing files requires no result.
+An operation finishes when every result that its tasks require is recorded, as https://github.com/streamarr/streamarr-server/issues/418[#418] defines, and no artwork request that carries its id is pending.
+A scan requires a probe result that describes each file as the scan found it, whoever requested it, and primary artwork, which is the posters and backdrops of movies and series plus the required season and episode artwork; a refresh requires primary artwork, and a removal of items with missing files requires no result.
+Primary artwork counts only when its result carries the operation's id.
+A result recorded after the claim proves nothing by its time alone, because artwork requested before the claim can finish after it.
 Person and company artwork is background work, which an operation requests and never waits for.
 
 Once the walk is done and no required step is pending, the finishing steps run in a fixed order.
@@ -184,7 +190,8 @@ They return when an operation needs its own membership, such as an execution aft
 
 == Rejected Alternatives
 
-* Durable fan-in now, with per-task request rows and dependency tracking between steps — counting completions durably is a protocol of its own, and nothing needs per-operation membership yet.
+* Durable fan-in now, with per-task request rows and dependency tracking between steps — counting completions durably is a protocol of its own, and an operation id on each subject's one request is enough to tell which results an operation waits for.
+* Proving completion by the claim time — artwork requested before the claim can finish after it, so a refresh would skip a title it never refreshed or finish on artwork fetched for a weaker request.
 * A scheduled task for each task — db-scheduler cannot report when a group finishes and deletes a successful one-time execution, so the operation could not tell when its tasks finished.
 * A workflow engine beside db-scheduler — it adds a second durable engine with its own replay model, and a caller could not share a subject-keyed step that another caller requested.
 * Queueing a second operation, or upgrading the running operation to a stronger request — a queue needs its own durable state and ordering, the ServerAdmin cannot see when queued work will start, and an upgraded refresh would refresh some titles twice.

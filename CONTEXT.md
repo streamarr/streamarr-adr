@@ -136,6 +136,7 @@ _Avoid_: try, retry (for the first attempt), run
 
 **Item result**:
 The latest recorded outcome of a step for a subject.
+It carries the id of the operation that it was produced for, if any.
 It is not an attempt history: an attempt that crashes records nothing.
 _Avoid_: attempt history, attempt log, job result
 

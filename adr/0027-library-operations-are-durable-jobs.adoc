@@ -91,7 +91,7 @@ An unexpected failure, or an outcome that cannot be recorded, fails the operatio
 
 A task requests the subject-keyed steps it needs, such as a probe and, after https://github.com/streamarr/streamarr-server/issues/412[#412], artwork, in the transaction that records its outcome.
 Those steps do not belong to the operation: the file watcher, playback and other operations require the same steps, and requests for one subject merge.
-An artwork request carries the id of the operation that waits for it.
+A primary artwork request carries the id of the operation that waits for it, and a background artwork request carries none.
 An operation's request takes over a pending request for the same item and sets its own id, whether the pending request carries no id, such as the file watcher's, or the id of an operation that has ended, because a library runs one operation at a time.
 A request from outside an operation, such as an artwork edit, keeps the id that the pending request carries.
 Taking over a request that waits to retry runs it again at once, so the operation waits for one fresh attempt, not the backoff.
@@ -102,13 +102,14 @@ A task or an operation waits by reading recorded results, never for an in-proces
 
 === Finishing
 
-An operation finishes when every result that its tasks require is recorded, as https://github.com/streamarr/streamarr-server/issues/418[#418] defines, and no artwork request that carries its id is pending.
-A scan requires a probe result that describes each file as the scan found it, whoever requested it, and primary artwork, which is the posters and backdrops of movies and series plus the required season and episode artwork; a refresh requires primary artwork, and a removal of items with missing files requires no result.
-Primary artwork counts only when its result carries the operation's id.
+An operation finishes when every result that its tasks require is recorded, as https://github.com/streamarr/streamarr-server/issues/418[#418] defines: a success or a recorded failure, never an attempt that is still pending.
+A scan requires a recorded probe outcome for each file as the scan found it, whoever requested it, and primary artwork, which is the posters and backdrops of movies and series plus the required season and episode artwork; a refresh requires primary artwork, and a removal of items with missing files requires no result.
+Primary artwork is required for each item whose result for fetching metadata carries the operation's id, and counts only when its result carries that id, whether the artwork was saved, unavailable or failed.
 A result recorded after the claim proves nothing by its time alone, because artwork requested before the claim can finish after it.
 Person and company artwork is background work, which an operation requests and never waits for.
+A retry after a recorded failure never holds an operation open either; its result later replaces the recorded failure.
 
-Once the walk is done and no required step is pending, the finishing steps run in a fixed order.
+Once the walk is done and every required result is recorded, the finishing steps run in a fixed order.
 A scan updates file availability, removes items with missing files when the library's setting allows it (ADR 0038), and recalculates the letter index; a refresh or a removal recalculates the letter index, which takes over https://github.com/streamarr/streamarr-server/issues/447[#447]'s recount after a refresh.
 Each finishing step is keyed by the operation's id and is idempotent, so a step that a restart interrupted has the same effect when it runs again.
 A finishing step for an operation that has ended does nothing, so a stale execution cannot apply a step to a later operation.
@@ -128,7 +129,7 @@ A stop leaves the library usable, as it was before the operation except for the 
 A stop is not a rollback: it admits no new tasks and lets the tasks already running finish their foreground steps.
 It never cancels running work, because cancelling interrupts running tasks and breaks the pooled database connections that they hold.
 A graceful stop is meant to take seconds and at most about a minute: only the few admitted tasks drain, and each step has its own timeouts.
-The stop is stored with the operation, so a restart during `STOPPING` finishes it: the execution admits nothing, waits until no primary artwork request that carries the operation's id is pending, recalculates the letter index and restores the earlier status.
+The stop is stored with the operation, so a restart during `STOPPING` finishes it: the execution admits nothing, waits until every item whose result for fetching metadata carries the operation's id has its primary artwork results, recalculates the letter index and restores the earlier status.
 A stop does not wait for probes or background artwork; they keep running, and their results appear afterwards.
 A stopped operation requests no new background artwork, and the interface distinguishes a stopped operation from details that are still arriving.
 
@@ -181,14 +182,14 @@ Streamarr revisits the guard before any deployment can run overlapping servers, 
 === Explicitly deferred
 
 * Durable per-task request rows that record which pending steps each operation requested.
-They return when an operation needs its own membership, such as an execution after a restart that waits only for the steps that its operation requested, or a per-title status for a single-title refresh (https://github.com/streamarr/streamarr-server/issues/429[#429]) or fix match (https://github.com/streamarr/streamarr-server/issues/430[#430]).
+They return when an operation needs membership beyond the operation id that artwork requests and item results carry, such as a per-title status for a single-title refresh (https://github.com/streamarr/streamarr-server/issues/429[#429]) or fix match (https://github.com/streamarr/streamarr-server/issues/430[#430]).
 * The single-server startup guard, until a deployment can run overlapping servers.
 
 == Consequences
 
 * A restart no longer turns a busy library `UNHEALTHY`; the operation runs again, and the normal rules skip completed work.
 * After a crash, a library stays busy without progress until db-scheduler finds the lost scheduled task dead.
-* An execution after a restart cannot tell which pending steps the earlier execution requested, so it waits for every pending step that its tasks require, including steps that the file watcher or playback requested, and can finish later than an uninterrupted execution.
+* An execution after a restart waits only for the primary artwork of items that its operation recorded, because artwork requests and item results carry the operation's id.
 * Scheduled scans read every library's storage on schedule, even when nothing changed.
 * When the end itself keeps failing, the library stays busy, and the operation runs again with backoff until the database accepts the end.
 

@@ -107,6 +107,53 @@ _Avoid_: passthrough, remux (when only the video is copied)
 The container of a media file as the probe found it, such as Matroska, MP4 or MPEG-TS. It is a source fact that decides direct-play eligibility, and it never describes HLS delivery, which is always fragmented MP4.
 _Avoid_: container format, ContainerFormat, output container
 
+### Jobs and library operations
+
+**Job**:
+A requested operation with an overall completion criterion, such as a library operation or a transcode job.
+In library processing, a job divides into tasks, steps and attempts (ADR 0027); a transcode job has job attempts directly, with no tasks or steps.
+_Avoid_: workflow, scheduled task (the db-scheduler record that runs a job)
+
+**Library operation**:
+The job that scans a library, refreshes it, or removes its items with missing files.
+A library has at most one at a time, and `Library.status` shows its kind while it runs.
+_Avoid_: library task (a task is a portion of a job), library work (when naming one operation)
+
+**Task**:
+A distinct portion of a job's work, grouped around one subject: a file in a scan, a title in a refresh, a library item in a removal.
+It is defined by its work, not by the thread that runs it, and it requires one or more steps.
+_Avoid_: operation item, subtask (except the JDK's `StructuredTaskScope.Subtask` handle), work item
+
+**Step**:
+A logical operation that can be executed and retried independently, such as identify, fetch poster, fetch backdrop, probe, or fetch person or company artwork.
+A step keyed by its subject, such as a file's probe, can be required by several tasks and jobs; they require it without owning it, and stopping a job never cancels it.
+Independent retry is a design target: probes and identification are retried independently today, and artwork becomes independently retryable with streamarr/streamarr-server#412.
+_Avoid_: phase, stage, subtask
+
+**Attempt**:
+One execution of a retryable unit of work: a step in library processing, or the transcode job itself in transcoding, where it is a job attempt.
+_Avoid_: try, retry (for the first attempt), run
+
+**Item result**:
+The latest recorded outcome of a step for a subject.
+It is not an attempt history: an attempt that crashes records nothing.
+_Avoid_: attempt history, attempt log, job result
+
+**Scheduled task**:
+A persisted db-scheduler task instance, as distinct from its registered task definition: the one that runs each library operation, or a step that must survive a restart, such as a probe.
+Use the term only at the scheduling boundary.
+_Avoid_: task (unqualified), job
+
+**System actor**:
+The reserved identity recorded for work that no user requested, such as a scheduled library scan.
+It cannot sign in, holds no Household or Profile, and a ServerAdmin who configured the work is recorded on that configuration change, not on the work.
+_Avoid_: system user, anonymous, null auditor
+
+**Batch**:
+A group of items processed together.
+Library operations have no batches: they admit each task on its own.
+_Avoid_: page (reserved for pagination), chunk
+
 ### Attempts
 
 **Job attempt**:

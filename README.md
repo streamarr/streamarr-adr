@@ -59,11 +59,6 @@ None at present.
 - [ADR 0041: Scans and Refreshes Admit Tasks Through an Adaptive Concurrency Limit](adr/0041-scans-and-refreshes-admit-tasks-through-an-adaptive-limit.adoc)
 - [ADR 0042: GraphQL Subscriptions Keep Queried Screens Current over WebSocket until Token Expiry](adr/0042-graphql-subscriptions-run-over-websocket-until-token-expiry.adoc) — proposed
 
-## Shared API conventions
-
-- [GraphQL subscription conventions](docs/graphql-subscription-conventions.md) — proposed with ADR 0042; payloads, caching, live lists, client lifetimes and recovery.
-- [GraphQL mutation conventions](adr/0026-mutation-payloads-and-error-channels.adoc) — ADR 0026.
-
 ## Domain language
 
 [`CONTEXT.md`](CONTEXT.md) is the shared glossary for every Streamarr repository: server, transcode worker, web and Apple clients. Each repository's `CLAUDE.md` points here instead of keeping its own copy. Propose a new or sharpened term with a pull request to this repository, together with the ADR that settles it when one is needed.

@@ -6,97 +6,221 @@ Proposed
 
 == Context
 
-A normal query or mutation response already supplies the state needed to display a Streamarr screen.
-Library status (https://github.com/streamarr/streamarr-server/issues/411[#411]), Profile watch state (https://github.com/streamarr/streamarr-server/issues/165[#165]) and library contents (https://github.com/streamarr/streamarr-server/issues/166[#166]) need subsequent changes pushed to open clients.
-The server, web client and Apple client need shared subscription conventions, just as link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026] defines mutation conventions.
-WebSocket with `graphql-transport-ws` provides a supported transport across Spring for GraphQL, Apollo Client and Apollo iOS.
-link:0016-authentication-mechanisms-and-session-security.adoc[ADR 0016] bounds authority by access-token expiry even when a connection remains open.
+link:0002-graphql-over-rest.adoc[ADR 0002] makes GraphQL the delivery protocol, and link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026] defines mutation results that clients can write into their normalized caches.
+A query or mutation response supplies a screen's initial state, but changes made afterwards are invisible until the client loads that state again.
+Library administration (https://github.com/streamarr/streamarr-server/issues/411[#411]), Profile watch state (https://github.com/streamarr/streamarr-server/issues/165[#165]) and library contents (https://github.com/streamarr/streamarr-server/issues/166[#166]) need those changes delivered to open screens.
+
+The GraphQL specification defines subscription execution, but leaves transport, recovery and cache reconciliation to the application.
+WebSocket with `graphql-transport-ws` is supported by the selected Spring for GraphQL, Apollo Client and Apollo iOS stack.
+The clients need one shared contract for what a subscription delivers and how a screen recovers when delivery stops.
+
+Two existing decisions constrain that contract.
+link:0016-authentication-mechanisms-and-session-security.adoc[ADR 0016] bounds authority by access-token expiry, including authority used on an open connection.
+link:0027-library-operations-are-durable-jobs.adoc[ADR 0027] requires one active server per database, so the initial delivery path can remain in process.
 
 == Decision
 
-=== Initial state and live updates
+Streamarr subscriptions deliver current state through explicit, purpose-specific fields over a shared WebSocket.
+Ordinary queries and mutation responses populate screens; subscription payloads keep them current without a query after each event.
+Clients use ordinary normalized caching and silently revalidate current state after an interruption.
+The contract accepts the initial query-to-registration gap and stale-response overwrites; stronger consistency needs a feature-specific requirement.
 
-* Ordinary queries and mutation responses populate screens; explicit, purpose-specific subscriptions keep them current through useful typed payloads.
-  Reuse the same entity types and cache identities, and provide the data needed to update lists and visible aggregates without a query after each event.
-* Accept the small query-to-registration gap.
-  A subscription has no universal initial snapshot, readiness handshake, durable replay or exactly-once guarantee.
-  Recovery reloads current state through ordinary queries.
-* Use ordinary normalized caching.
-  Do not require revisions or stale-response guards on every entity or response.
-  A delayed response may overwrite newer displayed fields; stronger consistency requires a justified feature-specific contract.
-* Apply updates automatically.
-  Inserting within a loaded list range grows it, removing shrinks it without backfilling, and filter, sort and authoritative aggregate changes update the view.
-  Keep the current library's subscriptions through library-to-movie-to-library navigation.
-* Keep subscriptions running when a browser tab is hidden, subject to platform suspension.
-  Revalidate silently after reconnect, return online or return to the foreground, including the retained library view.
-  Temporary interruptions add no connection-status indicator.
-* Publish committed changes as they happen without default batching or coalescing.
-  Transactional publication occurs after commit; the domain event remains independent of the GraphQL payload.
+=== Subscription shape
 
-The shared server and client rules, per-field contract and verification requirements are in link:../docs/graphql-subscription-conventions.md[GraphQL subscription conventions].
+* A subscription names the domain change it delivers and takes the arguments needed to identify its scope.
+  Authenticated identity, including the selected Profile, comes from the session rather than a caller-supplied identity argument.
+* Distinct changes use explicit fields.
+  Library contents retain `libraryItemAdded(libraryId: ID!)`, `libraryItemUpdated(libraryId: ID!)` and `libraryItemRemoved(libraryId: ID!)`; consuming all three does not require a combined event field or separate sockets.
+* Each field has a typed result appropriate to its purpose.
+  Addition and update results expose the same entity types, selectable fields and cache identities as queries and mutation responses.
+  Clients select the fields they need through shared fragments where practical.
+* A removal returns a typed receipt with the identity and scope needed to remove the item; it does not resolve an entity that has already been deleted.
+* Payloads provide the data needed for the feature's declared live behavior: entity fields, filter and sort inputs, usable pagination information, and authoritative visible aggregates.
+  An ID-only notification followed by a query for every change does not satisfy this contract.
+* Subscription results do not inherit ADR 0026's mutation envelope.
+  In particular, successful events do not acquire a `userErrors` list merely because mutations have one.
 
-=== Transport, authority and recovery
+=== Initial state and delivery guarantees
 
-* Subscriptions use `graphql-transport-ws` over a shared WebSocket on `/graphql`.
-  Queries and mutations remain on HTTP; HTTP and server-sent-event subscriptions are refused.
-* The opening HTTP handshake authenticates with the existing access cookie or Bearer token and retains the origin check.
-  A token does not travel in `connection_init`.
-  Authorize each subscription and its data through the service-layer contract in link:0025-cedar-decides-authorization.adoc[ADR 0025].
-* At the opening token's expiry, stop data delivery and close the socket with a documented, client-tested signal.
-  Do not send `complete` for active operations first: completion ends them in the client and prevents normal restoration.
-  Coordinate session renewal before opening the replacement socket, then restore still-desired subscriptions and revalidate.
-* Retry recoverable connection failures without an attempt limit, using the transport's retry machinery with capped exponential backoff and jitter.
-  Start with a cap of approximately 30 seconds as client configuration.
-  Preserve fatal-error handling and stop obsolete recovery on logout, permanent authentication failure, cancellation or identity change.
-* Normal scope completion and permanent subscription refusal remain terminal.
-  If an operation error is documented as recoverable, its consumer recreates the operation explicitly; socket reconnection alone does not revive completed or errored operations.
-* Domain failures are ordinary data, such as a library becoming `UNHEALTHY`.
-  Subscription refusal and execution/source failures use sanitized GraphQL errors with documented codes; subscriptions do not copy mutation `userErrors` into every result.
+The initial state comes from an ordinary query or mutation response.
+Subscriptions deliver changes after registration; they do not send a required initial snapshot.
+The small interval between the query and registration is accepted.
+A WebSocket `connection_ack` acknowledges the connection, not an individual operation's registration, and clients do not require a separate readiness message.
 
-=== Resource limits and deployment
+The default is current screen state, not durable history.
+There is no universal replay cursor, exactly-once delivery, global commit order or guarantee that every intermediate transition is observed.
+Publish changes as they happen without a default debounce window, batch timer or latest-value-only buffer.
+A feature that needs stronger ordering, revisions, replay or deliberate coalescing records its requirement and recovery behavior explicitly.
 
-* Bound queues and transport resources, and never make publishing wait for a slow subscriber.
-  Terminate the affected operation or connection on overflow and recover through revalidation.
-  Do not promise that a shared socket failure affects only one subscription.
-* Cancellation, completion, expiry and disconnection release all subscription resources.
-  Keep required reactive adaptation at the GraphQL boundary; virtual threads remain the application concurrency model.
-* Changes initially reach subscribers through the one active server process required by link:0027-library-operations-are-durable-jobs.adoc[ADR 0027].
-  Horizontal deployment requires shared event distribution and resolution of the other single-instance assumptions, beyond the transport choice.
+Recovery queries have the same best-effort boundary as initial loading.
+They repair current state without claiming an atomic snapshot-and-watch handoff.
+
+=== The channel rule
+
+Domain state belongs in the payload.
+A failed scan is a library becoming `UNHEALTHY`, and observing that failure does not end its subscription.
+
+GraphQL errors describe request or execution failure:
+
+* An invalid or unauthorized subscription returns sanitized operation errors with documented machine-readable codes.
+  Permanent refusal is terminal.
+* A field error in one execution result follows GraphQL's nullability and partial-data rules.
+  It does not inherently end the operation; the client applies only usable data.
+* A terminal source failure ends the operation with a sanitized error whose documented category determines whether a consumer may recreate it.
+* Normal `complete` means the scope finished or was removed.
+  The client does not automatically resurrect that scope.
+
+Reuse Streamarr's established error vocabulary where the meaning matches, and keep internal diagnostics on the server.
+A protocol `error` or `complete` ends the operation in the client; reconnecting its socket does not revive it.
+
+=== Transport and authorization
+
+* Subscriptions use `graphql-transport-ws` on `/graphql`.
+  Queries and mutations stay on HTTP; HTTP and server-sent-event subscriptions are refused.
+  Consumers in an authenticated client session share a WebSocket client.
+* The opening HTTP handshake authenticates through the existing access cookie for browsers or `Authorization: Bearer` for native clients, retaining the origin check.
+  No additional token travels in `connection_init`.
+* Subscription authorization uses the service-layer contract in link:0025-cedar-decides-authorization.adoc[ADR 0025].
+  Delivered entities, identifiers, removal receipts, counts and error details obey query-equivalent visibility.
+  Each field defines how a resource leaving readable scope disappears from the affected view without disclosing hidden resources.
+* Existing authority remains bounded by the opening token's expiry under ADR 0016; this decision does not introduce immediate revocation everywhere.
+  A denied operation can end while other authorized operations continue on the socket.
+  Delivery fails closed when authority is invalid, expired or denied.
+* At token expiry, the server stops delivery and closes the socket with a documented, client-tested signal.
+  It does not first send `complete` for active operations: completion tells clients those operations are finished and prevents their normal restoration.
+* The client coordinates renewal through the existing session machinery and obtains fresh handshake credentials before opening the replacement socket.
+  Refreshing an HTTP cookie does not reauthenticate the existing socket, and `connection_init` is not a repeatable reauthentication message.
+  The browser's `connectionParams` callback runs after the opening handshake and cannot refresh its cookie in time.
+* A Profile or Household switch disposes the old operations and reconnects with the new identity.
+  Old events must not repopulate the new identity's cache, and shared entity IDs do not authorize sharing Profile-specific watch state.
+* The server retains the authenticated identity and expiry needed for delivery, without retaining or logging raw credentials in event payloads or diagnostics.
+
+=== Client obligations
+
+==== Cache and collection updates
+
+* Use normal Apollo entity normalization and cache updates.
+  A complete cached query can satisfy navigation back to a screen; subscriptions do not impose a universal refetch-on-navigation policy.
+* Do not add universal revision fields, deletion tombstones or custom stale-response guards.
+  An older HTTP response may overwrite newer fields from an event; a later event or revalidation can correct that accepted limitation.
+  A feature requiring non-regressing state needs its own contract across every contributing response.
+* Update lists automatically, without a “new items available” prompt.
+  Entity normalization does not maintain connection membership, ordering or aggregates; consumers handle those explicitly.
+  Repeated additions do not create duplicate edges, and removing an absent item is harmless.
+* Respect the active filter and sort, including changes delivered through another subscription.
+  Marking a movie watched on another device removes it from an Unwatched list even when its library metadata has not changed.
+* An insertion within the loaded range grows the list.
+  If 48 loaded titles cover A–M and more pages remain, a new B title makes 49 without evicting an existing title.
+  A new title beyond that range arrives through normal pagination; matching additions can extend a list already loaded to its end.
+* Removal, or an item ceasing to match the filter, shrinks the list.
+  Removing one of 48 leaves 47; the client does not fetch a replacement to preserve the original page size.
+  Updates use the query's ordering and membership semantics while preserving stable item identities.
+* Maintain usable pagination when membership changes; do not invent Relay cursors or treat them as change-log positions.
+  Page size describes a query result, not a fixed size for a live cached list.
+* Update visible counts and alphabet navigation from their authoritative changes, including changes affecting items outside the loaded page.
+  Subscription delivery preserves the domain's recomputation schedule, such as ADR 0027's alphabet-index recount at operation completion.
+  Each feature documents that timing; the client cannot infer a whole-library count from its loaded nodes.
+
+==== Lifetime and recovery
+
+* Keep the current library's subscriptions active through library → movie → Back, releasing them when leaving the library scope.
+  The useful subscription lifetime can outlast the list component's mounted lifetime.
+* Do not explicitly pause subscriptions when a browser tab is hidden.
+  Platform suspension or page discard can still interrupt delivery; recovery handles the return without a custom suspension state machine.
+* Revalidate relevant queries silently after WebSocket reconnect, browser online return and tab visibility return.
+  Include the retained library query while a movie is open, and share one recovery path for overlapping triggers.
+  Native clients apply equivalent foreground and connection-recovery behavior through their lifecycle APIs.
+* Temporary interruption leaves the screen usable with existing data and adds no connection, reconnecting or stale-data indicator.
+  Permanent authentication or authorization failures use the application's existing access behavior.
+  Recovery queries do not become a periodic polling fallback.
+* Use the transport library's reconnection machinery for recoverable connection failures, with unlimited attempts, exponential backoff and jitter capped initially around 30 seconds.
+  Retain fatal-error handling, and stop obsolete recovery on logout, permanent authentication failure, cancellation or identity change.
+* The web client configures `graphql-ws` with `retryAttempts: Infinity` and a capped `retryWait`.
+  Its default delay is uncapped, so changing only the attempt limit eventually leaves minutes or hours between attempts.
+  Configure and test equivalent intended behavior on the installed Apollo iOS transport; its defaults are not assumed to match.
+* Restore still-desired active operations and revalidate after reconnection.
+  A documented recoverable operation error requires the consumer to recreate that operation and revalidate; a socket reconnect alone cannot do it.
+  Normal completion and permanent refusal remain terminal.
+
+=== Publication and resource limits
+
+Services publish ordinary domain/application events where state changes, independent of GraphQL payload types.
+For transactional writes, delivery occurs after commit; refused operations and rolled-back transactions publish nothing.
+Virtual threads remain the application concurrency model, with required reactive adaptation confined to the GraphQL boundary.
+
+Bound queues and transport resources throughout delivery, including serialization and socket writes.
+Publishing never waits for a slow client to drain a queue.
+Overflow terminates the affected operation or connection through its documented recovery path; it does not silently discard events.
+A failure of the shared socket can affect every operation on it.
+Choose numerical capacities through representative tests and configuration.
+
+Cancellation, completion, failure, expiry and disconnection release registrations, buffers, timers and execution work.
+The initial deployment uses in-process delivery on the one active server required by ADR 0027.
+Horizontal deployment needs shared event distribution and resolution of the application's other single-instance assumptions.
+
+=== Enforcement
+
+Every subscription's SDL documentation and implementation issue specify its purpose, scope and authority; initial query or mutation response; payload and collection effects; publish points and ordering; lifetime and completion; and error, overflow and recovery behavior.
+Any exception to the baseline consistency or coalescing rules is explicit.
+
+Implementation starts with failing tests, following link:0005-tdd-and-behavior-testing.adoc[ADR 0005].
+Feature tests demonstrate payload-driven updates without per-event refetches; insertion, removal, filtering, sorting and authoritative aggregate changes; identity isolation; rollback; and resource cleanup.
+Transport tests exercise a slow subscriber without blocking publication, disconnection, and token-expiry renewal using the actual web and Apple transports.
+They verify the promised contract rather than imposing a universal no-gap startup or highest-revision rule.
+
+=== Adoption
+
+https://github.com/streamarr/streamarr-server/issues/411[#411] establishes the shared transport and library-administration delivery.
+https://github.com/streamarr/streamarr-server/issues/165[#165] and https://github.com/streamarr/streamarr-server/issues/166[#166] apply the same conventions to Profile watch state and library contents.
+Each feature defines its complete payload and client cache behavior; adding normalized entity data alone does not finish collection updates.
+New subscriptions adopt this contract from their first implementation.
 
 Explicitly deferred:
 
-* A durable event history or resumable change cursor.
-* Universal atomic query/subscription startup, entity revisions, deletion tombstones or cross-transport ordering guards.
+* Durable history and resumable change cursors.
+* Universal snapshot/readiness protocols, revisions, deletion tombstones and cross-transport ordering guards.
 * Additional subscription transports, periodic polling fallback and speculative coalescing.
 
 == Consequences
 
-* An open page receives live changes without reloading after each event, while recovery uses familiar query and cache mechanisms.
+* Open screens receive ordinary changes through payloads, while recovery uses existing query and cache mechanisms.
+* Best-effort current state can remain stale after a missed startup change or a late response until another update or revalidation.
+  Applications requiring stronger consistency must define and pay for it explicitly.
+* Payload design and client code must cover collection membership, sorting, pagination and visible aggregates; Apollo normalization handles entity fields only.
 * Clients reconnect at least once per opening access-token lifetime while subscriptions remain needed.
-  Refreshing an HTTP cookie does not reauthenticate an existing WebSocket.
-* Best-effort current state accepts a missed startup change and stale-response overwrites until a later update or revalidation.
-  It does not claim historical completeness.
-* Payload design includes list membership, sorting, pagination and visible aggregates where the feature promises them; Apollo entity normalization does not maintain those automatically.
-* The web and Apple transports need tests for expiry, reconnection and operation termination because their library defaults differ.
-* A reverse proxy must pass WebSocket upgrades on `/graphql`.
+  The web and Apple transports require explicit lifecycle configuration and tests because their defaults differ.
+* Slow consumers lose their operation or connection and recover current state, keeping memory bounded without delaying publishing.
+* Reverse proxies must pass WebSocket upgrades on `/graphql`, and multiple active servers require architectural work beyond enabling WebSocket transport.
 
 == Rejected Alternatives
 
-* Polling as the routine update path — avoid recurring requests and update delay; recovery queries remain appropriate.
-* Server-sent events or multipart HTTP subscriptions — add transport and client work without a shared supported path across the selected server and Apple stack.
+* Polling as the routine update path — recurring requests and delayed updates; ordinary recovery queries remain appropriate.
+* Server-sent events or multipart HTTP subscriptions — additional transport and client work without a shared supported path across the selected server and Apple stack.
 * The older `subscriptions-transport-ws` protocol — replaced by `graphql-transport-ws`.
-* Universal snapshot/readiness and highest-revision protocols — their complexity is not justified by the accepted live-screen consistency requirement.
-* An ID-only invalidation stream followed by a query for every event — ordinary updates should carry the data needed by the UI.
-* Completing every operation before closing an expired socket — tells clients the operations are finished instead of temporarily disconnected.
-* Unlimited buffering or waiting for a slow client — permits unbounded memory growth or delays the publishing operation.
+* A combined catch-all subscription — hides distinct domain purposes; socket sharing already avoids separate connections.
+* ID-only invalidation followed by a query for every event — the payload should carry the data needed by the screen.
+* Universal snapshot/readiness and highest-revision protocols — complexity not justified by the accepted live-screen consistency requirement.
+* Completing operations before closing an expired socket — makes active subscriptions terminal instead of temporarily disconnected.
+* Unlimited buffering or waiting for a slow client — unbounded memory or delayed publishing.
 
 == References
 
-* link:../docs/graphql-subscription-conventions.md[GraphQL subscription conventions]
+* link:0002-graphql-over-rest.adoc[ADR 0002: GraphQL Over REST]
+* link:0005-tdd-and-behavior-testing.adoc[ADR 0005: TDD and Behavior Testing]
+* link:0010-spring-application-events.adoc[ADR 0010: Spring Application Events for Service Decoupling]
 * link:0016-authentication-mechanisms-and-session-security.adoc[ADR 0016: Authentication Mechanisms and Session Security]
 * link:0025-cedar-decides-authorization.adoc[ADR 0025: Cedar Decides Authorization; PostgreSQL Keeps the Relationships]
 * link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026: Mutation Payloads and Error Channels]
 * link:0027-library-operations-are-durable-jobs.adoc[ADR 0027: Durable Library Operations]
-* https://github.com/enisdenjo/graphql-ws/blob/master/PROTOCOL.md[The `graphql-transport-ws` protocol]
-* https://the-guild.dev/graphql/ws/docs/client/interfaces/ClientOptions[graphql-ws client options]
-* https://docs.spring.io/spring-graphql/reference/transports.html[Spring for GraphQL: Server Transports]
+* https://spec.graphql.org/September2025/#sec-Subscription[GraphQL Specification, September 2025 — Subscription Execution]
+* https://github.com/enisdenjo/graphql-ws/blob/master/PROTOCOL.md[The `graphql-transport-ws` Protocol]
+* https://docs.spring.io/spring-graphql/reference/transports.html[Spring for GraphQL — Server Transports]
+* https://www.apollographql.com/docs/react/caching/overview[Apollo Client — Cache Normalization]
+* https://www.apollographql.com/docs/react/caching/cache-interaction[Apollo Client — Cache Interaction]
+* https://relay.dev/graphql/connections.htm[GraphQL Cursor Connections Specification]
+* https://www.apollographql.com/docs/react/data/event-based-refetching[Apollo Client — Event-Based Refetching]
+* https://the-guild.dev/graphql/ws/docs/client/interfaces/ClientOptions[graphql-ws — Client Options]
+* https://github.com/enisdenjo/graphql-ws/blob/master/src/client.ts[graphql-ws — Client Implementation]
+* https://www.apollographql.com/docs/ios/networking/websocket-transport[Apollo iOS — WebSocket Transport]
+* https://github.com/gitlabhq/gitlabhq/blob/master/app/assets/javascripts/actioncable_consumer.js[GitLab — Shared Action Cable Consumer]
+* https://docs.gitlab.com/development/fe_guide/graphql/[GitLab — Frontend GraphQL Guide]

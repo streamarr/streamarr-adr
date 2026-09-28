@@ -12,7 +12,7 @@ Items are deleted and created again during ordinary operation:
 * A library is removed and added back.
 * Sonarr or Radarr replaces a file, and a scan deletes the item before the new file matches it.
 * A renamed file matches a different title.
-* Orphan cleanup deletes an item whose files are gone. That cleanup is proposed to become stricter in ADR 0038 (streamarr-server issue #449).
+* Orphan cleanup deletes an item whose files are gone, under ADR 0038 (streamarr-server issue #449).
 
 A new item gets a new id, so anything stored against the old item is lost or left pointing at nothing.
 
@@ -90,8 +90,20 @@ Anything a scan produces attaches to the item:
 * probe results;
 * item results.
 
-A catalog entry with no items and no user-authored data is deleted by a scheduled sweep.
+A scheduled sweep deletes a catalog entry only when no item, person or company row points at it, it holds no user-authored data, and no retained credit edit refers to it.
+Both added and removed credits keep the person or company catalog entries they refer to, even when the title has no items and those entries hold no edits of their own.
+The sweep checks these references in the transaction that deletes the entry.
 An entry that still holds user-authored data is kept with no item attached. It is not deleted, and returns when an item matches it again.
+
+=== Watch state
+
+Watch history and resume positions belong to a profile and catalog entry, so every attached item sees the same watch state.
+Each watch action and resume update also records which item it came through.
+An explicit watched or unwatched action on an item records that item as its source; an action on the catalog entry alone has no item source.
+The server retains each item's contributions even when another item's later contribution determines the entry's current watch state.
+The source identity survives deletion of the item, library or media file, without keeping those rows alive or cascading away the watch state.
+A recreated item does not inherit another item's provenance merely because they point at the same catalog entry.
+Legacy state whose source cannot be established keeps unknown provenance.
 
 === Metadata edits
 
@@ -138,6 +150,8 @@ Their catalog entries keep any edits, and the edits return when a scan credits t
 
 A credit edit is a metadata edit that adds or removes one person, company or genre on a movie's or series' credits.
 Each credit edit has its own id, and removing that edit undoes it.
+An edit that adds or removes a person or company refers to their catalog entry, so deleting an uncredited person or company row cannot break the edit.
+Reapplying an added credit recreates that row from the retained catalog entry when needed.
 The effective credit list is the provider's list without the removed credits, plus the added ones at their given positions.
 New credits from the provider still arrive; a removed credit stays removed and an added one stays added.
 A whole credit list is never locked.
@@ -196,7 +210,14 @@ Fix match runs in the background and moves an item to another catalog entry:
 * A copied edit replaces the destination's edit for the same field.
 * The originals stay on the old entry.
 * Clients pre-select every edit when the old entry had no provider match, because those edits were the item's only metadata.
-* Every profile's watch state is copied to the new entry automatically, because it records what the person watched rather than what the title was matched to.
+* For every profile, only watch history and resume updates attributable to the item being corrected are copied to the new entry automatically.
+* Copies retain their original source identity and recorded time, and are deduplicated by their source watch record so retrying a fix match cannot duplicate history.
+* Existing destination watch state is kept, and copying older records cannot overwrite newer destination progress or watched/unwatched actions.
+* State from other items, or with unknown or ambiguous provenance, stays on the old entry and is not copied automatically.
+The result reports when watch state could not be copied because its provenance was unknown or ambiguous.
+
+For example, library A holds the correctly matched movie A, while library B holds movie B incorrectly matched to A's catalog entry.
+If a profile watches only library A's item, fixing library B's match leaves that profile's watch state on A and copies none of it to B.
 
 A scan that re-matches a file to a different title leaves the edits on the old entry as unattached metadata edits.
 A ServerAdmin can list unattached metadata edits, delete them, or copy them onto an item.
@@ -235,6 +256,10 @@ Callers never pass it entities, so a stale entity copy cannot be saved.
 ** a scan that recreates an item.
 * Refreshing a title in one library updates its copies in every library, because they share one catalog entry.
 * User-authored data for titles that no library holds accumulates. It is small, and ServerAdmins can review unattached metadata edits.
+* A retained credit edit can keep a person or company catalog entry alive without keeping its disposable row alive.
+Tests cover live person and company rows, and added and removed credits surviving library removal and the scheduled sweep.
+* Watch state keeps item provenance as well as its catalog ownership.
+Tests cover two libraries sharing an entry, contributions from both items for the same profile, unknown provenance, newer destination state and retried fix-match work.
 * Every writer of descriptive fields goes through one module. Tests that assert "the provider value wins on refresh" are rewritten to assert that edits survive refresh.
 * Library-scoped item identity is enforced by a unique constraint, not by lookup order.
 * Season and episode catalog entries appear at each series' next refresh, so an upgraded server needs a refresh before season and episode edits are possible.
@@ -246,6 +271,8 @@ Callers never pass it entities, so a stale entity copy cannot be saved.
 * Keying edits by one provider id: provider merges, provider switches and numeric ids shared across media types would orphan or mis-attach them.
 * Keeping an item's id stable across removal: items are per library and per file set, and the catalog entry is the record that must survive.
 * Keeping edits on person and company rows: an edited person could never be deleted, so edited people would never be cleaned up, and edits would need a second place to live.
+* Sweeping entries based only on their own items and edits: live person and company rows and retained credit edits can still refer to them.
+* Copying an entry's aggregate watch state when one item changes match: it also copies viewing of other items sharing the entry, and guesses the source of legacy state.
 * Locking a whole credit list: the provider's new credits stop arriving.
 * Custom genres: a custom grouping belongs in a collection or a tag.
 * Identifying people by name: different people with the same name merge, and case-only duplicates appear.

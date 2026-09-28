@@ -240,5 +240,5 @@ _Avoid_: orphaned edit, dangling edit
 
 **Fix match**:
 Moving an item to a different catalog entry because it matched the wrong title.
-The ServerAdmin chooses which metadata edits to copy, and watch state is copied automatically.
+The ServerAdmin chooses which metadata edits to copy, and watch state attributable to that item is copied automatically.
 _Avoid_: rematch (unqualified), identify, unmatch

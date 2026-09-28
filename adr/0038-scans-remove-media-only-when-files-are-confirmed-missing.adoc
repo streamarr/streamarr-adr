@@ -1,0 +1,174 @@
+= ADR 0038: Streamarr Removes Media Only When a Finished Scan Confirms Every File Is Missing
+
+== Status
+
+Accepted
+
+== Context
+
+After each scan, Streamarr removes library items whose files it can no longer find.
+Today the cleanup removes every file record whose path fails `Files.exists`.
+`Files.exists` also returns false when Java cannot determine whether the file exists, for example when Streamarr cannot read the file.
+The cleanup also treats a stored path that Streamarr cannot decode as a missing file.
+The cleanup deletes a movie left with no files, but it keeps an episode left with no files and deletes only the episode's file records.
+
+The cleanup runs when the scan publishes its completion event, before the scan saves the library as `HEALTHY`.
+The cleanup catches and logs its own failures, so the library turns `HEALTHY` even when the cleanup fails.
+
+Network storage fails in ways that look like deleted files:
+
+* An automounter that fails to mount a share can answer "no such file".
+* An SMB server with `hide unreadable` enabled leaves unreadable files out of a folder listing.
+* rclone and other FUSE mounts can serve a cached folder listing.
+* A mergerfs pool can return a partial listing when one of its branches fails.
+* A share that unmounts leaves its empty mount folder behind.
+
+In the last case, a scan finds no files, finishes `HEALTHY`, and the cleanup removes every movie in the library.
+A container keeps its view of a share that the host unmounts later, so the empty folder is most likely when a container starts before its share mounts.
+No filesystem check proves that a file was deleted.
+The strongest evidence a scan can collect is a folder listing that succeeds and does not include the file, or does not include the folder that held it.
+
+Removal costs the user data:
+
+* Deleting a file record deletes the resume positions stored for that file.
+* A removed movie whose file returns comes back as a new item.
+Watch history refers to the old item without a foreign key, so the new item shows no watched marks.
+* A file that moves within a library during one scan keeps its movie, because matching attaches the new file record to the existing movie by provider id.
+The move still loses the resume position, which belonged to the old file record.
+
+link:0039-catalog-entries-hold-metadata-edits-and-user-data.adoc[ADR 0039] moves watch history, resume positions and metadata edits onto durable catalog entries, which outlive items and file records.
+
+The file watcher's delete events only cancel pending work; the watcher removes nothing.
+Scans are the only path that removes missing media.
+A scan runs only when a ServerAdmin adds a library or starts a scan, so Streamarr does not notice a share that comes back until someone starts a scan.
+
+link:0027-library-operations-are-durable-jobs.adoc[ADR 0027] makes each scan and refresh a durable library operation that claims its library, runs again after a restart, and can be stopped, and it adds scheduled library scans.
+
+== Decision
+
+A scan records whether each file is available, and Streamarr removes an item automatically only when a finished scan confirms that every file of the item is missing.
+Streamarr never removes a file it could not read.
+
+=== Availability
+
+In its finishing steps (ADR 0027), a scan sets the availability of each file record in the library:
+
+* `PRESENT`: the scan found the file and read it.
+* `MISSING`: the library folder check passed, and the scan successfully listed the nearest existing folder on the file's path.
+  That listing omitted the next entry on the path: either the file itself or a folder that contained it.
+  Deleting a movie, season or series folder therefore makes its files `MISSING`.
+* `UNREADABLE`: the scan hit an error while it read the file or listed that nearest folder, or Streamarr could not decode the stored path.
+
+A scan that is stopped or fails before its finishing steps did not list every folder, so it changes no file's availability.
+The next finished scan that reads the file marks it `PRESENT` again, whatever its previous availability.
+Streamarr does not re-check `UNREADABLE` files between scans; scheduled library scans (ADR 0027), when the schedule is on, read them again without a ServerAdmin.
+
+The existing `MediaFileStatus`, which tracks matching, becomes `MediaFileMatchStatus`, so the matching status and the availability status do not share a name.
+
+=== The library folder check
+
+When the library folder does not exist, cannot be read, or is empty while Streamarr still records files for the library, the scan fails.
+The failed scan marks no file `MISSING`, removes nothing, and marks the library `UNHEALTHY` with a reason.
+A library whose folder is empty and that has no file records stays `HEALTHY`.
+
+=== Removal after a scan
+
+Each library has the setting "Remove items with missing files after scan", which the API exposes as `removesItemsWithMissingFilesAfterScan`.
+The setting is on by default.
+A ServerAdmin turns it on with `enableRemovingItemsWithMissingFilesAfterScan` and off with `disableRemovingItemsWithMissingFilesAfterScan`.
+
+When the setting is on, a scan's finishing steps remove the library's `MISSING` file records, then remove:
+
+* each movie and episode left with no files;
+* each season left with no episodes;
+* each series left with no seasons.
+
+After the library folder check passes, Streamarr checks each file against the availability rules again, immediately before deleting its record.
+If the new check finds the file `PRESENT`, Streamarr records that status and keeps the file record.
+If the new check finds the file `UNREADABLE`, Streamarr records that status and keeps the file record.
+A file that returned since the scan therefore keeps its record.
+
+An item therefore leaves the library automatically only when every file of the item is `MISSING`.
+Streamarr never removes an `UNREADABLE` file record.
+An item with an `UNREADABLE` file stays in the library, and Streamarr shows the ServerAdmin the file and the reason.
+
+Removal after a scan follows the availability update, so the library stays `SCANNING` until the removal finishes, and a scan that is stopped or fails before its finishing steps removes nothing.
+If Streamarr cannot remove the items with missing files, the scan fails through ADR 0027's failure path, and the library turns `UNHEALTHY` instead of `HEALTHY`.
+
+When the setting is off, items whose files are all `MISSING` stay in the library and show as unavailable until a ServerAdmin removes them on demand.
+
+Removing an item leaves the item's catalog entry in place (ADR 0039).
+Watch history, resume positions and metadata edits stay on the catalog entry and return when a scan matches the file again.
+
+=== Removal on demand
+
+A ServerAdmin removes a library's items with missing files on demand through `removeItemsWithMissingFiles`.
+Removal on demand runs the same removal for that one library, with the same check before each file record it removes, and only for the files that the last finished scan marked `MISSING`.
+When its library folder check fails, it removes nothing and fails through ADR 0027's failure path, and an execution after a restart checks each file again.
+Removal on demand is the third kind of library operation, next to scan and refresh, and the library shows `REMOVING_ITEMS_WITH_MISSING_FILES` while it runs.
+It claims the library as a scan or refresh does, so a busy library refuses it, and a running removal refuses every request for library work on that library, including another removal (ADR 0027).
+
+=== Stopping a scan or a removal
+
+A ServerAdmin stops a scan with `stopScanningLibrary` and a removal on demand with `stopRemovingItemsWithMissingFiles`, as ADR 0027 defines.
+A scan stopped before its finishing steps changes no file's availability and removes nothing.
+A stop during a removal, whether on demand or at the end of a scan, halts it between items: items already removed stay removed, and no item is ever half-removed.
+The remaining items with missing files stay in the library until the next removal.
+
+=== Scheduled library scans
+
+A scheduled library scan, which ADR 0027 defines, follows every rule in this ADR, including removal after the scan.
+ADR 0027 ships scheduled scans only after these rules, because an unattended scan under the old cleanup would empty a library overnight when its share failed to mount.
+
+=== Authorization and visibility
+
+Only a ServerAdmin changes the setting, starts removal on demand, or stops a removal.
+Each of these mutations has its own typed intent and Cedar action (link:0025-cedar-decides-authorization.adoc[ADR 0025]), and the service layer checks each one through the authorization service.
+The API lists each library's `UNREADABLE` files with their reasons and counts the library's `MISSING` files, for ServerAdmins only.
+
+=== Explicitly deferred
+
+* Keeping resume positions when a file record is removed or its file moves to a new path.
+ADR 0039 moves resume positions onto the catalog entry.
+
+== Consequences
+
+* A storage outage no longer removes items.
+Files a scan cannot read become `UNREADABLE` with a reason, and scheduled scans, when the schedule is on, read them again without a ServerAdmin.
+* An empty library folder that still has file records fails the scan instead of emptying the library.
+* A scan stopped before its finishing steps removes nothing, so a ServerAdmin can stop a long scan without losing items.
+* Episodes, seasons and series leave the library when their files are missing; today only movies do.
+* A library whose storage stays unreachable keeps its items until a ServerAdmin fixes or removes the storage.
+* Until ADR 0039 moves resume positions onto the catalog entry, removing a `MISSING` file record deletes the resume positions stored for that file.
+* A removal failure now fails the scan instead of appearing only in the log.
+* The library status gains `REMOVING_ITEMS_WITH_MISSING_FILES`, and a `LibraryBusyError` (link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026]) can carry it.
+* A file record carries two statuses: matching and availability.
+* If a folder mounted separately inside the library loses its mount point, the scan marks that folder's files `MISSING`.
+The same happens if that mount point remains but is empty.
+
+== Rejected Alternatives
+
+* Removing by the availability that the last scan stored — a file restored since the scan, for example after its share came back, would lose its record and resume positions.
+* Requiring the file's own folder to list — deleting a whole movie, season or series folder, the most common way to delete one, would leave its files `UNREADABLE` and its items in the library.
+* Refusing a scan that would remove more than a fixed share of a library — any fixed number blocks some correct removals and allows some wrong ones.
+* Waiting a grace period before removal — a timer only delays removals the ServerAdmin asked for, and the timer still removes items after an outage that outlasts it.
+ADR 0039's seven-day wait before deleting uncredited people and companies solves a different problem: the wait avoids deleting and downloading shared artwork again when a credit briefly disappears.
+* Comparing the storage a file lived on with the storage at its folder now, through `FileStore.name()` or the `unix:dev` attribute — Java reports the mount entry, not the storage identity, and a bind mount from the same filesystem defeats the comparison.
+* Marker files at each mount point — libraries often mount read-only, so ServerAdmins would create each marker by hand, and a forgotten marker brings the problem back.
+* Never removing items automatically — items whose files are confirmed missing would pile up in every library.
+* Removing `UNREADABLE` items automatically along with `MISSING` ones — one storage outage would empty a whole library.
+* Re-checking `UNREADABLE` files on a capped backoff between scans — scheduled library scans already read them again, without a second retry mechanism.
+* Removing an `UNREADABLE` file on a ServerAdmin's request — Streamarr still cannot tell whether the file exists, so the ServerAdmin fixes or removes the storage instead.
+
+== References
+
+* https://github.com/streamarr/streamarr-server/issues/449[#449]: the server work that implements these rules
+* https://github.com/streamarr/streamarr-web/issues/57[streamarr/streamarr-web#57]: the library panel that shows unreadable and missing files, the setting and removal on demand
+* link:0025-cedar-decides-authorization.adoc[ADR 0025: Cedar Decides Authorization; PostgreSQL Keeps the Relationships]
+* link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026: Mutations Return Payloads Whose Expected Errors Are Typed Unions; Top-Level Errors Carry Failure]
+* link:0027-library-operations-are-durable-jobs.adoc[ADR 0027: Library Operations Are Durable Jobs; a Restart Runs Them Again, and a Stop Leaves the Library Usable]
+* link:0039-catalog-entries-hold-metadata-edits-and-user-data.adoc[ADR 0039: Durable Catalog Entries Hold Metadata Edits and User Data; Library Items Hold What Scans Produce]
+* https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/nio/file/Files.html#exists(java.nio.file.Path,java.nio.file.LinkOption...)[Java SE 25: `Files.exists`]
+* https://www.samba.org/samba/docs/current/man-html/smb.conf.5.html[Samba: `smb.conf`, `hide unreadable`]
+* https://rclone.org/commands/rclone_mount/[rclone: `rclone mount` directory cache]
+* https://docs.docker.com/engine/storage/bind-mounts/[Docker: bind mounts and bind propagation]

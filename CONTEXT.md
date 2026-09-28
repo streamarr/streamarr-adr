@@ -96,7 +96,7 @@ The configured maximum media duration of a fragment. The muxer honours it at the
 _Avoid_: fragment bound, chunk size
 
 **Preroll**:
-Media that a job attempt's seek emits before the attempt's first media segment: a stream copy's seek lands on the keyframe at or before the target, and an attempt that encodes video and starts after segment 0 seeks one period early on purpose. It belongs to earlier segments, so the producer discards it.
+Preroll is media that a job attempt's seek emits before the attempt's first media segment. A stream-copy seek starts at the keyframe at or before the target. An attempt that encodes video and starts after segment 0 seeks one period early. The producer discards preroll because this media belongs to earlier segments.
 _Avoid_: overlap, lead-in
 
 **Stream copy**:
@@ -104,7 +104,7 @@ Any transcode mode that passes the source video through unchanged (REMUX and AUD
 _Avoid_: passthrough, remux (when only the video is copied)
 
 **Keyframe-verified encoder**:
-An encoder whose recordings under the pinned FFmpeg show every forced keyframe as a sync sample that starts a closed GOP, with the encoder's GOP count restarting there. It says nothing about whether a worker can run the encoder, which the verified worker capabilities describe.
+An encoder is keyframe-verified when recordings under the pinned FFmpeg show that every forced keyframe is a sync sample and starts a closed GOP. The recordings must also show that the encoder restarts its GOP count at each forced keyframe. The verified worker capabilities separately describe whether a particular worker can run the encoder.
 _Avoid_: verified encoder (unqualified), GOP-verified encoder
 
 **Source container**:
@@ -126,9 +126,9 @@ One output format that the server chooses within a playback session, delivered b
 _Avoid_: fallback stream, replacement (unqualified)
 
 **Encoder backend**:
-The encoder a worker actually runs for a codec family, together with whether it is hardware or software. A variant's first job attempt pins the backend for every replacement attempt.
+The encoder a worker actually runs for a codec family, together with whether it is hardware or software. Every replacement attempt for a variant must use the backend that the variant's first job attempt used.
 _Avoid_: encoder capability, codec
 
 **Completed attempt**:
-A job attempt whose FFmpeg exited cleanly after the producer read all of its output and the server acknowledged every delivered segment, while the attempt was still active. A completed attempt does not mean the run covered the advertised timeline; the server owns coverage.
+A job attempt whose FFmpeg exited cleanly after the producer read all of its output and the server acknowledged every delivered segment, while the attempt was still active. The server must still handle requests for any advertised segment that the attempt did not produce.
 _Avoid_: finished, done, success

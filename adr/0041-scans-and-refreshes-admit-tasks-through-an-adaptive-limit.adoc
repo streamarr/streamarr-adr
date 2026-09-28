@@ -1,0 +1,84 @@
+= ADR 0041: Scans and Refreshes Admit Tasks Through an Adaptive Concurrency Limit
+
+== Status
+
+Accepted
+
+== Context
+
+A scan starts a task for every file it finds at once, and a refresh starts one for every movie and series.
+Each task checks out database connections many times from the pool that users' requests also use.
+Threads waiting on the pool are not backpressure: a thread that waits past the connection timeout fails instead of slowing the scan.
+
+https://github.com/streamarr/streamarr-server/issues/470[#470] measured cold scans of a library of about 1,800 movies.
+In each cold scan, 760 to 1,800 requests for a connection timed out.
+Files failed enrichment, required artwork was recorded as failed, and the library ended `UNHEALTHY`.
+People browsing during the scan got errors or waited up to a minute.
+A larger pool cut the timeouts but made browsing slower.
+
+How many tasks a server can run at once depends on its CPUs, its pool, TMDB's rate limit and the kind of work, and it changes during a scan.
+In https://github.com/streamarr/streamarr-server/issues/470[#470]'s prototype, admitting files through an adaptive limit left no thread waiting for a connection.
+Every file that could match matched, every required image was saved, the library ended `HEALTHY`, and browsing stayed close to its idle latency.
+
+== Decision
+
+A scan admits one task per file, and a refresh admits one task per movie and series.
+An adaptive concurrency limit controls how many tasks run at once.
+The limit adjusts to the latency of admitted tasks.
+The limit uses the Gradient2 algorithm from Netflix's concurrency-limits library: it rises while latency holds steady and falls when latency rises, whichever resource is saturated.
+The thread that walks the library acquires admission before it forks the next task, so backpressure reaches the walk and started tasks do not pile up waiting for connections.
+Admission is per task; library operations have no batches.
+
+Each admitted task reports exactly one outcome, which returns its admission; a missing report would leak capacity, and a second would invent it:
+
+* A task that did real processing reports its latency.
+* A task for a file skipped as already matched reports that it was ignored, because a task that returns at once says nothing about capacity.
+* A task that hit a retry or a timeout reports a drop.
+  Gradient2 reads a drop as an ordinary latency sample, so a retry or a timeout lowers the limit through the delay that it adds, not because it was reported as a drop.
+
+A task keeps its admission until Streamarr records an outcome for each poster and backdrop that the task requested (link:0027-library-operations-are-durable-jobs.adoc[ADR 0027]).
+The task's measured latency includes that wait.
+
+Admission bounds the tasks in flight and does not replace TMDB's rate limiter, which still paces requests.
+The connection pool keeps its size and timeout and is not a queue for library work.
+Probes are steps that db-scheduler runs, as link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032] describes, and admission does not cover them.
+
+The walk forks admitted tasks and joins them with structured concurrency, in a `StructuredTaskScope`.
+Structured concurrency is a preview API, which the server uses with preview features enabled until JDK 28.
+Admission does not depend on it: until the server runs on JDK 27, admitted tasks fork on a virtual-thread executor and join in the order they were admitted, with the same outcomes.
+One task's failure does not cancel the scope.
+A recorded failure does not fail the operation; an unexpected failure ends admission, lets admitted tasks finish, and fails the operation, as ADR 0027 defines.
+A stop also ends admission and lets admitted tasks finish.
+After a restart, an unfinished operation runs again from the start unless a stop was stored.
+If a stop was stored, the new execution completes the stop without admitting tasks.
+The limit's tuning lives in code.
+
+== Consequences
+
+* The server depends on Netflix's concurrency-limits library.
+* The current limit and the number of tasks in flight are published as metrics.
+* The limit follows the spread of latency, not a named resource.
+Background CPU work, such as image processing on a server with few CPUs, can hold it low.
+* Known cost: in https://github.com/streamarr/streamarr-server/issues/470[#470]'s prototype, an unchanged rescan was slower than today's, because tasks for files skipped as already matched teach the limit nothing and the limit stayed low.
+https://github.com/streamarr/streamarr-server/issues/470[#470] requires an unchanged rescan to be no slower than today, so the implementation must remove this cost.
+* Until JDK 28, the server compiles and runs with preview features enabled.
+
+== Rejected Alternatives
+
+* Unbounded fan-out, today's behavior — exhausts the connection pool on large libraries.
+* A fixed cap — no single number suits every server, library and kind of work.
+* Fixed-size batches with one scope per batch — each batch waits for its slowest task, and no fixed size suits every server.
+* A larger connection pool — it cut the timeouts without removing them, and browsing got slower.
+* Admission gated on TMDB backlog and pool waiters — these signals appear only after waits have formed, so admission reacted too late on rescans.
+* A staged pipeline with blocking handoffs — its database stage admitted work until the pool ran out, so threads still waited for connections and browsing slowed.
+* The Vegas limit — it takes the fastest work as its no-queue baseline and reads ordinary work as queueing.
+* Lowering the limit on every drop — Gradient2 ignores whether a sample was a drop and cannot be extended to act on one without copying it, and the delay of a retry or a timeout already lowers the limit.
+* Cancelling the scope when one task fails, the API's default policy — it interrupts every running task and breaks the pooled connections that they hold.
+
+== References
+
+* link:0027-library-operations-are-durable-jobs.adoc[ADR 0027: Library Operations Are Durable Jobs; a Restart Runs Them Again, and a Stop Leaves the Library Usable]
+* link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032: Media File Probe Results Are Persisted and Playback Reads Them]
+* https://github.com/streamarr/streamarr-server/issues/470[#470]: A cold scan of a large library times out database connections, fails files and artwork, and ends UNHEALTHY
+* https://github.com/Netflix/concurrency-limits[Netflix concurrency-limits]
+* https://openjdk.org/jeps/12[JEP 12: Preview Features]

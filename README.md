@@ -44,7 +44,7 @@ None at present.
 - [ADR 0024: Identity Authority: One Household per Account, One Personal Profile per Account, Portable Profiles Facilitate Sharing by Relationship](adr/0024-identity-authority-by-relationship.adoc)
 - [ADR 0025: Cedar Decides Authorization; PostgreSQL Keeps the Relationships](adr/0025-cedar-decides-authorization.adoc)
 - [ADR 0026: Mutations Return Payloads Whose Expected Errors Are Typed Unions; Top-Level Errors Carry Failure](adr/0026-mutation-payloads-and-error-channels.adoc)
-- [ADR 0027: Library Scan and Refresh Are Claimed Atomically in the Database and Run on a Single Instance](adr/0027-library-work-claimed-in-database-single-instance.adoc) — proposed
+- [ADR 0027: Library Operations Are Durable Jobs; a Restart Runs Them Again, and a Stop Leaves the Library Usable](adr/0027-library-operations-are-durable-jobs.adoc)
 - [ADR 0028: Credential Attempts Are Journaled and Throttled in PostgreSQL](adr/0028-credential-attempts-are-journaled-and-throttled-in-postgresql.adoc)
 - [ADR 0029: Pin Jellyfin FFmpeg Releases and Resolve Updates Before Building](adr/0029-pin-jellyfin-ffmpeg-releases.adoc)
 - [ADR 0030: Credential Attempts Use PostgreSQL Time and Pairing Successes Preserve Failures](adr/0030-credential-budgets-use-shared-time-and-explicit-success-reset.adoc)
@@ -55,8 +55,11 @@ None at present.
 - [ADR 0035: The Worker Uses Spring Boot and Delegates Distributed Transport Security to the Mesh](adr/0035-worker-uses-spring-boot-and-mesh-transport-security.adoc)
 - [ADR 0036: Video Contracts Share One Vocabulary and Preserve Dynamic-Range Facts](adr/0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc)
 - [ADR 0037: The Worker Delivers Fragmented MP4 Segments From FFmpeg's Standard Output, and HLS Media Segments Are fMP4 Only](adr/0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc)
+- [ADR 0038: Streamarr Removes Media Only When a Finished Scan Confirms Every File Is Missing](adr/0038-scans-remove-media-only-when-files-are-confirmed-missing.adoc)
 - [ADR 0039: Durable Catalog Entries Hold Metadata Edits and User Data; Library Items Hold What Scans Produce](adr/0039-catalog-entries-hold-metadata-edits-and-user-data.adoc) — proposed
 - [ADR 0040: Media Read Resolvers Return DTOs Mapped by MapStruct](adr/0040-media-read-resolvers-return-dtos-mapped-by-mapstruct.adoc) — proposed
+- [ADR 0041: Scans and Refreshes Admit Tasks Through an Adaptive Concurrency Limit](adr/0041-scans-and-refreshes-admit-tasks-through-an-adaptive-limit.adoc)
+- [ADR 0042: GraphQL Subscriptions Keep Queried Screens Current over WebSocket until Token Expiry](adr/0042-graphql-subscriptions-run-over-websocket-until-token-expiry.adoc)
 
 ## Domain language
 

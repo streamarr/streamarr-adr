@@ -8,23 +8,30 @@ Accepted
 
 Streamarr learns a media file's technical properties by running ffprobe.
 link:0013-stream-decision-architecture.adoc[ADR 0013] describes the pipeline as probe, decide per stream, compose, resolve mode, build command.
-Today ffprobe runs once per stream session, and the result stays in memory for that session's lifetime.
+Today ffprobe runs once per stream session.
+The result stays in memory for that session's lifetime.
 The `media_file` table stores the filename, path, and size, but no container or stream properties.
 
 Whenever playback starts, the server waits for a probe process before it decides how to transcode the file.
-The server reads the probe result from memory to make that decision, build the quality ladder and playlists, track watch progress, and decide when the session expires.
+The server reads the probe result from memory to make that decision.
+The server also uses the result to build the quality ladder and playlists.
+The server reads the same result to track watch progress.
+The server also uses the result to decide when the session expires.
 
 Container and stream properties belong to the media file.
 The server can collect and store those properties when it processes the library.
-The server can then read the properties from the database when it starts playback or displays a library view, and probe the file again in the background when needed.
+Playback and library views can then read the stored properties.
+The server can probe the file again in the background when needed.
 
 Bulk scans call the file processors directly.
 The watcher creates per-file tasks but processes files inline.
-`FileProcessingTaskCoordinator` provides methods to claim tasks and recover expired claims, but no dispatcher calls those methods in production.
+`FileProcessingTaskCoordinator` provides methods to claim tasks and recover expired claims.
+No dispatcher calls those methods in production.
 Spring already schedules the coordinator's lease heartbeat.
 
 link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033] removes FFmpeg from the server.
-This ADR first moves probing into library processing and defines the result that workers will later produce.
+This ADR first moves probing into library processing.
+It also defines the result that workers will later produce.
 
 == Decision
 
@@ -34,8 +41,14 @@ Playback consumers read the stored data.
 
 === What the database stores
 
-`media_file_container_info` holds one row per media file: container format name, duration, total bitrate, a snapshot of the source file's size and modification time, `probe_version`, and an optional typed `probe_error` code.
-`media_file_stream_info` holds one row per stream: stream type, index, codec, width, height, frame rate, channels, bitrate, language, and the default and forced flags.
+`media_file_container_info` holds one row per media file.
+Each row stores the container format name, duration, and total bitrate.
+The row also stores a snapshot of the source file's size and modification time.
+Each row also stores `probe_version` and an optional typed `probe_error` code.
+
+`media_file_stream_info` holds one row per stream.
+Each row stores the stream type, index, codec, width, height, frame rate, channels, and bitrate.
+The row also stores the language and the default and forced flags.
 The tables correspond to ffprobe's `format` and `streams` sections.
 Container properties and `probe_error` are nullable.
 The media file reference, source size, modification time, and `probe_version` are required.
@@ -45,12 +58,14 @@ A row without `probe_error` records a successful probe, even when some propertie
 A row with `probe_error` records a terminal media error.
 The database stores no stream rows or container properties for that outcome.
 Both outcomes retain the source snapshot and `probe_version`.
-The server continues to use `media_file.status` when it matches and enriches files, and adds no probe status values.
+The server continues to use `media_file.status` when it matches and enriches files.
+The server adds no probe status values.
 
 Store typed columns without a raw ffprobe JSON column.
 Workers must return the complete result through ADR 0018's typed contract, which does not send JSON.
 Derive the playback `MediaProbe` from the stream rows rather than storing summary fields on the container row.
-The derived `MediaProbe` uses the same streams as the FFmpeg command: the first video stream and the first audio stream (`0:v:0` and `0:a:0`).
+The derived `MediaProbe` uses the same streams as the FFmpeg command.
+Those are the first video stream and the first audio stream (`0:v:0` and `0:a:0`).
 If the server instead used the streams flagged as default, it could authorize copying one audio codec while FFmpeg copies another.
 
 The term "metadata" is reserved for descriptive data from TMDB.
@@ -63,7 +78,8 @@ Call the collaborator before `LibraryManagementService.processFile` returns, eve
 The collaborator schedules required probes whether or not the server can match and enrich the file.
 Keep the existing code paths that match and enrich files.
 Rename the existing `LibraryManagementService.probeFile` method to `findOrCreateMediaFile`.
-That method finds or creates the media file row and does not run ffprobe.
+That method finds or creates the media file row.
+The method does not run ffprobe.
 
 The dispatcher claims each per-file task through `FileProcessingTaskCoordinator` before it runs the probe.
 Scans, watcher events, and playback requests use the same enqueue operation.
@@ -72,15 +88,18 @@ Update a conflicting task only when the new request specifies different inputs.
 If the request specifies the same inputs, keep the active claim or pending retry time.
 The dispatcher runs the probe step without matching or enriching the file again.
 The watcher no longer creates, completes, or fails probe tasks while it processes files inline.
-The shared collaborator schedules the probe tasks, and the dispatcher runs them.
+The shared collaborator schedules the probe tasks.
+The dispatcher runs those tasks.
 
 A scan records the source snapshot and probe version that it requests for each file.
 Together, the snapshot and version are the requested inputs.
-If a file's stored outcome already matches those inputs, the scan counts the file as having a probe result and makes no new request.
+If a file's stored outcome already matches those inputs, the scan counts that outcome at once.
+In that case, the file needs no new probe request.
 If the source is removed before the scan reads its snapshot, the scan requests no probe task for that file.
 If the scan cannot enqueue a probe, the scan fails as link:0027-library-operations-are-durable-jobs.adoc[ADR 0027] describes.
 
-Before a scan can complete, it must finish listing the library and attempting to match and enrich each file.
+Before a scan can complete, it must finish listing the library.
+The scan must also finish attempting to match and enrich each file.
 Each probe that the scan requested must also have one of these results:
 
 * The database holds a successful probe result for the requested inputs.
@@ -89,7 +108,8 @@ Each probe that the scan requested must also have one of these results:
 The attempt must have finished after the scan requested the probe.
 
 A failure recorded before the request belongs to an earlier attempt.
-The scan requests an immediate retry and waits for the new attempt.
+The scan requests an immediate retry.
+The scan waits for the new attempt.
 When a previously unreadable share becomes readable, a new scan therefore retries the probes that failed.
 A successful outcome for the current snapshot and probe version shows that the file is ready for playback.
 The scan does not start a test stream.
@@ -101,22 +121,28 @@ The scan stops waiting for a probe in three cases:
 * The database already holds an outcome from a newer probe version for the same source.
 * The media file or source is removed.
 
-The watcher supplies later inputs in response to a file event; the dispatcher supplies later inputs when it observes a change.
+The watcher supplies later inputs in response to a file event.
+The dispatcher supplies later inputs when it observes a change.
 Probes for those later inputs can continue after the scan ends.
-A probe has no result while it waits for a busy worker or after an attempt is cancelled, so the scan keeps waiting.
+A probe has no result while it waits for a busy worker.
+A cancelled attempt also has no result.
+In both cases, the scan keeps waiting.
 Once the dispatcher records a failure that counts for the scan, the scan does not wait for further retries.
 The scan tracks only its own probe requests.
 Pending probes for other libraries and later requests for the same files do not delay the scan.
 
-db-scheduler runs probes and can run them after the server restarts.
+db-scheduler can run probes after the server restarts.
 The scan therefore reads stored results at a configured interval rather than waiting for an in-process signal.
 Streamarr adds no setting that disables the probe dispatcher.
 Keep the db-scheduler starter's `db-scheduler.enabled` property on in deployments.
 The scheduler that the starter creates also records each probe request in the transaction that saves the requested inputs.
 If that transaction rolls back, no execution remains for the request.
-Tests turn the starter off and supply a scheduler built the same way, but do not start that scheduler unless the test needs to run tasks.
+Tests turn the starter off.
+Tests supply a scheduler built the same way.
+Tests start that scheduler only when they need to run tasks.
 
-To decide whether a scan can complete, the server reads the result tables and probe requests; the server never reads db-scheduler's table.
+The server reads the result tables and probe requests to decide whether a scan can complete.
+The server never reads db-scheduler's table for that decision.
 If the scan cannot read those results or save a result of its own, the scan fails as ADR 0027 describes.
 The dispatcher saves probe failures.
 If the dispatcher cannot save the failure reason, the same transaction also fails to schedule the retry.
@@ -125,9 +151,12 @@ The scan keeps waiting until the dispatcher records a result.
 
 link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026] and ADR 0027 define how the library's status changes while a scan runs.
 The library stays `SCANNING` while the scan waits for required results and runs ADR 0027's finishing steps.
-If a ServerAdmin stops the scan, the library changes to `STOPPING` and the server follows ADR 0027's stop rules.
-The server lets admitted tasks finish their foreground steps and restores the status that the library had before the scan began.
-The server does not wait for probes or background artwork when it stops the scan; that work keeps running.
+If a ServerAdmin stops the scan, the library changes to `STOPPING`.
+The server follows ADR 0027's stop rules.
+The server lets admitted tasks finish their foreground steps.
+The server then restores the status that the library had before the scan began.
+The server does not wait for probes or background artwork when it stops the scan.
+That work keeps running.
 Even after a scan completes, some files may not be ready for playback.
 The scan log counts ready files, terminal media errors, recorded failures, and probes that later work replaced.
 
@@ -141,7 +170,8 @@ After the dispatcher claims a task, it checks again whether the file needs a pro
 The dispatcher probes an unchanged source without waiting for a quiet period.
 
 If the probe succeeds, the producer returns the complete container-and-stream result.
-The result includes width, height, and frame rate for video streams and bitrate for any stream that reports a bitrate.
+For video streams, the result includes width, height, and frame rate.
+The result includes bitrate for any stream that reports a bitrate.
 If the probe encounters a terminal media error, the producer returns a typed error.
 Replace `MediaProbe` as the producer's return type.
 Derive `MediaProbe` from the complete result for playback consumers.
@@ -152,9 +182,11 @@ Under ADR 0033, the worker runs ffprobe and returns the result through the same 
 === File events and quiet periods
 
 The server waits for a quiet period only after it observes a file change.
-The watcher groups repeated events for a file and waits until the events stop before it enqueues a probe request.
+The watcher groups repeated events for a file.
+The watcher waits until the events stop before it enqueues a probe request.
 When the dispatcher reads a source snapshot, either before or after the probe, it compares that snapshot with the requested snapshot.
-If the snapshots differ, the dispatcher records the observed snapshot and reschedules the probe one quiet period later.
+If the snapshots differ, the dispatcher records the observed snapshot.
+The dispatcher then reschedules the probe one quiet period later.
 The dispatcher does not probe the changed source at once.
 Each time the dispatcher observes another change, it moves that deadline.
 The watcher and the dispatcher use the same quiet period.
@@ -162,7 +194,8 @@ Neither wait occupies a scheduler probe slot or reserves a worker.
 The dispatcher can probe other files while the changed file waits.
 
 Bulk scans do not impose a quiet period.
-A scan requests a probe for an unchanged file that needs one, and the dispatcher probes it without waiting.
+A scan requests a probe for an unchanged file that needs one.
+The dispatcher probes that file without waiting.
 The scan requests the probe using the size and modification time from the library listing.
 The scan does not read the source again when it makes the request.
 If the source becomes unreadable after the scan lists the file, the probe attempt fails but the scan does not.
@@ -170,14 +203,19 @@ A probe requested because `probe_version` changed runs without waiting for a qui
 
 A new request replaces a pending probe's inputs but does not move the scheduled time earlier.
 One exception applies to requests from a scan or from the code that discovers files.
-If the probe's last attempt has a saved failure, such a request runs the probe at once and starts its backoff again.
+If the probe's last attempt has a saved failure, such a request runs the probe at once.
+That request also restarts the probe's backoff.
 Use the saved failure to decide whether to retry at once.
-Do not use db-scheduler's failure count: db-scheduler keeps the count when the probe waits for a busy worker, and resets the count when a request replaces the pending probe's inputs.
+Do not use db-scheduler's failure count.
+db-scheduler keeps the count when the probe waits for a busy worker.
+db-scheduler resets the count when a request replaces the pending probe's inputs.
 The dispatcher saves no failure for a cancelled attempt, so a new request keeps that probe's backoff.
 A playback request also keeps the probe's backoff.
 
-If the dispatcher observes a source change during an attempt, the probe keeps its quiet period even if a newer request arrived during that attempt.
-A request does not record whether the caller waited for the file to go quiet, so the request cannot shorten the quiet period.
+If the dispatcher observes a source change during an attempt, the probe keeps its quiet period.
+A newer request that arrived during the attempt does not shorten that period.
+A request does not record whether the caller waited for the file to go quiet.
+The request therefore cannot shorten the quiet period.
 The watcher's own quiet period usually ends after the dispatcher's deadline, because the dispatcher's last observation precedes the file's last change.
 A retry after a transient failure waits only for its backoff.
 If a virtual thread waits inside a claimed probe job, the job still occupies a scheduler slot.
@@ -186,8 +224,12 @@ Schedule the probe for a later time so the wait happens before the dispatcher cl
 Even after a quiet period or a successful probe, a file may still be copying.
 For example, ffprobe can successfully read a faststart MP4 or MKV before the file finishes copying.
 Source snapshots and the probe version protect saved results instead.
-The dispatcher saves an outcome only when the snapshots read before and after the probe equal the requested snapshot and the requested `probe_version` is current.
-When the server later observes a change, the server replaces the requested inputs, deletes the stored success or terminal error, and schedules a fresh probe.
+The dispatcher saves an outcome only if both source snapshots match the requested snapshot.
+Those are the snapshots read before and after the probe.
+The requested `probe_version` must also be current.
+When the server later observes a change, the server replaces the requested inputs.
+The server then deletes the stored success or terminal error.
+The server schedules a fresh probe for the changed source.
 The server does not infer that a copy has finished from the file's age.
 
 === Source changes and probe versions
@@ -200,7 +242,8 @@ When `probe_version` increases, scans and the watcher can schedule background pr
 Playback can still use an older successful result if the server can safely interpret the result and the source snapshot still matches.
 Keep the old result until the server atomically saves the new result.
 If required fields change, or the server changes how it interprets those fields, the migration must invalidate incompatible outcomes.
-The migration must delete the affected container and stream rows and document that playback remains restricted until the server rebuilds those rows.
+The migration must delete the affected container and stream rows.
+The migration must also document that playback remains restricted until the server rebuilds those rows.
 Apply the same rule when correcting codec data or data that determines which streams the server selects, even if no column is added.
 Increase `probe_version` whenever a probe column is added so the server can detect outdated outcomes when it processes files.
 Skip probing while the stored success or terminal media error matches the source snapshot and requested version.
@@ -209,7 +252,8 @@ Use the same scheduling path to refresh older terminal errors and older successf
 === How the server checks claims and saves results
 
 Persist a fresh claim id whenever the dispatcher claims or reclaims a task.
-The claim identifies one attempt and records the source snapshot and `probe_version` that the attempt expects.
+The claim identifies one attempt.
+The claim records the source snapshot and `probe_version` that the attempt expects.
 The process instance id alone does not identify an attempt.
 
 Read the source snapshot before and after probing.
@@ -217,7 +261,10 @@ Discard the result and reschedule the task if the snapshot changes during the pr
 Compare snapshots for equality.
 File size and modification time do not establish which attempt is newer.
 
-Publish an outcome in one transaction that verifies the task is `PROCESSING`, its claim id is current, and its lease has not expired.
+Publish an outcome in one transaction.
+The transaction must verify that the task is `PROCESSING`.
+The transaction must also verify that the claim id is current.
+The transaction must verify that the lease has not expired.
 The result's snapshot and version must match the claim's expected inputs.
 That transaction replaces the container outcome and stream rows and completes the task.
 Check the claim and publish the outcome atomically in the same database operation.
@@ -228,7 +275,8 @@ An attempt that loses its claim cannot change the outcome or task state.
 Use the same transaction protocol when a source change invalidates an outcome or a request changes a task's inputs.
 Revoke any claim for obsolete inputs and leave one pending task for the requested inputs.
 If a task already exists when the server enqueues a request, the server must still preserve any input change that it detected.
-The scheduled heartbeat renews a claim only if the claim is current and unexpired and the dispatcher is still running the attempt that holds the claim.
+The scheduled heartbeat renews only current, unexpired claims.
+The dispatcher must still be running the attempt that holds the claim.
 The heartbeat cannot revive an expired or superseded claim.
 Run file I/O and probing outside database transactions.
 
@@ -239,25 +287,31 @@ After ADR 0033, also retry probes when the worker is unavailable or the worker s
 Record these failures and the next retry time on the per-file task without writing a terminal `probe_error`.
 The failure handler stores the reason on the file's probe request, `media_file_probe_task_request`, in the transaction that reschedules the retry.
 The handler stores the reason only if the failed attempt used the inputs that the probe request still specifies.
-If a newer request replaced those inputs while the attempt ran, the handler stores no failure reason and retries the newly requested inputs at once.
+If a newer request replaced those inputs while the attempt ran, the handler stores no failure reason.
+In that case, the handler retries the newly requested inputs at once.
 The failed attempt tells the server nothing about those new inputs.
 If no probe request remains, for example because the media file was deleted during the attempt, the handler removes the execution.
 Use the item failure reasons from https://github.com/streamarr/streamarr-server/issues/417[issue #417]:
 
 * Store `SOURCE_INACCESSIBLE` when the worker reports `PROBE_FAILURE_SOURCE_UNAVAILABLE` or the server cannot read the source attributes.
 For example, the worker reports `PROBE_FAILURE_SOURCE_UNAVAILABLE` when a share is unmounted or the worker cannot read a file.
-* Store `MISCONFIGURED` when the worker reports `PROBE_FAILURE_UNSUPPORTED_VERSION` or replies for another probe version, or when no connected worker can read the source namespace at the requested version.
-* Store `TEMPORARY` when the worker reports `PROBE_FAILURE_EXECUTION_FAILED`, when a worker is lost, unreachable or missing, when a reply breaks the contract, or when any unexpected exception occurs.
+* Store `MISCONFIGURED` when the worker reports `PROBE_FAILURE_UNSUPPORTED_VERSION` or replies for another probe version.
+Also use this reason when no connected worker can read the source namespace at the requested version.
+* Store `TEMPORARY` when the worker reports `PROBE_FAILURE_EXECUTION_FAILED`.
+Use the same reason when a worker is lost, unreachable or missing.
+Also use `TEMPORARY` when a reply breaks the contract or an unexpected exception occurs.
 
 A cancelled attempt, including `PROBE_FAILURE_CANCELLED`, did not finish.
 Retry the probe with backoff and do not record a failure reason, just as when the probe waits for a busy worker.
 Do not store a retryable failure as a terminal `probe_error`.
-The server does not retry a terminal error while the source and probe version stay the same, but an unreadable source may become readable again.
+The server does not retry a terminal error while the source and probe version stay the same.
+An unreadable source may become readable again.
 Do not store the failure reason in `item_result`, because that table keys results by movie or series rather than by media file.
 Clear the failure reason when the server stores an outcome for the requested inputs or a request replaces those inputs.
 Keep the reason when a request specifies the same inputs again.
 When the dispatcher finds that the source no longer exists, it deletes the probe request instead of rescheduling it.
-When a probe needs a retry, return the task to `PENDING` through the guarded rescheduling operation and let the dispatcher claim the task when the retry is due.
+When a probe needs a retry, return the task to `PENDING` through the guarded rescheduling operation.
+Let the dispatcher claim the task when the retry is due.
 Use capped backoff without requiring a file change or version bump.
 Keep one active task per file path during retries.
 Schedule retries without holding a task lease or database transaction across the delay.
@@ -273,15 +327,24 @@ If a file has a stored terminal `probe_error`, a playback request returns that e
 The server does not enqueue another task for that file.
 
 When this change first ships, no production installations need to migrate.
-The server will not automatically populate probe results across an existing library on upgrade; https://github.com/streamarr/streamarr-server/issues/344[issue #344] defers that work.
+The server will not automatically populate probe results across an existing library on upgrade.
+https://github.com/streamarr/streamarr-server/issues/344[issue #344] defers that work.
 Scans and the watcher use the shared enqueue operation to request probes when an outcome is missing or outdated.
 Playback continues to use compatible older successful results while those probes run.
 
-Integration tests verify that scans and watchers can enqueue probes concurrently, that already-matched files receive probes when needed, and that a scan fails if the scan cannot enqueue a probe.
+Integration tests verify that scans and watchers can enqueue probes concurrently.
+The tests verify that already-matched files receive probes when needed.
+The tests also verify that a scan fails if the scan cannot enqueue a probe.
 The tests also verify that playback can use a compatible stored result while a probe refreshes that result.
-Tests keep a library `SCANNING` while a probe waits for a busy worker, then let the scan complete after the server stores an outcome, records a failure, or finds that the source was removed.
-Another test verifies that a scan can complete when the scan replaces a running attempt's inputs, that attempt fails, and the source then becomes unreadable.
-Tests also prove that an attempt whose claim has expired or been superseded cannot publish an outcome, complete or fail the task, reschedule the task, or renew the claim after another attempt has reclaimed the task.
+Tests keep a library `SCANNING` while a probe waits for a busy worker.
+The tests then let the scan complete after a stored outcome, a recorded failure, or a removed source.
+Another test replaces a running attempt's inputs with a new scan request.
+The running attempt fails, and the source then becomes unreadable.
+The test verifies that the scan can still complete.
+Tests also reclaim a task whose earlier claim has expired or been superseded.
+The earlier attempt must not publish an outcome.
+The earlier attempt must not complete, fail, or reschedule the task.
+The earlier attempt must not renew the claim.
 
 This ADR defers the following work:
 
@@ -293,29 +356,35 @@ The source snapshot currently uses file size and modification time.
 * Request probes through the worker session.
 ADR 0033 defines that work.
 * Select streams other than the first video and first audio stream.
-The server would need to carry the selected stream indices through the code that decides how to transcode, the worker contract, and the command builder.
+The code that decides how to transcode would need the selected stream indices.
+The worker contract and command builder would also need those indices.
 
 == Consequences
 
 * When playback starts, the server no longer spawns a probe process.
 Playback still needs FFmpeg to remux or transcode into HLS (link:0007-transcode-first-with-smart-remux.adoc[ADR 0007]).
-Every playback session needs a producer, and after ADR 0033 a worker produces the media.
+Every playback session needs a producer.
+After ADR 0033, a worker produces the media.
 * Playback consumers use a `MediaProbe` derived from stored rows instead of a probe process result.
-* The server adds two entities, `MediaFileContainerInfo` and `MediaFileStreamInfo`, and maps the complete probe result to rows in those tables.
+* The server adds two entities: `MediaFileContainerInfo` and `MediaFileStreamInfo`.
+The server maps the complete probe result to rows in those tables.
 * Playback exposes typed errors for unavailable probe data and recorded terminal media failures.
 The server continues to retry transient failures in the background.
-A new dispatcher runs the task coordinator's tasks, and the database stores when each task should retry.
+A new dispatcher runs the task coordinator's tasks.
+The database stores when each task should retry.
 Before changing a task's state or publishing a result, the server rejects any claim that has expired or been superseded.
 * Bulk scans probe unchanged files without a per-file quiet period.
 Probe requests therefore reach workers sooner, so more probes may have to wait for a busy worker.
 Release this behavior with https://github.com/streamarr/streamarr-server/issues/414[issue #414], which keeps probes pending while compatible workers are busy.
 * Unless a scan stops or fails, the scan waits for a result from each probe that the scan requested.
-For a large first scan, the library therefore stays `SCANNING` until workers have probed the files or the dispatcher has recorded why the probes failed.
+During a large first scan, the library stays `SCANNING` while required results are missing.
+Workers must produce probe outcomes, or the dispatcher must record why attempts failed.
 The scan keeps waiting while probes wait for busy workers.
 If no worker is connected, the scan can complete once the dispatcher records each attempt's failure.
 Whether a file is ready for playback still depends on the stored probe outcome.
 * Each new probe column requires a version bump.
-When the server processes a file, it schedules a probe to refresh an outdated outcome in the background; after ADR 0033, a worker runs the probe.
+When the server processes a file, it schedules a background probe to refresh an outdated outcome.
+After ADR 0033, a worker runs the probe.
 Playback can use a compatible outcome while the probe runs.
 If a migration invalidates an incompatible outcome, playback cannot use the file until the server records a new outcome.
 * ADR 0013's pipeline reads its probe input from rows.
@@ -334,18 +403,22 @@ Matching and probing can succeed or fail independently, so one status cannot pre
 * Add nullable probe columns to `media_file`.
 Those columns alone would not distinguish a file that has never been probed from a file whose probe returned unknown values.
 * Name the tables `media_analysis`, `media_file_analysis`, or `media_file_metadata`.
-In this schema, "media" means the collectable, "analysis" names the step rather than the row, and "metadata" describes data from TMDB.
+In this schema, "media" means the collectable.
+"Analysis" names the step rather than the row.
+"Metadata" describes data from TMDB.
 * Replace ffprobe with a Java library.
 Streamarr would need to verify that the library supports MKV, HEVC, Dolby Vision, and audio channel layouts as well as ffprobe does.
 * Complete a scan as soon as the server enqueues the probe requests.
 The scan would report that it had finished while most files still had no probe result.
 * Wait for probes to send in-process signals.
-db-scheduler may run a probe after the server restarts or through a path that sends no signal, and the database already records the result.
+db-scheduler may run a probe after the server restarts or through a path that sends no signal.
+The database already records the result.
 * Allow deployments to disable the probe dispatcher.
 ADR 0027 permits only one active server, so no other server would run the probes.
 Scans would never finish, and new files would never become playable.
 * Add a second scheduler client to record requests while the starter is off.
-Deployments keep the starter on, and the two clients could differ in how they join the transaction that requests a probe.
+Deployments keep the starter on.
+The two clients could differ in how they join the transaction that requests a probe.
 * Store retryable probe failures as a terminal `probe_error`.
 The server would not retry those failures while the source and probe version stayed the same.
 * Count an attempt that waits for a busy worker or has been cancelled as a failure.
@@ -353,12 +426,14 @@ The scan would count files that no worker had finished probing.
 * Wait for every retry after an attempt fails.
 A file on an unreadable share would keep the scan open indefinitely.
 * Retry the failed attempt's inputs after a newer request has replaced those inputs.
-If the attempt fails before it compares the source snapshot, the attempt never reaches the new inputs, so the scan would wait indefinitely for a result at those inputs.
+If the attempt fails before it compares the source snapshot, the attempt never reaches the new inputs.
+The scan would wait indefinitely for a result at those inputs.
 * Count a failure that was recorded before the scan requested the probe.
 After a share becomes readable again, a new scan would report the old failure while the probe waited for its retry time.
 * Use db-scheduler's failure count to decide whether a scan should retry a probe at once.
 db-scheduler keeps the count when a probe waits for a busy worker, so a new scan would run that probe too soon.
-db-scheduler resets the count when a request replaces a pending probe's inputs, so a scan that requests new inputs would wait for the retry time even if the earlier attempt had failed.
+db-scheduler resets the count when a request replaces a pending probe's inputs.
+A scan that requests new inputs would therefore wait for the retry time even if the earlier attempt had failed.
 * Read the source again when a scan requests a probe.
 If the source became unreadable after the scan listed the file, the whole scan would fail instead of just the probe attempt.
 * Retry a failed file on each scan without saving why the probe failed.

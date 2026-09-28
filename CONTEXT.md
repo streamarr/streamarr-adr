@@ -234,8 +234,8 @@ It is a server-side term; clients read the ordinary fields.
 _Avoid_: shown value, display value, resolved value
 
 **Unattached metadata edit**:
-A metadata edit whose catalog entry no item points at.
-It is kept, and a ServerAdmin can delete it or copy it onto an item.
+A metadata edit whose catalog entry has no current item, person or company representing it.
+It is kept, and a ServerAdmin can delete it or copy it to an attached catalog entry of the same kind.
 _Avoid_: orphaned edit, dangling edit
 
 **Fix match**:

@@ -173,10 +173,13 @@ GraphQL input → resolver adapter → application command
 
 === Asynchronous and idempotent mutations
 
-* `scanLibrary` and `refreshLibrary` stay asynchronous by policy and return the `Library` node; its existing `status` (`SCANNING`, `REFRESHING`, `HEALTHY`, `UNHEALTHY`) is the observable a client polls through `library(id:)`. Accepted is not completed, and the payload says so by returning a library whose status is already `SCANNING` or `REFRESHING`.
-* A same-kind request while that work is running is an idempotent success returning the same node in its running status; a different-kind request while the library is busy is the rejection member `LibraryBusyError` carrying the current status; a library that does not exist is `LibraryNotFoundError`. `LibraryScanInProgressException` and `LibraryRefreshInProgressException` become the `LibraryBusyError` member.
-* Acceptance means the work is claimed, and the client contract is to observe `status` afterwards. If the server accepts the work and then cannot start it, the caller whose request failed to start receives a sanitized top-level error (`errorType` `UNAVAILABLE`, `code` `LIBRARY_WORK_NOT_SCHEDULED`) with a `null` payload, and every other caller sees the library become `UNHEALTHY` — exactly as if the worker had started and failed at its first step.
-* How a request claims the work atomically, when the worker starts, how a post-acceptance failure is compensated, and why this is single-instance today are the execution protocol in link:0027-library-operations-are-durable-jobs.adoc[ADR 0027]; this ADR fixes only the contract above.
+NOTE: link:0027-library-operations-are-durable-jobs.adoc[ADR 0027] amends the library-operation rules in this section.
+A busy library now rejects even an identical request, and Streamarr claims the library and schedules the operation's task in one transaction.
+
+* `scanLibrary`, `refreshLibrary` and `removeItemsWithMissingFiles` run asynchronously and return the `Library` node. Clients poll `library(id:)` to observe its `status`: `SCANNING`, `REFRESHING`, `REMOVING_ITEMS_WITH_MISSING_FILES`, `STOPPING`, `HEALTHY` or `UNHEALTHY`. Accepting an operation does not complete it; the payload returns a library whose status already names the requested operation.
+* A busy library rejects every request for library work with `LibraryBusyError`, including identical requests and requests for a stronger refresh mode. The error carries the current status and a message that names the running kind. A request for a library that does not exist returns `LibraryNotFoundError`. `LibraryScanInProgressException` and `LibraryRefreshInProgressException` become the `LibraryBusyError` member.
+* The server accepts an operation only after one transaction claims the library, stores the operation and schedules its task. If the transaction fails, it claims nothing, and the caller receives a sanitized top-level error with `errorType` `UNAVAILABLE` and a `null` payload. Streamarr retires `LIBRARY_WORK_NOT_SCHEDULED` because the claim and scheduled task commit together. After the server accepts the operation, the client observes `status`; ADR 0027 defines how the operation runs again after a restart and records failures.
+* ADR 0027 defines how an operation runs, stops and recovers, and requires exactly one active server per database. Its durable scheduling rules replace the earlier protocol that started work in memory after claiming the library and compensated if the work could not start.
 * Naturally idempotent mutations return the resulting state on a repeat call and never report the repeat as an error: `markWatched` and `markUnwatched` return the media node in its resulting state; `destroyStreamSession` returns a receipt for the requested id whether or not a session was running, because after deletion the server cannot tell a retry from an unknown id, and the existing no-op is oracle-free by design (PR #209).
 * Streamarr does not add `clientMutationId`; it is a Relay Classic cache-reconciliation field and no Streamarr client uses Relay.
 
@@ -207,7 +210,7 @@ Every mutation's tests demonstrate: success returns the result and an empty `use
 
 Explicitly deferred:
 
-* A server-enforced `idempotencyKey` for mutations that create unique side effects; the same-kind-in-flight and natural-idempotency rules above cover v1.
+* A server-enforced `idempotencyKey` for mutations that create unique side effects; the busy-library rejection and natural-idempotency rules above cover v1.
 * A first-class asynchronous-operation handle (`LibraryOperation` with an id, terminal states, failure detail, a lookup or subscription field, and retention); v1 observes `Library.status`.
 * Stamping `requestId` on graphql-java request errors through an `Instrumentation`.
 * A `warnings` field; no mutation currently produces non-blocking diagnostics.

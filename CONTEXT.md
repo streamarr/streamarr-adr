@@ -127,7 +127,9 @@ _Avoid_: operation item, subtask (except the JDK's `StructuredTaskScope.Subtask`
 **Step**:
 A logical operation that can be executed and retried independently, such as identify, fetch poster, fetch backdrop, probe, or fetch person or company artwork.
 A step keyed by its subject, such as a file's probe, can be required by several tasks and jobs; they require it without owning it, and stopping a job never cancels it.
-Independent retry is a design target: probes and identification are retried independently today, and artwork becomes independently retryable with streamarr/streamarr-server#412.
+Streamarr aims to retry each step independently.
+It already retries the probe and identify steps independently.
+streamarr/streamarr-server#412 will allow Streamarr to retry artwork steps independently.
 _Avoid_: phase, stage, subtask
 
 **Attempt**:

@@ -11,7 +11,7 @@ The technical facts about a media file's container and streams that a probe repo
 _Avoid_: metadata, technical metadata
 
 **Metadata**:
-Descriptive data about a title, such as the titles, artwork and credits that TMDB supplies.
+Descriptive data about a title, person or company, such as names, artwork and credits.
 _Avoid_: metadata for technical facts, probe metadata
 
 **MediaFileProbePropertyIssue**:
@@ -183,8 +183,12 @@ _Avoid_: finished, done, success
 
 **Library**:
 A set of folders the server scans, together with the items built from their files.
-Removing a library deletes its items but never touches the catalog.
+Removing a library deletes its items but leaves their catalog entries in place.
 _Avoid_: collection (a user-curated grouping), section
+
+**Title**:
+A movie, series, season or episode, independent of the libraries that hold it.
+_Avoid_: item (the representation in one library), catalog entry (the durable record)
 
 **Item**:
 A movie, series, season or episode that belongs to one library and is built from that library's files.
@@ -196,13 +200,12 @@ The server-wide set of catalog entries, independent of any library.
 _Avoid_: library; `Catalog` as a type name (jOOQ generates one)
 
 **Catalog entry**:
-The server's durable record of a matched title, person or company.
-Items in any number of libraries point at a title's entry, and person and company rows point at theirs.
-It holds the provider ids, provider values and everything users author about that title, person or company, and it outlives the rows that point at it.
+The server's durable record of a title, person or company, whether matched to a provider or unmatched.
+It holds provider ids, provider values and user-authored data, and outlives the item, person and company records that refer to it.
 _Avoid_: work, title (as a type name), metadata entry, catalog item
 
 **Credit edit**:
-A metadata edit that adds or removes one person, company or genre on a title's credits.
+A metadata edit that adds or removes one person, company or genre on a movie's or series' credits.
 The effective credit list is the provider's list without the removed credits, plus the added ones.
 _Avoid_: cast lock, credit override
 
@@ -211,7 +214,7 @@ A person with a catalog entry but no provider ids, created by a ServerAdmin with
 _Avoid_: local person, custom actor
 
 **Provider id**:
-One identifier that a metadata provider assigns to a title, qualified by provider and media type, such as TMDB movie 603.
+One identifier that a metadata provider assigns to a title, person or company, qualified by provider and media type, such as TMDB movie 603.
 Each provider id belongs to exactly one catalog entry.
 _Avoid_: GUID, external id (unqualified)
 
@@ -220,7 +223,7 @@ The value a metadata provider last supplied for one field of a catalog entry.
 _Avoid_: original value, default value
 
 **Metadata provider values**:
-The record a metadata provider returns for one title, such as `MovieMetadataProviderValues`, carrying provider ids and provider values but never entities.
+The provider ids and provider values returned together for one title, person or company.
 _Avoid_: provider result, provider entity, DTO (unqualified)
 
 **Metadata edit**:
@@ -229,8 +232,8 @@ It applies server-wide, and refresh never discards it.
 _Avoid_: override (reserved for administrative overrides in ADR 0024), lock, pin, custom value
 
 **Effective value**:
-The metadata edit for a field when one exists, otherwise the field's provider value, and the value every attached item shows.
-It is a server-side term; clients read the ordinary fields.
+The metadata edit for a field when one exists, otherwise the field's provider value.
+It is the value shown by each attached item, person or company.
 _Avoid_: shown value, display value, resolved value
 
 **Unattached metadata edit**:

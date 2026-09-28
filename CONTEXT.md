@@ -11,7 +11,7 @@ The technical facts about a media file's container and streams that a probe repo
 _Avoid_: metadata, technical metadata
 
 **Metadata**:
-Descriptive data about a title, such as the titles, artwork and credits that TMDB supplies.
+Descriptive data about a media title, person or company, such as names, artwork and credits.
 _Avoid_: metadata for technical facts, probe metadata
 
 **MediaFileProbePropertyIssue**:
@@ -47,7 +47,7 @@ _Avoid_: profile (unqualified), DV profile
 ### Playback records
 
 **Playback session**:
-The logical span of one viewing of a title, which survives replacement stream sessions and holds the format-failure history and the format-attempt budget.
+The logical span of one viewing of a media title, which survives replacement stream sessions and holds the format-failure history and the format-attempt budget.
 _Avoid_: playback (ADR 0018's token and request surface), app session, stream session (one server-side run inside it)
 
 **Source description**:
@@ -120,7 +120,7 @@ A library has at most one at a time, and `Library.status` shows its kind while i
 _Avoid_: library task (a task is a portion of a job), library work (when naming one operation)
 
 **Task**:
-A distinct portion of a job's work, grouped around one subject: a file in a scan, a title in a refresh, a library item in a removal.
+A distinct portion of a job's work, grouped around one subject: a file in a scan, a media title in a refresh, a library item in a removal.
 It is defined by its work, not by the thread that runs it, and it requires one or more steps.
 _Avoid_: operation item, subtask (except the JDK's `StructuredTaskScope.Subtask` handle), work item
 
@@ -178,3 +178,71 @@ _Avoid_: encoder capability, codec
 **Completed attempt**:
 A job attempt whose FFmpeg exited cleanly after the producer read all of its output and the server acknowledged every delivered segment, while the attempt was still active. A completed attempt does not mean the run covered the advertised timeline; the server owns coverage.
 _Avoid_: finished, done, success
+
+### Catalog
+
+**Library**:
+A set of folders the server scans, together with the items built from their files.
+Removing a library deletes its items but leaves their catalog entries in place.
+_Avoid_: collection (a user-curated grouping), section
+
+**Media title**:
+A movie, series, season or episode, independent of the libraries that hold it.
+Use "title" as shorthand only when the context distinguishes it from the title field that holds its name.
+_Avoid_: library title, item (the representation in one library), catalog entry (the durable record)
+
+**Item**:
+A media title's representation in one library, built from that library's files.
+Versions of a media title inside one library share one item; libraries never share items.
+_Avoid_: media title, catalog entry, metadata item
+
+**Catalog**:
+The server-wide set of catalog entries, independent of any library.
+_Avoid_: library; `Catalog` as a type name (jOOQ generates one)
+
+**Catalog entry**:
+The server's durable record of a media title, person or company, whether matched to a provider or unmatched.
+It holds provider ids, provider values and user-authored data, and outlives the item, person and company records that refer to it.
+_Avoid_: work, title (as a type name), metadata entry, catalog item
+
+**Credit edit**:
+A metadata edit that adds or removes one person, company or genre on a movie's or series' credits.
+The effective credit list is the provider's list without the removed credits, plus the added ones.
+_Avoid_: cast lock, credit override
+
+**Unmatched person**:
+A person with a catalog entry but no provider ids, created by a ServerAdmin with only a name while adding them to a media title's credits.
+_Avoid_: local person, custom actor
+
+**Provider id**:
+One identifier that a metadata provider assigns to a media title, person or company, qualified by provider and media type, such as TMDB movie 603.
+Each provider id belongs to exactly one catalog entry.
+_Avoid_: GUID, external id (unqualified)
+
+**Provider value**:
+The value a metadata provider last supplied for one field of a catalog entry.
+_Avoid_: original value, default value
+
+**Metadata provider values**:
+The provider ids and provider values returned together for one media title, person or company.
+_Avoid_: provider result, provider entity, DTO (unqualified)
+
+**Metadata edit**:
+A value a ServerAdmin sets for one field of a catalog entry.
+It applies server-wide, and refresh never discards it.
+_Avoid_: override (reserved for administrative overrides in ADR 0024), lock, pin, custom value
+
+**Effective value**:
+The metadata edit for a field when one exists, otherwise the field's provider value.
+It is the value shown by each attached item, person or company.
+_Avoid_: shown value, display value, resolved value
+
+**Unattached metadata edit**:
+A metadata edit whose catalog entry has no current item, person or company representing it.
+It is kept, and a ServerAdmin can delete it or copy it to an attached catalog entry of the same kind.
+_Avoid_: orphaned edit, dangling edit
+
+**Fix match**:
+Moving an item to a different catalog entry because it matched the wrong media title.
+The ServerAdmin chooses which metadata edits to copy, and watch state attributable to that item is copied automatically.
+_Avoid_: rematch (unqualified), identify, unmatch

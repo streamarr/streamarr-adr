@@ -28,7 +28,7 @@ None at present.
 - [ADR 0008: Server-Generated HLS Playlists](adr/0008-server-generated-hls-playlists.adoc)
 - [ADR 0009: H.264 + AV1 Codec Strategy](adr/0009-h264-plus-av1-codec-strategy.adoc)
 - [ADR 0010: Spring Application Events for Service Decoupling](adr/0010-spring-application-events.adoc)
-- [ADR 0011: Remove MapStruct](adr/0011-remove-mapstruct.adoc)
+- [ADR 0011: Remove MapStruct](adr/0011-remove-mapstruct.adoc) — superseded by ADR 0040
 - [ADR 0012: Filepath URI Encoding](adr/0012-filepath-uri-encoding.adoc)
 - [ADR 0013: Stream Decision Architecture](adr/0013-stream-decision-architecture.adoc)
 - [ADR 0014: Protocol-Agnostic Pagination](adr/0014-protocol-agnostic-pagination.adoc)
@@ -56,6 +56,8 @@ None at present.
 - [ADR 0036: Video Contracts Share One Vocabulary and Preserve Dynamic-Range Facts](adr/0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc)
 - [ADR 0037: The Worker Delivers Fragmented MP4 Segments From FFmpeg's Standard Output, and HLS Media Segments Are fMP4 Only](adr/0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc)
 - [ADR 0038: Streamarr Removes Media Only When a Finished Scan Confirms Every File Is Missing](adr/0038-scans-remove-media-only-when-files-are-confirmed-missing.adoc)
+- [ADR 0039: Durable Catalog Entries Hold Metadata Edits and User Data; Library Items Hold What Scans Produce](adr/0039-catalog-entries-hold-metadata-edits-and-user-data.adoc)
+- [ADR 0040: Media Read Resolvers Return DTOs Mapped by MapStruct](adr/0040-media-read-resolvers-return-dtos-mapped-by-mapstruct.adoc)
 - [ADR 0041: Scans and Refreshes Admit Tasks Through an Adaptive Concurrency Limit](adr/0041-scans-and-refreshes-admit-tasks-through-an-adaptive-limit.adoc)
 - [ADR 0042: GraphQL Subscriptions Keep Queried Screens Current over WebSocket until Token Expiry](adr/0042-graphql-subscriptions-run-over-websocket-until-token-expiry.adoc)
 

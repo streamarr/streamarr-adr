@@ -7,7 +7,7 @@ This glossary defines shared Streamarr domain terms.
 ### Probe
 
 **Probe properties**:
-The technical facts about a media file's container and streams that a probe reports; stream properties are the facts about one stream.
+The technical facts about a media file's container and streams that a probe reports. Stream properties are the facts about one stream.
 _Avoid_: metadata, technical metadata
 
 **Metadata**:
@@ -80,7 +80,7 @@ One movie-fragment pair (`moof` and `mdat`) that FFmpeg emits, and the smallest 
 _Avoid_: chunk, part
 
 **Media segment**:
-The unit an HLS playlist advertises, always fragmented MP4. Segment N is the fragments whose first video sample is a keyframe inside media time [N × period, (N + 1) × period), together with the fragments that follow them before the next such keyframe.
+The unit an HLS playlist advertises, always fragmented MP4. Segment N starts at the first video keyframe inside media time [N × period, (N + 1) × period). It contains that keyframe's fragment and every following fragment until a video keyframe starts a later segment.
 _Avoid_: chunk, segment file, .ts, container format
 
 **Initialization segment**:
@@ -108,7 +108,7 @@ An encoder is keyframe-verified when recordings under the pinned FFmpeg show tha
 _Avoid_: verified encoder (unqualified), GOP-verified encoder
 
 **Source container**:
-The container of a media file as the probe found it, such as Matroska, MP4 or MPEG-TS. It is a source fact that decides direct-play eligibility, and it never describes HLS delivery, which is always fragmented MP4.
+The container of a media file as the probe found it, such as Matroska, MP4 or MPEG-TS. This source fact decides whether the file qualifies for direct play. HLS delivery always uses fragmented MP4.
 _Avoid_: container format, ContainerFormat, output container
 
 ### Attempts
@@ -122,7 +122,7 @@ A job attempt that replaces an earlier one for the same variant under ADR 0019's
 _Avoid_: retry, restart, replacement (unqualified)
 
 **Format attempt**:
-One output format that the server chooses within a playback session, delivered by its own stream session and initialization segment. The initial format is the first attempt, and each Auto recovery after a format error adds one to the playback session's budget.
+One output format that the server chooses within a playback session. Each format attempt has its own stream session and initialization segment. The initial format is the first attempt. Each Auto recovery after a format error adds one to the playback session's budget.
 _Avoid_: fallback stream, replacement (unqualified)
 
 **Encoder backend**:
@@ -130,5 +130,5 @@ The encoder a worker actually runs for a codec family, together with whether it 
 _Avoid_: encoder capability, codec
 
 **Completed attempt**:
-A job attempt whose FFmpeg exited cleanly after the producer read all of its output and the server acknowledged every delivered segment, while the attempt was still active. The server must still handle requests for any advertised segment that the attempt did not produce.
+A job attempt completes when FFmpeg has exited cleanly, the producer has read all output, and the server has acknowledged every delivered segment. The attempt must still be active when all three conditions hold. The server must still handle requests for any advertised segment that the attempt did not produce.
 _Avoid_: finished, done, success

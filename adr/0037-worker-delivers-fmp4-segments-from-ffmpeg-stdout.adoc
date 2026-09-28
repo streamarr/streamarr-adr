@@ -4,8 +4,9 @@
 
 Accepted
 
-This decision supersedes the container clause of link:0009-h264-plus-av1-codec-strategy.adoc[ADR 0009] ("H.264 uses MPEGTS container"; "container format is determined by codec choice").
-This decision changes one consequence of link:0008-server-generated-hls-playlists.adoc[ADR 0008]: FFmpeg no longer writes segments to disk.
+This decision supersedes the container clause of link:0009-h264-plus-av1-codec-strategy.adoc[ADR 0009] ("H.264 uses MPEGTS container" and "container format is determined by codec choice").
+This decision changes one consequence of link:0008-server-generated-hls-playlists.adoc[ADR 0008].
+FFmpeg no longer writes segments to disk.
 This decision leaves ADR 0009's codec-preference clause alone.
 The playback capabilities epic (streamarr-server issue https://github.com/streamarr/streamarr-server/issues/399[#399]) will amend that clause when workers advertise verified encoders and the server can prefer HEVC.
 
@@ -15,28 +16,36 @@ This section describes the system before the changes required by this decision.
 References to the previous worker mean the worker before this decision, which asks FFmpeg's HLS muxer to write segment files.
 
 The transcode worker runs FFmpeg under `ProcessBuilder` (link:0004-processbuilder-over-jni.adoc[ADR 0004]).
-FFmpeg's HLS muxer writes each segment to a directory, and the worker uploads it over the gRPC session that link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018] and link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033] describe.
+FFmpeg's HLS muxer writes each segment to a directory.
+The worker uploads each segment over the gRPC session that link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018] and link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033] describe.
 FFmpeg never signals that a segment is complete, so the worker infers that the segment is complete by checking whether FFmpeg has renamed the segment file or exited.
 The worker checks the directory and the process every 50 ms, but at different moments, so the result depends on the order in which FFmpeg renames the file and exits.
 In worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/36[#36], FFmpeg renamed the last segment and exited between the two reads.
 The worker then reported a successful attempt as `TRANSCODE_FAILED` while the segment sat on disk.
-Reviewers of the fix in worker PR https://github.com/streamarr/streamarr-transcode-worker/pull/38[#38] found a second bug: after the worker asks FFmpeg to stop, FFmpeg flushes a final segment, which the worker uploads after sending `JobAttemptStopped`.
+Reviewers of the fix in worker PR https://github.com/streamarr/streamarr-transcode-worker/pull/38[#38] found a second bug.
+After the worker asks FFmpeg to stop, FFmpeg flushes a final segment.
+The worker uploads that segment after sending `JobAttemptStopped`.
 The server rejects that upload, and the worker reports a failure for an attempt it has already reported as stopped.
 Five open-source media and live-streaming servers that watch FFmpeg's output directory hit the same last-segment race.
 
 The research compared five designs for delivering segments.
 This decision chooses the design in which the worker reads fragmented MP4 (fMP4) from FFmpeg's standard output.
 Rejected Alternatives explains why this decision rejects the other designs.
-Standard output provides one ordered channel: FFmpeg writes every fragment in order, and the reader reaches end of file only after it has read the last byte from the pipe.
-The kernel pipe blocks FFmpeg when the reader falls behind, and `Process.waitFor` returns the exit code.
+Standard output provides one ordered channel.
+FFmpeg writes every fragment in order.
+The reader reaches end of file only after it has read the last byte from the pipe.
+The kernel pipe blocks FFmpeg when the reader falls behind.
+`Process.waitFor` returns the exit code.
 The HLS muxer decides where a segment ends, and it measures each cut from the first packet of its own run.
 
 A job attempt is one dispatch of a variant's job to a worker, with its own FFmpeg process and outcome.
 A replacement attempt replaces an earlier job attempt for the same variant under link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]'s recovery.
 The server advertises fixed segment intervals, but the worker relies on the HLS muxer's cuts without checking whether those cuts match the advertised intervals.
 The server picks stream copy, which passes the source video through unchanged, whenever the client supports the source video codec (`TranscodeDecisionService`).
-It sends an `align_keyframes_to_segments` flag that neither the server nor the worker reads, and no probe field carries keyframe spacing.
-The server builds the media playlist from the probed duration alone, and every `EXTINF` is exactly the configured period, 6 s by default.
+The server sends an `align_keyframes_to_segments` flag that neither the server nor the worker reads.
+No probe field carries keyframe spacing.
+The server builds the media playlist from the probed duration alone.
+Every `EXTINF` is exactly the configured period, 6 s by default.
 Media time is presentation time on the timeline that every attempt of a stream session shares.
 The playlist defines segment `i` as media time `[i × period, (i + 1) × period)`, and the boundaries `k × period` form the grid.
 The server never reads a per-segment duration from an upload.
@@ -45,7 +54,8 @@ The worker does not discard media that a stream-copy seek emits before the reque
 The start-0 attempt is the job attempt whose start sequence number is 0.
 The server sends the probed frame rate on every job attempt, or 0 when the probe found no usable rate.
 `SegmentUploadMetadata` carries `content_length_bytes` and the segment name, and no timing field.
-The server caps a segment at 16 MiB, the segment cap, and admits at most 8 concurrent uploads per worker and 64 MiB of buffered upload bytes fleet-wide.
+The server caps a segment at 16 MiB, the segment cap.
+It admits at most 8 concurrent uploads per worker and 64 MiB of buffered upload bytes fleet-wide.
 The server reclaims an upload older than 120 s only when it checks whether it can accept a later upload.
 The worker sends chunks in a plain `onNext` loop with no `isReady` check.
 It starts its 5 s acknowledgement timer only after the last chunk and sets no gRPC deadline, so a stalled receiver never times the worker out.
@@ -74,7 +84,8 @@ Issue https://github.com/streamarr/streamarr-server/issues/396[#396] with worker
 Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/18[#18] tags HEVC output `hvc1`, and worker issue #23 closes libx265's GOPs so that every forced keyframe is an IDR frame.
 The epic requires H.264 for every stream session until the client declares its codecs, so switching H.264 to fMP4 affects every stream session that exists at this point.
 ADR 0036 distinguishes an attempt to dispatch a job from a format attempt, which tries another format.
-A format attempt under issue https://github.com/streamarr/streamarr-server/issues/401[#401] is a new variant with its own initialization segment, while a replacement attempt is the same variant and must keep the variant's initialization segment.
+A format attempt under issue https://github.com/streamarr/streamarr-server/issues/401[#401] is a new variant with its own initialization segment.
+A replacement attempt serves the same variant and must keep that variant's initialization segment.
 The server chooses workers for replacement attempts by source namespace alone.
 Each worker chooses its encoder backend, the encoder it actually runs for a codec family, locally.
 A replacement attempt can therefore run on a worker whose H.264 encoder writes different parameter sets.
@@ -86,9 +97,12 @@ fMP4 keeps those parameter sets in the initialization segment, whereas MPEG-TS c
 
 The worker runs FFmpeg under `ProcessBuilder` and directs the mp4 muxer to write to `pipe:1` with `-movflags cmaf+delay_moov+skip_trailer+frag_keyframe+frag_discont`.
 The FFmpeg arguments that this Decision sets form the recipe.
-A producer module in the worker's `engine` package owns that process, reads its standard output and observes its exit, and it imports no gRPC protocol types.
+A producer module in the worker's `engine` package owns that process, reads its standard output and observes its exit.
+The producer imports no gRPC protocol types.
 Its reader is the loop that reads the pipe.
-The producer parses top-level ISOBMFF boxes: `ftyp` and `moov` form the initialization segment, and each `moof` with the `mdat` that follows it forms one fragment.
+The producer parses top-level ISOBMFF boxes.
+`ftyp` and `moov` form the initialization segment.
+Each `moof` and the `mdat` that follows it form one fragment.
 The worker change removes the HLS muxer, the output directory, the predicted file names, the directory poll and the liveness poll.
 The server keeps generating every playlist (ADR 0008).
 The worker sets no `min_frag_duration`, so every keyframe starts a fragment.
@@ -96,7 +110,8 @@ The worker sets `-frag_duration`, the fragmentation target, to a configured valu
 The measurements used a fragmentation target of 1 s.
 The worker, not the muxer, decides where a segment ends.
 The worker passes `-copyts -avoid_negative_ts disabled` and adds `-start_at_zero`.
-These flags place media time zero at the source container's start time: the earliest stream's first timestamp.
+These flags place media time zero at the source container's start time.
+That start time is the earliest stream's first timestamp.
 Every attempt uses this origin, whether it starts from zero or seeks into the source.
 The producer never shifts an attempt's timestamps on its own.
 When it copies AAC audio, the worker adds `-bsf:a aac_adtstoasc`, because `delay_moov` stops the mp4 muxer from inserting that filter on its own.
@@ -104,13 +119,16 @@ When an attempt encodes video, the worker passes `-r:v:0` with the probed frame 
 It computes its frame-count GOP, the keyframe interval it gives the encoder in frames, from the same rate (<<decision-gop,GOP sizing>>).
 FFmpeg's automatic mode then selects the constant-rate path.
 Under `-copyts`, FFmpeg selects an internal variant of that path that keeps the first timestamp.
-The pipe thus carries the HLS muxer's constant-rate frames, frame-count keyframes land on the period, and a seek does not pad from zero.
+The pipe thus carries the HLS muxer's constant-rate frames.
+Frame-count keyframes land on the period.
+A seek does not pad from zero.
 A test replays a recorded fixture and checks that output after a seek under these flags starts at the seek point, so an FFmpeg upgrade cannot silently change this behaviour.
 The worker refuses a video encode whose probed frame rate is not positive and finite with `JOB_ATTEMPT_FAILURE_INVALID_SPECIFICATION`, since it can neither pass that rate to `-r:v:0` nor count a GOP from it.
 Streamarr-server issue #446 requires the server to refuse such a stream session before it dispatches any job attempt.
 Otherwise the server would spend ADR 0019's recovery budget dispatching jobs that every worker would refuse.
 
-*Why:* `-copyts` alone put a source that begins at 12 s into segment 2 for a job asking for segment 0, and explicit `cfr` padded 720 duplicate frames after a seek to 30 s.
+*Why:* `-copyts` alone put a source that begins at 12 s into segment 2 for a job asking for segment 0.
+Explicit `cfr` padded 720 duplicate frames after a seek to 30 s.
 Evidence: <<evidence-channel>>, <<evidence-timeline>>, <<evidence-frame-rate>>.
 
 === Every encoder forces the boundary keyframes from a list
@@ -122,7 +140,8 @@ A scene-cut keyframe adds another keyframe inside an interval, and the producer 
 FFmpeg's `-force_key_frames` has two modes: a list of absolute times, or an expression evaluated against the time since the attempt's first frame.
 The worker forces the boundaries with the list, never an expression.
 `-force_key_frames:0` receives `k × period` in whole seconds for every `k` from the start sequence number up to, but not including, the variant's media segment count.
-Every attempt thus forces the same frame at each boundary it shares with another attempt: the first frame at or after that boundary on the zero-based timeline.
+Every attempt thus forces the same frame at each boundary it shares with another attempt.
+FFmpeg chooses the first frame at or after that boundary on the zero-based timeline.
 The list starts at the start sequence number, because FFmpeg consumes at most one entry per frame and would force an extra keyframe for each entry before the attempt's first frame.
 The worker ends the list early at the last entry that keeps the argument within Linux's per-argument limit.
 The server sends the count on every job attempt in `TranscodeExecution.media_segment_count`, a new, additive field number 5.
@@ -133,7 +152,8 @@ The worker refuses a job whose count is zero, or whose start sequence number is 
 Such a job asks for a segment the playlist does not advertise, and in a video encode (`VIDEO_TRANSCODE` or `FULL_TRANSCODE`) its list would be empty, which FFmpeg's option parsing rejects.
 The worker keeps no expression as a fallback, because Streamarr has no production instances.
 
-*Why:* Under an expression, 202 of 360 shared boundaries fell one or two frames apart, and under the list none of 372 did.
+*Why:* Under an expression, 202 of 360 shared boundaries fell one or two frames apart.
+Under the list, none of 372 shared boundaries differed.
 A list from zero reaches the argument limit only after 21,370 boundaries at a 6 s period, or 35.6 hours.
 Evidence: <<evidence-keyframe-list>>.
 
@@ -148,18 +168,23 @@ An encoder is keyframe-verified only when the recordings show all three behaviou
 * Every forced keyframe starts a closed GOP, as does the keyframe the GOP places when a recording deliberately suppresses one forced keyframe.
 
 A keyframe starts a closed GOP when no later frame in decode order references a frame before it.
-The keyframe's picture type must guarantee this independence: it must be an H.264 or HEVC IDR picture, or a shown AV1 key frame.
+The keyframe's picture type must guarantee this independence.
+The keyframe must be an H.264 or HEVC IDR picture, or a shown AV1 key frame.
 An HEVC CRA picture may be followed in decode order by RASL pictures, which precede it in presentation order and reference the GOP before it.
 A decoder that starts at a CRA picture must discard them, so a segment that starts there does not decode on its own.
-A CRA picture never qualifies, even with no RASL picture after it, because the encoder may place RASL pictures after any CRA picture and the mp4 muxer marks it a sync sample either way.
+A CRA picture never qualifies, even when no RASL picture follows it.
+The encoder may place RASL pictures after any CRA picture.
+The mp4 muxer marks the CRA picture as a sync sample in both cases.
 libx264 and SVT-AV1 are keyframe-verified.
 SVT-AV1 stays keyframe-verified despite upstream bug https://gitlab.com/AOMediaCodec/SVT-AV1/-/work_items/2385[#2385] in the pinned runtime (worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/42[#42]), because that bug stalls or reorders output rather than dropping a forced keyframe.
 The stall watchdog of the <<decision-waits,four waits>> and the short-sample rule for <<decision-untrusted-output,untrusted output>> fail each affected attempt so that the server can replace it under ADR 0019.
 Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/42[#42] will update the selected runtime to a version that includes the fix.
-libx265 is not keyframe-verified: under its default open GOP its forced keyframes are CRA pictures.
+libx265 is not keyframe-verified.
+Under its default open GOP, its forced keyframes are CRA pictures.
 When a recording suppressed a forced keyframe, libx265's GOP placed a CRA picture that was followed by a RASL picture.
 libx265 qualifies only after its GOPs are closed under worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/23[#23] and a new recording shows that both its forced keyframes and its GOP's backstop keyframe are IDR pictures.
-Each hardware encoder must pass the same recording checks before it is keyframe-verified; worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/14[#14] tracks those checks.
+Each hardware encoder must pass the same recording checks before it is keyframe-verified.
+Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/14[#14] tracks those checks.
 
 The worker sets each encoder's frame-count GOP by whether that encoder is keyframe-verified.
 For a keyframe-verified encoder, the worker multiplies the period by the probed frame rate, rounds the result up, and adds one frame to obtain the extended GOP.
@@ -169,11 +194,14 @@ Even if the encoder ignores forced keyframes, that GOP still places one keyframe
 Under the floored GOP every segment holds at least one keyframe, and most hold two.
 The floored GOP keeps a keyframe in every interval for libx265 but does not close its GOPs.
 Closing those GOPs requires the changes tracked by worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/23[#23].
-Past the list's last entry only the GOP places keyframes: the floored GOP still puts one in every interval, while the extended GOP drifts off the grid.
-With the extended GOP, keyframes drift until an interval holds no keyframe, and the producer then fails the attempt with `SKIPPED_SEGMENT_NUMBER` (<<decision-grouping,grouping>>).
+Past the list's last entry, only the GOP places keyframes.
+The floored GOP still puts a keyframe in every interval.
+With the extended GOP, keyframes drift off the grid until an interval holds no keyframe.
+The producer then fails the attempt with `SKIPPED_SEGMENT_NUMBER` (<<decision-grouping,grouping>>).
 The server dispatches a replacement attempt from the skipped segment under ADR 0019, and that attempt starts a new list at the skipped segment's boundary.
 
-*Why:* The floored GOP added a second keyframe beside the forced one at 13 of 15 boundaries, while the extended GOP produced only forced keyframes in all twelve runs.
+*Why:* The floored GOP added a second keyframe beside the forced one at 13 of 15 boundaries.
+The extended GOP produced only forced keyframes in all twelve runs.
 libx265's backstop was a CRA picture followed by RASL pictures in three of four recordings.
 Evidence: <<evidence-gop>>, <<evidence-svt-av1>>.
 
@@ -192,7 +220,8 @@ For an MPEG-TS source, the period before the attempt's first boundary must conta
 For other sources, that period must contain a source frame.
 When the applicable condition holds, the replacement attempt produces the same frames as the start-0 attempt from the requested boundary onward.
 Otherwise the attempt's first segment starts late inside its interval.
-The producer cannot distinguish this late start from a correct start; the <<explicitly-deferred,deferred list>> describes the follow-up work.
+The producer cannot distinguish this late start from a correct start.
+The <<explicitly-deferred,deferred list>> describes the follow-up work.
 Under the extended GOP the preroll holds only the keyframe that starts the attempt's output, because the list starts at the start sequence number and that GOP exceeds one period.
 The floored GOP may add one more keyframe, which the producer discards with the rest of the preroll.
 
@@ -206,7 +235,8 @@ Evidence: <<evidence-early-seek>>, <<evidence-players>>.
 === A segment is the group of fragments that start inside its interval
 
 Segment `N` covers media time `[N × period, (N + 1) × period)` on the zero-based timeline, exactly as the playlist defines it, for the initial attempt and every replacement attempt.
-This partition is the one boundary rule for the whole system: segment `N` begins at the first keyframe whose presentation time lies inside its interval.
+This partition is the one boundary rule for the whole system.
+Segment `N` begins at the first keyframe whose presentation time lies inside its interval.
 A stream copy cannot produce a segment whose interval holds no keyframe.
 Issue https://github.com/streamarr/streamarr-server/issues/66[#66] applies the same rule on the server from probed keyframe timestamps.
 The playlist can then advertise each copy-mode segment's real duration, and a copy seek can land on that segment's first keyframe.
@@ -231,7 +261,8 @@ It closes open segment `N` when a sync-first fragment arrives whose start is at 
 The fragmentation target measurably shortens the lag before that closing fragment arrives, but it is a target, not a guarantee.
 End of file closes the last open segment.
 The producer discards a fragment whose segment number is below the start sequence number, because that fragment is preroll and its segment belongs to another attempt.
-A segment that runs past its interval is not itself a failure; whether it conforms to the advertised duration is issue https://github.com/streamarr/streamarr-server/issues/66[#66's] policy.
+A segment that runs past its interval is not itself a failure.
+Issue https://github.com/streamarr/streamarr-server/issues/66[#66] will decide whether such a segment conforms to the advertised duration.
 
 The producer fails the attempt with the named reason `SKIPPED_SEGMENT_NUMBER` when a sync-first fragment skips a segment number.
 The attempt's output then holds no keyframe inside the skipped interval, so this attempt can never deliver that segment.
@@ -267,20 +298,25 @@ If so, the producer lets that upload finish before it records the failure.
 If the producer records a stop while it waits, the attempt stops instead.
 The producer records a failed upload, a stall or an unexpected error at once and cancels any upload in flight.
 
-*Why:* In the SVT-AV1 study such a sample appeared only where FFmpeg logged a non-monotonic decode time, and 2 of 10 pinned-runtime failures exited 0 with undecodable segments.
+*Why:* In the SVT-AV1 study, such a sample appeared only where FFmpeg logged a non-monotonic decode time.
+In 2 of the 10 pinned-runtime failures, FFmpeg exited 0 with undecodable segments.
 Evidence: <<evidence-svt-av1>>.
 
 === Each closed segment is uploaded once, under back-pressure
 
 The producer assembles one segment in memory, bounded by the segment cap, and starts its upload only after it closes the segment.
-The upload contract does not change: the worker sends the metadata message with `content_length_bytes`, sends the chunks, and waits for the server to acknowledge the segment.
+The upload contract does not change.
+The worker sends the metadata message with `content_length_bytes` before sending the chunks.
+It then waits for the server to acknowledge the segment.
 The worker sends the next chunk only when the gRPC stream reports `isReady`.
 The reader admits a box only when the box's bytes and the output the producer already holds fit within the producer's budget of two segment caps.
 It hands over a closed segment only once the server has acknowledged the previous one.
 Otherwise the reader stops reading, and the pipe blocks FFmpeg.
-This back-pressure loses nothing: the worker never skips or drops a fragment, because the server has already advertised each segment to on-demand clients.
+This back-pressure loses nothing.
+The worker never skips or drops a fragment because the server has already advertised each segment to on-demand clients.
 
-*Why:* MoQ's importer likewise skips no fragment: it publishes every fragment of the tracks it publishes, or fails.
+*Why:* MoQ's importer likewise skips no fragment.
+For the tracks it publishes, the importer publishes every fragment or fails.
 Only its live consumer skips a stale or missing group.
 Evidence: <<evidence-channel>>.
 
@@ -288,10 +324,10 @@ Evidence: <<evidence-channel>>.
 
 An attempt completes only when four facts hold, in whatever order they arrive:
 
-* the pipe reached end of file on a box boundary, with no `moof` still waiting for its `mdat`;
-* FFmpeg exited with status 0;
-* the server acknowledged every segment the producer closed, with no segment number skipped;
-* the attempt is still active.
+* The pipe reached end of file on a box boundary, with no `moof` still waiting for its `mdat`.
+* FFmpeg exited with status 0.
+* The server acknowledged every segment the producer closed, with no segment number skipped.
+* The attempt is still active.
 
 The producer fails the attempt when FFmpeg exits with a non-zero status, or when the server has not acknowledged every closed segment.
 It also fails the attempt when the <<decision-waits,exit wait>> expires.
@@ -308,7 +344,8 @@ A stop changes what the producer admits, not what the server has already committ
 When the worker stops an attempt, the producer records the stop under its own lock, then writes `q` to FFmpeg and cancels any upload in flight.
 The reader then drains the pipe to end of file and discards everything it reads, including the partial fragment FFmpeg flushes on `q`.
 The producer delivers nothing after a stop.
-Cancelling an upload is not a rollback: the server may already have committed that segment, and its attempt fence at commit time decides whether to publish it (ADR 0019).
+Cancelling an upload does not roll back a segment that the server has already committed.
+When the server commits a segment, its attempt fence decides whether to publish that segment (ADR 0019).
 The stop's grace period specifies how long FFmpeg may take to exit after the worker writes `q`.
 After writing `q`, the worker waits for FFmpeg to exit within that grace period.
 If FFmpeg has not exited when the grace period expires, the worker sends SIGKILL and waits until the process exits.
@@ -340,7 +377,8 @@ If FFmpeg has not exited when the stop's grace period expires, the worker sends 
 * A readiness wait fails the upload when the gRPC stream has not reported `isReady` within its bound.
 * For each upload, the worker starts the acknowledgement deadline when it sends the first byte.
 The upload fails if the server has not acknowledged the segment when that deadline expires.
-* An exit wait follows the output: once the pipe has ended and the server has acknowledged the last segment, FFmpeg must exit within the stop's grace period.
+* An exit wait starts once the pipe has ended and the server has acknowledged the last segment.
+FFmpeg must then exit within the stop's grace period.
 This wait watches the process, not the pipe.
 If FFmpeg has not exited when this wait expires, the producer fails the attempt with the named reason `PROCESS_DID_NOT_EXIT` and ends FFmpeg as it ends a stalled process.
 If the output is truncated, the producer keeps the `TRUNCATED_OUTPUT` failure even if FFmpeg also exceeds the exit deadline.
@@ -348,7 +386,8 @@ A stop recorded during this wait takes precedence over both `TRUNCATED_OUTPUT` a
 
 Back-pressure from the server therefore pauses the encoder-stall watchdog but never exempts the attempt from every bound.
 
-*Why:* A blocking pipe read cannot time out on its own, and a hung FFmpeg keeps printing its progress line and exits on neither `q` nor SIGTERM.
+*Why:* A blocking pipe read cannot time out on its own.
+A hung FFmpeg keeps printing its progress line and exits on neither `q` nor SIGTERM.
 The watchdog stops when the reader finishes reading the output, so only the exit wait catches an FFmpeg process that hangs after its last byte.
 Evidence: <<evidence-svt-av1>>.
 
@@ -363,19 +402,24 @@ A job that arrives while every slot holds an active job attempt fails with `JOB_
 The contract has no failure value specifically for a worker whose slots are full.
 The worker's segment memory stays within one worker-wide budget of the slot count times two segment caps.
 Every producer counts against that budget until it releases its segments, even after the producer starts stopping.
-FFmpeg's own memory, the kernel pipe buffer and gRPC's flow-control window sit outside that budget; the container runtime bounds them, and this decision does not claim to.
+FFmpeg's own memory, the kernel pipe buffer and gRPC's flow-control window sit outside that budget.
+The container runtime bounds those resources.
 
-*Why:* A hung FFmpeg can take the grace period and a forced kill to exit, and a burst of seeks can stop attempts faster than their FFmpeg processes exit.
+*Why:* A hung FFmpeg can take the grace period and a forced kill to exit.
+A burst of seeks can stop attempts faster than their FFmpeg processes exit.
 Evidence: <<evidence-svt-av1>>.
 
 === Tests substitute the process
 
 Tests substitute the process, not the producer.
-Production uses `ProcessBuilder`, and the worker-session tests supply a scripted `Process`, so the real producer and its grouping and ordering rules run in every test.
+Production uses `ProcessBuilder`.
+The worker-session tests supply a scripted `Process`.
+The real producer and its grouping and ordering rules run in every test.
 Tests replay recorded fixtures to verify that the producer groups fragments by the zero-based grid rule.
 The fixtures README in the worker repository, cited in References, lists each recording and the behaviour it verifies.
 
-The recorder reads the picture that starts each keyframe: the NAL unit type for H.264 and HEVC, and the frame header for AV1.
+The recorder identifies the picture that starts each keyframe.
+It reads the NAL unit type for H.264 and HEVC, and the frame header for AV1.
 The tests therefore check that libx264 produces IDR pictures, SVT-AV1 produces shown key frames and libx265 produces CRA pictures in these fixtures.
 Both the recorder and CI's check fail when a keyframe of a keyframe-verified encoder does not start a closed GOP.
 For every fixture the recorder also runs the HLS muxer, records each segment whose cut differs from the grid, and records why the cuts differ.
@@ -392,7 +436,8 @@ Evidence: <<evidence-grouping>>.
 
 === HLS media segments are fMP4 only
 
-The container no longer follows the codec: the server serves every variant as multiplexed fMP4 in an HLS version 6 playlist with an `EXT-X-MAP` tag.
+The container no longer follows the codec.
+The server serves every variant as multiplexed fMP4 in an HLS version 6 playlist with an `EXT-X-MAP` tag.
 Multiplexed fMP4 carries a video `traf` and an audio `traf` in a single `moof`.
 The output keeps the `cmaf` muxer flag as part of the measured recipe and claims no CMAF conformance.
 CMAF restricts a track to one media type, so the flag does not make this output CMAF, and strict CMAF stays outside this contract.
@@ -416,7 +461,8 @@ Every attempt of a variant produces the same initialization segment, or init, so
 A test checks that recorded fixtures contain byte-identical inits across a start-0 attempt and an attempt that seeks, for both encoded video and stream copy.
 That identity holds only within one encoder backend, so a replacement attempt must run on the backend of the attempt that produced the init.
 If a replacement attempt uploads an init that differs from the stored init, the server rejects the attempt with a named failure.
-The server adds this comparison as part of this decision; the worker contract does not need to change.
+The server adds this comparison as part of this decision.
+The worker contract does not need to change.
 The server will restrict replacement attempts to the same backend when workers advertise their encoders (issue https://github.com/streamarr/streamarr-server/issues/398[#398] with worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/28[#28]).
 The <<explicitly-deferred,deferred list>> records that work separately.
 Once workers advertise their encoders, the server records the first attempt's backend on the variant and dispatches replacement attempts only to workers that advertise the same encoder for that codec family.
@@ -438,7 +484,9 @@ Evidence: <<evidence-init>>, <<evidence-players>>.
 
 An adapter turns the producer's fragments into one delivery protocol's units.
 The producer delivers the initialization segment first.
-It then delivers each fragment with the tracks it carries and, when it carries video, its sync-sample flag and its start; a fragment may carry audio alone.
+The producer then delivers each fragment and identifies the tracks it carries.
+For fragments that carry video, the producer also supplies the sync-sample flag and the start time.
+A fragment may carry audio alone.
 The HLS adapter groups fragments into segments as this decision describes and uploads each segment once.
 A future MoQ adapter would run FFmpeg with `separate_moof` and a much smaller fragmentation target, as the moq-dev demo does.
 It would publish each fragment as a frame within a group, behind the same producer interface.
@@ -471,7 +519,8 @@ Whether a copy segment longer than the period, such as each 10.01 s segment befo
 Until workers advertise their encoders, the server rejects differing inits without requiring the same backend at dispatch time.
 * Add Low-Latency HLS parts and a contract for uploading parts.
 A part's length stays unknown until the part ends, and ADR 0019 rejects LL-HLS blocking reload as the way a client waits for a segment.
-* Transport and publish media through MoQ: this ADR does not adopt MoQ, its transport or its live retention policy.
+* Transport and publish media through MoQ.
+This ADR does not adopt MoQ, its transport or its live retention policy.
 * Retry uploads from the retained segment (worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/1[#1]).
 Until the worker supports these retries, a failed upload fails the attempt, and the server dispatches a replacement attempt within the budget ADR 0019 sets.
 Once the worker supports retries, the producer retains the closed segment while it retries failed uploads with bounded back-off.
@@ -480,13 +529,16 @@ The server must accept repeated uploads idempotently.
 The worker can retry through the same producer interface without adding a buffer.
 * Check the audio where a replacement attempt's first segment joins the previous attempt's last.
 The one-period-early seek kept every measured gap at that junction under one AAC frame, but the producer does not measure or correct these gaps during playback.
-A source, sample rate or encoder that left a longer gap would again make a hole that Chromium stalls on, now that fMP4 reaches Media Source Extensions without the MPEG-TS remux that hid it.
+A source, sample rate or encoder that left a longer gap could again stall Chromium.
+fMP4 reaches Media Source Extensions without the MPEG-TS remux that hid those gaps.
 * Test playback on tvOS devices and test output from hardware encoders.
 The player checks ran on one macOS host and one iPhone, with software encoders only.
 * Adopt a runtime whose SVT-AV1 fixes upstream bug https://gitlab.com/AOMediaCodec/SVT-AV1/-/work_items/2385[#2385] (worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/42[#42]).
 The worker takes FFmpeg as a pinned prebuilt release under ADR 0029, and no SVT-AV1 release contains commit `ae2658e5` yet.
 * Make each replacement attempt reach the frame that the start-0 attempt used at the requested boundary, whatever the source's frame spacing.
-An encoded replacement attempt's first segment starts late, leaving a video gap at its first junction, when the period before it holds no source frame, as on a variable-frame-rate source with a longer gap between frames.
+An encoded replacement attempt's first segment starts late when the preceding period holds no source frame.
+The late start leaves a video gap at the first junction.
+A variable-frame-rate source can have a gap between frames that lasts longer than the period.
 On an MPEG-TS source it also starts late when that period holds no source keyframe, because FFmpeg's MPEG-TS demuxer lands on the next keyframe after the target.
 The producer accepts either start because it lies inside the segment's interval.
 A stream-copy replacement attempt of an MPEG-TS source still starts its video up to one keyframe interval late while its audio starts on time, as it did with the previous worker.
@@ -504,7 +556,9 @@ The proofs of concept measured pacing and one retention budget, but did not meas
 
 == Consequences
 
-* One ordered channel replaces two side channels, so the race between the directory and the exit cannot occur, and no step rescans, drains or reconciles after exit.
+* One ordered channel replaces two side channels.
+The race between the directory and the exit cannot occur.
+No step rescans, drains or reconciles after exit.
 * The worker gains an ISOBMFF box parser, a grouper on the absolute timeline and strict end-of-file rules, each with its own tests.
 It loses `awaitSegment`, the liveness poll, the 50 ms constant and the output directory.
 * With no media on disk, the worker needs no segment base path and no code that cleans that path up.
@@ -520,13 +574,18 @@ The measurements did not establish how much this extra work delays the first seg
 With the previous worker, FFmpeg renames the segment file at the boundary itself.
 Wall-clock delivery further depends on encoder speed and on back-pressure from the server.
 The worker's configuration sets the fragmentation target, and each segment carries about `period / target` `moof` boxes instead of one.
-* Each producer holds up to two segment caps in memory: one segment awaits acknowledgement while the producer assembles the next.
+* Each producer holds up to two segment caps in memory.
+One segment awaits acknowledgement while the producer assembles the next.
 The previous worker instead keeps the closed segment on disk while it uploads that segment.
 The worker holds at most the slot count times two segment caps.
-* Variable-frame-rate sources are still padded to a constant rate, but the rate is now the worker's probed number rather than FFmpeg's guess, so the frame-count GOP and the output rate cannot disagree.
+* Variable-frame-rate sources are still padded to a constant rate.
+The worker now uses the probed rate instead of FFmpeg's guess.
+The frame-count GOP and the output rate therefore cannot disagree.
 * Every encoder receives time-based keyframes, so segment boundaries stop drifting with the GOP.
 * A keyframe-verified encoder's segments hold one keyframe instead of the two that most segments hold under the floored GOP.
-Other encoders keep the extra keyframe until verified: libx265 after worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/23[#23], and each hardware encoder under worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/14[#14].
+Other encoders keep the extra keyframe until they are verified.
+libx265 can qualify after the changes tracked by worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/23[#23].
+Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/14[#14] tracks the checks for each hardware encoder.
 * The extended GOP alone no longer guarantees a keyframe in every interval.
 If an encoder stopped honouring forced keyframes altogether, its GOP would drift off the grid until an interval held no keyframe, as it does past the end of the list.
 The producer would then fail that attempt with `SKIPPED_SEGMENT_NUMBER` instead of misnumbering segments.
@@ -545,8 +604,10 @@ Its first segment repeats about one period of media that the last drifted segmen
 ADR 0019's recovery cannot withdraw that repeat once the server has published it.
 * Switching H.264 to fMP4 removes the parameter sets that MPEG-TS carried in each media segment.
 The server instead serves the stored init with later segments and, once workers advertise their encoders, requires replacement attempts to use the backend that produced that init.
-* The upload loop gains `isReady` flow control, a readiness bound and an acknowledgement deadline, and the worker starts enforcing the slot count it advertises.
-* AAC stream copies gain an explicit `aac_adtstoasc` filter that the HLS muxer inserted on its own; without it every MPEG-TS source with AAC fails to copy under the new muxer flags.
+* The upload loop gains `isReady` flow control, a readiness bound and an acknowledgement deadline.
+The worker starts enforcing the slot count it advertises.
+* AAC stream copies gain an explicit `aac_adtstoasc` filter that the HLS muxer inserted on its own.
+Without this filter, every MPEG-TS source with AAC fails to copy under the new muxer flags.
 * MPEG-TS disappears end to end, and the container as a type goes with it rather than surviving with one value.
 ADR 0036's list of names to keep drops `ContainerFormat`.
 H.264 playback changes container, and the server pull request carries the player evidence for that change.
@@ -554,7 +615,8 @@ H.264 playback changes container, and the server pull request carries the player
 The producer keeps the junction continuous by aligning the replacement attempt's media with the preceding attempt's media.
 * The server and worker changes must follow the rollout order above.
 One server pull request switches the container, updates the worker image, replaces the scripted FFmpeg fixture, and records the player checks.
-* A stop can no longer end in a forced kill because the reader sat blocked in an upload, and the producer must both drain the pipe and cancel the upload.
+* A stop can no longer end in a forced kill because the reader sat blocked in an upload.
+The producer must both drain the pipe and cancel the upload.
 * A MoQ proof of concept needs `separate_moof`, a smaller fragmentation target and a publisher adapter, not a second producer.
 
 == Rejected Alternatives
@@ -562,17 +624,26 @@ One server pull request switches the container, updates the worker image, replac
 * A producer that watches the output directory with inotify and treats exit as an event removes the race by ordering the two facts.
 It still keeps two channels, needs a polling fallback on macOS, and the pipe would replace it anyway.
 * A pull-style producer with a `next()` method leaves the read loop with the caller, and a fake producer would have to duplicate the ordering rules.
-* Exit and segment-arrival callbacks on the existing process manager leave the stop logic in the worker under a different lock, so the worker would still upload a segment that FFmpeg flushed during a stop.
+* Exit and segment-arrival callbacks on the existing process manager leave the stop logic in the worker under a different lock.
+The worker would still upload a segment that FFmpeg flushed during a stop.
 * A loopback HTTP receiver inside the worker, which several live-streaming servers use and the first proof of concept measured, would have to rebuild every delivery guarantee that FFmpeg's HTTP output lacks.
 It would also give the worker a listening port that ADR 0033 reserves for health checks.
-* FFmpeg `PUT`ing segments straight to the server adds a second transport beside gRPC, fences attempts by a URL token instead of by connection ownership, moves TLS into FFmpeg's HTTP client, and offers no per-segment retry.
-* Having the server read segments from storage the worker shares moves the same two-channel race onto the server and across a network filesystem, and ADR 0018 and ADR 0019 already defer that design.
+* FFmpeg `PUT`ing segments straight to the server adds a second transport beside gRPC.
+The server would fence attempts by a URL token instead of by the connection that owns them.
+FFmpeg's HTTP client would handle TLS.
+This approach offers no per-segment retry.
+* Having the server read segments from storage the worker shares moves the same two-channel race onto the server and across a network filesystem.
+ADR 0018 and ADR 0019 already defer that design.
 * Cutting one fragment per segment with `-min_frag_duration` just under the period matches the HLS muxer only at a constant frame rate with keyframes exactly one period apart.
 No fixed minimum holds for arbitrary keyframe spacing.
 * Setting `-min_frag_duration` to exactly the segment period merged two segments at 23.976 fps in the first proof of concept.
-* Checking each fragment's raw `tfdt` against segment number times period rejected valid segment starts, because decode time carries composition offsets, a 144-frame period is 6.006 s, and the first audio `tfdt` wraps negative.
+* Checking each fragment's raw `tfdt` against segment number times period rejected valid segment starts.
+Decode time differs from presentation time by the composition offset.
+A 144-frame period is 6.006 s, and the first audio `tfdt` wraps negative.
 * Keeping a stream-copy replacement attempt's preroll fragment in its first segment reproduces the previous worker's overlap of one keyframe interval with the previous attempt.
-* Seeking an encoded replacement attempt exactly to its first boundary, which leaves nothing to discard, drops frames at the first junction on variable-frame-rate and MPEG-TS sources and left an audio gap that Chromium with hls.js stalled on.
+* Seeking an encoded replacement attempt exactly to its first boundary leaves no preroll to discard.
+That seek drops frames at the first junction on variable-frame-rate and MPEG-TS sources.
+It also left an audio gap that stalled Chromium with hls.js.
 A 1 s margin still dropped frames on MPEG-TS sources whose keyframes are 2 s apart, and one period is the unit the producer already discards as preroll.
 * Failing the attempt before closing the open segment when a fragment skips a number discards a complete, correctly numbered segment.
 In a stream copy every replacement attempt would fail at the same fragment, so none could deliver it, and in an encode a replacement attempt would encode it again.
@@ -591,16 +662,24 @@ Waiting for a replacement attempt to produce the missing segment would stall pla
 The extended GOP is safe only because forced keyframes, not the GOP, place every boundary.
 * Keeping the floored GOP for every encoder adds a second keyframe and a one-frame fragment beside most boundaries.
 It guards against a failure that the keyframe verification recordings rule out and that `SKIPPED_SEGMENT_NUMBER` would still name.
-* Verifying keyframes on sync samples alone would admit libx265, whose forced keyframes are CRA sync samples and whose backstop keyframe carried a RASL picture, because the sync flag cannot tell an open GOP from a closed one.
-* A GOP of exactly the rounded-up number of frames fires on the same frame as every forced keyframe after a gap of that length, so a recording cannot show whether the encoder honoured the forced keyframe or reached its GOP limit.
+* Verifying keyframes on sync samples alone would admit libx265.
+Its forced keyframes are CRA sync samples, and its backstop keyframe carried a RASL picture.
+The sync flag cannot distinguish an open GOP from a closed one.
+* A GOP of exactly the rounded-up number of frames fires on the same frame as a forced keyframe after a gap of that length.
+A recording cannot then show whether the encoder honoured the forced keyframe or reached its GOP limit.
 * Keeping the expression `gte(t,n_forced*period)` measures every boundary from the attempt's first frame, because FFmpeg gives an expression no absolute time.
 It put shared boundaries one or two frames apart, and on sources whose first frame is after zero it put the start-0 attempt's own boundaries one frame late.
 * Anchoring the expression with a predicted first frame, `gte(t+T0,(n_forced+k)*period)`, requires the first output frame's time before FFmpeg runs.
 The worker cannot know that time in advance because it depends on the source's frame times and where the demuxer starts reading after the seek.
 * Measuring each forced keyframe from the previous one, `gte(t,prev_forced_t+period)`, is a frame-count GOP in another form, so it drifts, misaligns replacement attempts, and would skip a segment after about 1000.
-* A fixed horizon, the same number of boundaries for every job, works without a contract change, but the server already owns the grid and the count it advertises, and a new field costs little before production.
-* Having the worker probe the source's duration before each attempt to end the list adds a process and its latency to every start and replacement attempt, and can disagree with the probe behind the advertised count.
-* Reading the list from a file with `-/force_key_frames:0` lifts the argument limit but brings back a per-attempt file on disk that the worker must create and remove on every exit path, which this decision otherwise deletes with the output directory.
+* A fixed horizon gives every job the same number of boundaries without changing the contract.
+The server already defines the grid and computes the count it advertises.
+Adding a field for that count costs little before production.
+* Having the worker probe the source's duration before each attempt to end the list adds a process and its latency to every start and replacement attempt.
+The new probe can also disagree with the probe behind the advertised count.
+* Reading the list from a file with `-/force_key_frames:0` lifts the argument limit.
+It also restores a per-attempt file on disk after this decision removes the output directory.
+The worker must create that file and remove it on every exit path.
 Standard input carries the stop command, and `ProcessBuilder` passes FFmpeg no other descriptor.
 * Serving a replacement attempt's own init mid-playlist would tolerate a backend change, but it needs per-attempt inits and playlist changes that ADR 0008 does not generate.
 * Switching H.264 to the `avc3` sample entry, so that parameter sets travel in-band, would tolerate a backend change, but it has no evidence on AVPlayer.
@@ -612,7 +691,9 @@ No other watchdog watches the process once the reader has finished reading the o
 * Keeping MPEG-TS behind a worker capability flag changes nothing for the server, which would stop requesting MPEG-TS anyway, and both repositories would have to keep two container paths correct.
 * Keeping a one-value `ContainerFormat` type as a slot for a future container preserves a decision that no code makes.
 A future container would need its own ADR, and its type can return then.
-* Parsing FFmpeg's playlist or its `EXT-X-ENDLIST` tag as the completion signal appears in none of the surveyed projects, depends on a playlist the server already generates, and still reads a filesystem side channel.
+* None of the surveyed projects parses FFmpeg's playlist or its `EXT-X-ENDLIST` tag as the completion signal.
+This approach duplicates a playlist the server already generates.
+It also retains a filesystem side channel.
 * Scraping FFmpeg's log for segment events turns a log line into a contract, and a log line is not one.
 
 == Evidence
@@ -628,15 +709,18 @@ The References section identifies the committed recordings and the measurements 
 * One never fixed the race.
 * Two independent throwaway proofs of concept measured the HTTP receiver and the standard-output design against FFmpeg 8.1.2 in the pinned worker image.
 * The second proof of concept added 17 timing cases, 13 gRPC scenarios and a playback matrix on real decoders.
-* FFmpeg's HTTP output never reads the response status: `libavformat/http.c` substitutes a 200.
+* FFmpeg's HTTP output never reads the response status.
+`libavformat/http.c` substitutes a 200.
 * It never re-sends a segment the receiver dropped.
 * It exits with status 0 even after a rejected upload.
 * It exits before a slow receiver has read everything FFmpeg wrote.
 * moq-mux's demo runs FFmpeg with `separate_moof` and a 1 ms `-frag_duration`, so its fragments are sample-sized.
 * moq-mux's importer closes a group only when it observes the next boundary.
-* Keyframes alone do not define that importer's groups: it rolls a group on every track, audio included, at each segment boundary.
+* Keyframes alone do not define that importer's groups.
+The importer starts a new group on every track, including audio, at each segment boundary.
 * For that importer, a `styp` box or an explicit cut marks a boundary as well as a video keyframe does.
-* MoQ's importer skips no fragment: it publishes every fragment of the tracks it publishes, or fails.
+* MoQ's importer skips no fragment.
+For the tracks it publishes, the importer publishes every fragment or fails.
 * MoQ's live consumer skips stale or missing groups.
 
 [[evidence-grouping]]
@@ -649,7 +733,8 @@ The References section identifies the committed recordings and the measurements 
 Its reference therefore depends on the audio sample rate.
 * FFmpeg's development branch (checked at commit `a6e5d5f`) already rescales both to microseconds, so the HLS muxer's cut points would move with an FFmpeg update.
 * The mp4 muxer with `frag_keyframe` cuts at a keyframe when the time since the previous fragment reaches `min_frag_duration`, measured from the previous fragment rather than from any target.
-* With a constant frame rate and a forced keyframe at every period, the two rules agree; the first proof of concept confirmed that at 23.976 fps for encode, stream copy and a seek.
+* With a constant frame rate and a forced keyframe at every period, the two rules agree.
+The first proof of concept confirmed that agreement at 23.976 fps for encode, stream copy and a seek.
 * A 66 s stream copy has keyframes at 0, 6.5, 12, 18, 24.5, 30, 36.5, 42, 48, 54.5 and 60 s.
 There `min_frag_duration` just under 6 s produced 7 fragments where the HLS muxer produced 11 segments.
 The 5.5 s gap from 6.5 s to 12 s can never satisfy a 5.958 s minimum.
@@ -659,7 +744,8 @@ The 5.5 s gap from 6.5 s to 12 s can never satisfy a 5.958 s minimum.
 Those were 90 fragments into 30 segments for the NTSC copy, 11 into 11 for the irregular copy, and 11 into 11 for the variable-frame-rate encode.
 * The pinned FFmpeg decoded every grouped playlist.
 * The recorded fixtures of worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/39[#39] force keyframes with the list.
-There grouping matches the HLS muxer tick for tick on a constant-rate encode and on a stream copy whose first frame is at zero, and the recorder lists every other difference with its cause.
+In those fixtures, grouping matches the HLS muxer tick for tick on a constant-rate encode and on a stream copy whose first frame is at zero.
+The recorder lists every other difference and explains its cause.
 * The variable-frame-rate encode in those fixtures still yields 11 segments for 11, but its first frame is at 41.7 ms, and the HLS muxer measures from it.
 The list forces the first frame at or after each boundary, which comes before that boundary plus 41.7 ms.
 The HLS muxer therefore cuts only at the next forced keyframe, and from segment 1 on its segment numbers run one behind the grid's.
@@ -673,11 +759,15 @@ The HLS muxer's own run of that attempt's seek to 24 s measures from its first f
 A worker that closed the segment on that computed end would close it before its last fragment arrived.
 * The only reliable boundary signal is the next fragment's own start.
 FFmpeg emits a fragment only when it closes it, so the worker learns that a segment is complete one fragment late.
-* With a 1 s `-frag_duration` and `frag_keyframe`, the mp4 muxer still cut at every keyframe and also cut every 1.001 s: 91 fragments over 90 s at 23.976 fps.
+* With a 1 s `-frag_duration` and `frag_keyframe`, the mp4 muxer still cut at every keyframe and also cut every 1.001 s.
+The muxer produced 91 fragments over 90 s at 23.976 fps.
 * A stream copy with 2.002 s keyframes gave 90 fragments under the same bound.
 * Every fragment that did not begin at a keyframe began with a non-sync sample.
-* At a 1 s target the muxer cuts at the first packet after the target: measured spans were 1.001 s for H.264 and 1.033 s for SVT-AV1.
-* A fragment without a video track appears only after the last video sample: none, one, or several, one per target of audio that outlasts the video.
+* At a 1 s target the muxer cuts at the first packet after the target.
+Measured spans were 1.001 s for H.264 and 1.033 s for SVT-AV1.
+* Fragments without a video track appear only after the last video sample.
+There may be none, one, or several such fragments.
+The muxer emits one per target of audio that outlasts the video.
 * On the 90 s fixture that tail was three AAC samples at 89.941 s.
 * Audio that outlasts video by 5 s produced five such fragments.
 * A video-only tail appears when video outlasts audio.
@@ -687,7 +777,8 @@ FFmpeg emits a fragment only when it closes it, so the worker learns that a segm
 [[evidence-timeline]]
 === Timeline origin, seeks and preroll
 
-* `-copyts` keeps the source's own timestamp origin: a source whose timestamps begin at 12 s put its first fragment at 12 s, segment 2, for a job that asked for segment 0.
+* `-copyts` keeps the source's own timestamp origin.
+A source whose timestamps begin at 12 s put its first fragment at 12 s, in segment 2, for a job that asked for segment 0.
 * The HLS muxer hides that origin by measuring from the run's first packet.
 * `-start_at_zero` subtracts the source container's start time under `-copyts`, and that start time does not move with `-ss`.
 * With `-start_at_zero`, the same source's first fragment started at 0 for stream copy and for encode.
@@ -734,7 +825,8 @@ That offset is the negative of the most negative composition offset the `cmaf` f
 Under `-copyts` FFmpeg turns that constant rate into an internal variant that keeps the first timestamp (`fftools/ffmpeg_mux_init.c`, `VSYNC_VSCFR`).
 * The same variable-frame-rate source yielded 622 video packets through mp4 and 1976 through HLS.
 * The command line cannot request that internal variant, and the explicit `cfr` mode is a different thing.
-* After a seek to 30 s, `cfr` padded the output with 720 duplicate frames from time zero: 2157 video packets instead of 1437.
+* After a seek to 30 s, `cfr` padded the output with 720 duplicate frames from time zero.
+The output contained 2157 video packets instead of 1437.
 * The HLS recipe with automatic mode produced 1437 packets starting at 30.030 s.
 * Passing `-r` with the probed frame rate and no `-fps_mode` puts automatic mode back on the constant-rate path, and `-copyts` then selects that same internal variant.
 * On an irregular variable-frame-rate source, SVT-AV1 with the worker's frame-count GOP then produced a keyframe every 6.006 s and 1583 video packets, identical to the HLS muxer's output on the same source.
@@ -762,7 +854,10 @@ The MPEG-TS source's timestamps begin at 12 s, and its first output frame falls 
 * Under the expression, on the two sources whose first frame is after zero, the start-0 attempt itself put 15 of 16 boundaries one frame after the first frame at or after the boundary.
 * Under a list of the boundaries from the attempt's start sequence number on, every attempt forced the first frame at or after each boundary, and none of the 372 shared boundaries differed.
 * A list that also held boundaries before the attempt's first frame forced one extra keyframe per such entry, on consecutive frames.
-* An expression anchored with a predicted first frame, `gte(t+T0,(n_forced+k)*period)` with `T0` the first output frame at or after the seek position and `k` the start sequence number, aligned the constant-rate source whose first frame is at zero.
+* The expression `gte(t+T0,(n_forced+k)*period)` anchors forced keyframes to a predicted first frame.
+`T0` is the time of the first output frame at or after the seek position.
+`k` is the start sequence number.
+This expression aligned the constant-rate source whose first frame is at zero.
 * The anchored expression left 80 of 360 shared boundaries one frame apart on the variable-frame-rate and MPEG-TS sources.
 * From the start, `gte(t,prev_forced_t+period)` drifted one frame every seven segments at 23.976 fps.
 * Under `gte(t,prev_forced_t+period)`, a replacement attempt from 42 s landed one frame off the start-0 attempt at every later boundary.
@@ -849,7 +944,9 @@ The replacement attempt's accurate seek discards that source frame.
 * In interleaved runs under load, the fix took 4.0.1 from 13 failures in 40 to none.
 * Under production threading the pinned image failed 10 of 740 runs.
 * All 10 failures came among the 420 runs under CPU contention, and none among the 320 without it.
-* The GOP does not cause the bug: at two contended CPUs, 5 of 150 runs failed under the floored GOP and 4 of 200 under the extended GOP.
+* The GOP does not cause the bug.
+At two contended CPUs, 5 of 150 runs failed under the floored GOP.
+Under the extended GOP, 4 of 200 runs failed.
 * In one failure mode FFmpeg hangs at zero CPU while it keeps printing a progress line whose frame count no longer changes.
 * SIGTERM ended none of the hung runs.
 * FFmpeg's source shows that `q` cannot end such a hang either.
@@ -879,7 +976,9 @@ The segments behaved exactly as the HLS muxer's segments with one `moof` each di
 * Chromium with hls.js stalled at 29.98 s after the junction with a replacement attempt.
 This was the check's only failure, and it occurred with both segment formats.
 The audio gap at that junction was 1536 ticks (32 ms).
-* Chromium rejected the AC-3, E-AC-3 and HEVC codec strings before playback, and the test host's native players rejected AV1; those are decoder facts that the container does not change.
+* Chromium rejected the AC-3, E-AC-3 and HEVC codec strings before playback.
+The test host's native players rejected AV1.
+Changing the container does not change what these decoders support.
 * The real-player check of streamarr-server issue https://github.com/streamarr/streamarr-server/issues/433[#433], recorded in its pull request, played media that the real server produced with two worker builds.
 * One build sought each encoded replacement attempt directly to its first boundary.
 The other build followed this decision and sought each encoded replacement attempt one period early.
@@ -905,17 +1004,21 @@ Chromium skipped 0.125 to 0.167 s at the junction and stalled before the end.
 WebKit and AVPlayer passed every run of that scenario with both fMP4 and MPEG-TS.
 * The worker that sought one period early ran the replacement attempt's AAC encoder through the discarded period.
 * At every encoded junction, the difference between the next audio sample's start and the preceding audio sample's end ranged from −16.0 to +5.3 ms.
-A negative value means the samples overlap; a positive value means there is a gap.
+A negative value means the samples overlap.
+A positive value means there is a gap.
 * The worker that sought one period early passed all 6 Chromium runs for H.264 with 5.1 AAC across a replacement attempt.
 Video was continuous to the tick at every boundary.
 * Across the full matrix, the worker that sought one period early and the MPEG-TS control each passed 210 of 234 runs.
 Their results matched for every combination of stream and player.
-* The remaining failures are AV1 in WebKit and AVPlayer, which the test host's native decoders reject on both stacks; Chromium played AV1 on both.
+* The remaining failures are AV1 in WebKit and AVPlayer.
+The test host's native decoders reject AV1 on both stacks.
+Chromium played AV1 on both.
 * An iPhone Air (A19 Pro, Safari 26.6.1) played each of the 11 H.264 streams from the worker built to this decision and from the MPEG-TS control once.
 It played them natively and in hls.js 1.7.0 over `ManagedMediaSource`.
 * The iPhone also played the two encodes across a replacement attempt from the worker that sought directly to the boundary.
 The iPhone passed all 48 runs, including those additional encodes.
-* In a separate check on the same iPhone, Safari played SVT-AV1 output natively, uninterrupted and across a replacement attempt; the macOS host's native players had rejected it.
+* In a separate check on the same iPhone, Safari played SVT-AV1 output natively, uninterrupted and across a replacement attempt.
+The macOS host's native players had rejected that output.
 * Safari played the SVT-AV1 output both with the `av1C` box as the pinned runtime writes it and with that box corrected.
 * That box's sequence header differs from the one SVT-AV1 puts in the stream (worker issue #43).
 * All 7 runs of that check passed, including Apple's own AV1 sample and two H.264 controls.
@@ -934,7 +1037,9 @@ The fixtures README states which behaviour each recording verifies and explains 
 The Node recorder that made them (`src/test/fmp4-recorder`) runs in CI without FFmpeg to re-derive every recording's expectations.
 * Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/44[#44], which records a variable-frame-rate source whose gap between frames outlasts the period and proposes a seek that keeps the frame the gap repeats.
 * streamarr-server issue https://github.com/streamarr/streamarr-server/issues/446[#446], which has the server refuse a stream session that would encode video without a usable probed frame rate.
-* The write-ups of the proofs of concept behind this decision, with their harnesses, measurements and prior-art surveys, were not committed; the Evidence appendix summarises their conclusions.
+* The write-ups of the proofs of concept behind this decision were not committed.
+Neither were their harnesses, measurements or prior-art surveys.
+The Evidence appendix summarises their conclusions.
 * The GOP, suppressed-keyframe, audio-rate and forced-keyframe-mode recordings of 2026-09-23 used the same pinned worker image and were not committed either, so the Evidence appendix gives their results.
 The GOP and suppressed-keyframe recordings forced keyframes with the expression in place of the list.
 The recorded fixtures repeat floored-GOP and suppressed-keyframe cases under the list, at 23.976 fps from the start.

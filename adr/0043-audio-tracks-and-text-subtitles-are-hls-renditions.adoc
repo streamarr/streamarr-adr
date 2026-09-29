@@ -177,8 +177,10 @@ Each selected text subtitle track becomes a WebVTT subtitle rendition.
 Text subtitle tracks are SubRip, ASS and SSA, mov_text and WebVTT.
 A durable job extracts every text track of a media file to WebVTT in one pass.
 The job runs once per media file, never once per stream session.
+The job runs after the probe of the media file (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]).
 The job survives a server restart, like the probe of link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032].
 A worker extracts the tracks, because the server runs no FFmpeg (link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033]).
+Under link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033], the server dispatches the extraction job only to a worker that advertises support for subtitle extraction.
 Extracted cue times are in media time, the timeline that every job attempt shares.
 
 A subtitle rendition's media playlist lists one WebVTT segment per grid segment.
@@ -219,13 +221,24 @@ This ADR records no result for them yet.
 
 * 5.1 and other channel layouts
 * E-AC-3, DTS and TrueHD sources
+* ALAC sources
+* AAC at 44.1 kHz
 * Opus and FLAC audio renditions
 * Audio tracks with gaps
 * Sources with long GOPs. A GOP, or group of pictures, is the run of frames from one keyframe to the next.
 * Forced and hearing-impaired subtitles
 * Right-to-left languages
+* Subtitle extraction from MPEG-TS sources.
+On an MPEG-TS source, `-start_at_zero` sets media time zero from the streams that the job maps.
 * SVT-AV1 variants with audio renditions
 * A switch between variants during playback
+* An audio request for the segment just before a relocated attempt's first segment, with the real server and worker.
+A relocation starts a new job attempt at the requested segment when that segment lies before the running attempt's first segment, or too far beyond the running attempt's output (link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]).
+After 23 of 1,160 switches, hls.js first asked for the segment before the playhead's segment.
+Right after a relocation, that request lies before the new attempt's first segment.
+So ADR 0019's rule would relocate again.
+In 20 runs of a model of the server's relocation rule, no second relocation occurred.
+* The cause of the AVFoundation picture freeze that <<consequences>> describes
 * Safari on macOS and Safari on an iPhone
 
 An audio track that ends before the video is not on this list.
@@ -235,25 +248,10 @@ link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]'s rule
 === Explicitly deferred
 
 * Deliver image subtitles as renditions.
-* Name renditions from stream titles, and mark commentary, hearing-impaired and described tracks.
-The probe reads no stream title and no disposition flag besides default and forced.
-AVPlayer labels each option by its language alone.
-So two tracks in one language look identical in a standard menu.
-* Give the server a rule for an audio request for the segment just before a relocated attempt's first segment.
-A relocation starts a new job attempt at the requested segment when that segment lies before the running attempt's first segment, or too far beyond the running attempt's output (link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]).
-After 23 of 1,160 switches, hls.js first asked for the segment before the playhead's segment.
-Right after a relocation, that request lies before the new attempt's first segment.
-So ADR 0019's rule would relocate again.
-In 20 runs of a model of the server's relocation rule, no second relocation occurred.
-So the rule for such an audio request stays open.
-* Decide what a stream session offers for a text track whose extraction has not finished.
-* Measure subtitle extraction from MPEG-TS sources.
-On an MPEG-TS source, `-start_at_zero` sets media time zero from the streams that the job maps.
 * Test audio and subtitle renditions in tvOS apps, on Android, on cast receivers and on TVs.
 Test the renditions with hardware encoders too.
 The measurements for this ADR use macOS computers and an iPhone, and software encoders only.
 Issue https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] covers hardware encoders.
-* Find the mechanism of the AVFoundation picture freeze that <<consequences>> describes.
 
 [[consequences]]
 == Consequences
@@ -299,7 +297,7 @@ WebKit starts each cue about 0.2 s late, both in its native HLS and with hls.js.
 WebKit starts each cue late because WebKit evaluates cues only as often as it fires its `timeupdate` event.
 * AVFoundation froze the picture for 1.6 to 2.0 s after a seek in WebKit's native HLS and in AVPlayer.
 The freeze happened when a switch of subtitle language, the seek's start and the seek's target fell in the same segment.
-The mechanism is unknown, so the Apple clients need a closer look before they ship subtitle switching.
+The measurements so far have not found the cause of the freeze.
 * With `AUTOSELECT=NO`, Safari no longer turns on subtitles by itself when the audio language differs from the viewer's language.
 The client chooses subtitles.
 A forced track still selects itself.
@@ -326,7 +324,9 @@ A backward seek then relocated four jobs instead of one.
 * The server could designate one variant whose job attempts publish the audio renditions.
 link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019] starts only the requested variant.
 So the designated variant may not be running after the viewer's variant changes.
-The server would then need a rule that moves the designation to another variant.
+The server would then track which variant is designated.
+The server would also need a rule that moves the designation to the newly requested variant.
+Keeping the first delivery of each audio segment needs no designation and no such rule.
 * One separate job per stream session could write every audio rendition.
 That job reads the source region a second time and needs its own worker slot.
 A seek relocates that job as well as the variant's job attempt.

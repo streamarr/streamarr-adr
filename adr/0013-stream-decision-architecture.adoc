@@ -12,6 +12,11 @@ An image subtitle track that the viewer selects is burned into the video.
 NOTE: link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032] changes where the probe input comes from.
 The pipeline's probe step reads persisted container and stream rows; ffprobe runs during library file processing, not at stream creation.
 
+An amendment makes the video decision explicit for its first case: every video encode produces SDR.
+The playback capabilities epic (https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399]) delivers it.
+https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396] completes the video decision for HDR output.
+Its interim copy rule is the answer, for a client that declares no dynamic range, to an open question of link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036]: which playback paths a Dolby Vision or HDR10+ source permits.
+
 == Context
 
 Streaming negotiates source media (ffprobe) against client capabilities (StreamingOptions).
@@ -19,13 +24,127 @@ Each stream type -- video, audio, subtitle -- needs an independent decision.
 
 These independent decisions compose into a TranscodeDecision that drives FFmpeg command construction and HLS playlist generation.
 
+The rest of this section describes the system before the amendment.
+The video decision is implicit: a codec family and a compatibility flag.
+The server copies the video whenever the client names the source codec, and otherwise encodes it.
+The Apple TV app names `h264` and `hevc`, so every HEVC source is copied to it, HDR included.
+Every client counts as naming `h264`, so every client receives a copy of a 10-bit H.264 source.
+The worker keeps an encoded source's bit depth and transfer.
+A 10-bit source becomes 10-bit H.264, and an HDR source keeps its PQ or HLG transfer without tone mapping.
+Tone mapping converts HDR brightness and color into the smaller SDR range.
+A Dolby Vision profile 5 source comes out teal.
+The playlist's codec strings are constants, and they often disagree with the media.
+A codec string is the RFC 6381 value that names a stream's codec with its profile and level, as a variant's `CODECS` attribute lists it, such as `avc1.640028`.
+The stored probe cannot tell 8-bit from 10-bit or SDR from HDR, and it ignores a source's rotation.
+
 == Decision
 
-Model each stream type as a decision record: AudioDecision (COPY/TRANSCODE/NONE), SubtitleDecision (EXCLUDE/BURN_IN/SIDECAR/HLS/EMBED).
-Video decision is currently implicit (videoCodecFamily + videoCompatible boolean); becomes explicit when profile/level negotiation is added.
+=== Each stream type has its own decision record
+
+Model each stream type as a decision record: AudioDecision (COPY/TRANSCODE/NONE), SubtitleDecision (EXCLUDE/BURN_IN/SIDECAR/HLS/EMBED), and VideoDecision.
+VideoDecision replaces the implicit codec family and compatibility flag.
+It records whether the video is copied or encoded, and it holds the planned output that link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] defines.
 
 Stream decisions compose into TranscodeDecision -> TranscodeMode -> FfmpegCommandBuilder.
 Pipeline: probe -> decide per stream -> compose -> resolve mode -> build command.
+The job carries the video decision to the worker: the source's dynamic range, the planned output's dynamic range, and each variant's codec profile, level and codec string.
+The worker follows the decision and never works those values out again.
+link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] leaves the contract's field names to the implementation.
+
+The video decision reads facts that only probe version 2 stores, under link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]'s rules for probe versions.
+Those facts include the dynamic range, bit depth, chroma subsampling, rotation, output frame rate and codec string of the video stream.
+
+=== Every video encode produces 8-bit 4:2:0 SDR
+
+Every encode's planned output is 8-bit 4:2:0 SDR, with BT.709 color in limited range.
+Its dynamic range has an SDR compatible base, with HDR10+ and Dolby Vision absent.
+The server chooses the conversion, and the worker never chooses one on its own.
+The worker tone-maps when the source's compatible base is PQ, HLG or none and the planned output is SDR.
+A source whose compatible base is SDR or unspecified is converted to 8 bits without tone mapping.
+The worker never tone-maps a stream copy.
+Tone mapping uses the mobius curve with a 1000-nit peak, through the `tonemapx` filter of the pinned FFmpeg build.
+A Dolby Vision profile 5 source is reshaped with its RPU, the per-frame Dolby Vision picture-adjustment instructions, before tone mapping.
+An encode of a Dolby Vision profile 7 or 8.x source reads only the base layer and ignores its RPU.
+`tonemapx` leaks memory on every reshaped Dolby Vision profile 5 frame, and Streamarr accepts that leak.
+The memory returns when the attempt's FFmpeg process exits, and each replacement attempt starts a fresh process.
+
+*Why:* The worker encoded every 10-bit HEVC source to 10-bit H.264 (High 10) in 13 of 13 encodes.
+Firefox refused High 10 in 21 of 21 runs.
+WebKit's native player and AVPlayer refused PQ-tagged H.264 in 16 of 16 runs.
+The tone-mapped output was 8-bit BT.709 in limited range, and profile 5 lost its teal cast.
+Evidence: <<evidence-sdr-output>>, <<evidence-tone-mapping>>.
+
+=== Every encode forces a codec profile and level that the server computes
+
+The server computes each variant's codec profile and level, and every encode forces both.
+The codec profile is High for H.264, Main for AV1 and Main for HEVC.
+The server computes the H.264 level from ITU-T H.264 Table A-1, and the AV1 level from Annex A of the AV1 specification.
+Both computations use the output picture size after rotation and the exact output frame rate.
+The H.264 computation also uses the variant's maximum bitrate and buffer size, because Table A-1 limits both.
+For example, 1080p60 needs H.264 level 4.2 and AV1 level 4.1, and 720p60 needs H.264 level 3.2.
+The encoders accept a forced level that is too low without failing, so the computation must be right.
+
+*Why:* A level table of about 60 lines predicted the encoder's own level in 89 of 89 libx264 encodes and 85 of 85 SVT-AV1 encodes.
+Forcing wrote exactly the requested profile and level in 174 of 174 encodes.
+Evidence: <<evidence-levels-and-codec-strings>>.
+
+=== An encode's codec string is forced, and a copy's comes from the probe
+
+An encode's codec string is the one that its forced codec profile and level determine, such as `avc1.6400LL` or `av01.0.LLM.08`.
+A stream copy's codec string is the one the probe computed from the source's decoder configuration record.
+The playlist builds each variant's `CODECS` attribute from these strings and never from a constant.
+The job carries each variant's codec string to the worker.
+The worker reads every initialization segment it produces and fails the attempt when that segment's codec string differs from the job's.
+Every video copy keeps the source's Dolby Vision configuration record, which the worker preserves with FFmpeg's `-strict unofficial`.
+
+*Why:* The constant strings matched 6 of 59 video copies.
+Strings computed from the decoder configuration record matched 54 of 59 video copies, including all 50 H.264 and HEVC copies, and 42 of 42 audio copies.
+Evidence: <<evidence-levels-and-codec-strings>>.
+
+=== A stream copy carries no planned output range yet
+
+A copy's planned output holds no dynamic range until https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396] settles one.
+link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] forbids `UNSPECIFIED` in a planned output, and a copy of an untagged source has no other honest value.
+The produced copy still passes the source's HDR features through unchanged, as link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] requires.
+
+=== Until clients declare dynamic ranges, only SDR sources are copied
+
+This rule holds until clients declare the dynamic ranges they accept (https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395]).
+
+* Copy video only from a source whose compatible base is SDR or unspecified.
+* Copy H.264 only when it is 8-bit 4:2:0.
+* Keep today's check on top of both: the client must name the source's codec.
+* Encode everything else to 8-bit SDR, tone-mapped when the compatible base is PQ, HLG or none.
+
+The rule applies the default of streamarr/streamarr-server#395 for a client that declares nothing, H.264 High profile at 8 bits in SDR, to today's codec names.
+It is the interim answer to link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036]'s open question for a client that declares no dynamic range.
+A Dolby Vision or HDR10+ source with a PQ, HLG or no compatible base permits only an SDR encode.
+PQ and HLG sources without either feature get the same answer.
+A Dolby Vision source with an SDR compatible base, such as profiles 8.2 and 9, is still copied.
+No such source was measured.
+Apple TV loses HDR copies until streamarr/streamarr-server#395, and its HDR HEVC sources are encoded to SDR.
+This loss is an explicit deferral.
+
+A Dolby Vision profile 5 stream in MPEG-TS without the Dolby Vision descriptor reads as unspecified, which is a known gap.
+The rule then copies it, or encodes it without the reshape, and it plays teal.
+Only reading RPUs from the frames catches it (https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394]).
+
+*Why:* No playlist can yet describe an HDR copy truthfully to a client that declares no range.
+Apple's players refused PQ and Dolby Vision 8.1 copies in a variant declared SDR.
+Declaring the variant PQ or HLG made AVPlayer without an HDR display refuse it, and WebKit's native player timed out.
+Evidence: <<evidence-copies>>.
+
+[[explicitly-deferred]]
+=== Explicitly deferred
+
+* The HDR output choice: Original, the user's HDR choice, and 10-bit or HDR encodes (https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396], https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397] and https://github.com/streamarr/streamarr-transcode-worker/issues/27[streamarr/streamarr-transcode-worker#27]).
+* A copy's typed codec profile and level, and a copy's planned output range (streamarr/streamarr-server#396).
+* Client-declared dynamic ranges (streamarr/streamarr-server#395), which replace the interim copy rule.
+* HDR10+ and RPUs read from the frames, which close the profile 5 gap in MPEG-TS (streamarr/streamarr-server#394).
+* The playlist attributes that announce a produced range and supplemental codecs, which link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] already defers to the epic.
+* Computing an HEVC encode's level, which the server needs only once it encodes HEVC (https://github.com/streamarr/streamarr-server/issues/58[streamarr/streamarr-server#58] and https://github.com/streamarr/streamarr-server/issues/398[streamarr/streamarr-server#398]).
+* Choosing the HEVC sample-entry tag of a copy (https://github.com/streamarr/streamarr-transcode-worker/issues/18[streamarr/streamarr-transcode-worker#18]).
+Until then a copy keeps its source's tag, and its codec string names that tag.
 
 == Consequences
 
@@ -33,3 +152,94 @@ Pipeline: probe -> decide per stream -> compose -> resolve mode -> build command
 * Mode resolution considers all stream decisions (e.g. subtitle burn-in promotes REMUX -> FULL_TRANSCODE).
 * New stream types follow the same pattern.
 * TranscodeReason tracking can be added as metadata on each decision later.
+* Firefox's refusal of High 10 and Apple's refusal of PQ-tagged H.264 no longer reach encodes.
+* Encoding a 10-bit or HDR source costs less than before, because 8-bit output saves more than tone mapping costs.
+* A variant's codec profile and level depend only on the variant, so every job attempt of the variant forces the same values.
+The initialization segment then stays identical across attempts, as link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] requires.
+* A worker whose encoder ignores a forced level fails the attempt, rather than letting the playlist advertise a false codec string.
+* A full-length Dolby Vision profile 5 encode grows each FFmpeg process's memory until the attempt ends.
+* A source with a PQ, HLG or no compatible base plays as SDR on every client until the deferred HDR output choice lands.
+
+== Rejected Alternatives
+
+* 10-bit H.264 output (High 10): Firefox refuses it, and today's worker produces it from every 10-bit source.
+* Constant codec strings: they matched 6 of 59 video copies and stated level 4.0 for 1080p60 encodes that need 4.2.
+* Codec strings from ffprobe's named profile and level fields: they matched only 41 of 59 video copies, because they drop constraint flags, compatibility flags and the HEVC tier.
+* Reading every codec string from the produced initialization segments: the playlist would wait for the slowest variant, and one failed first attempt would block it.
+* Declaring `VIDEO-RANGE=PQ` or `VIDEO-RANGE=HLG` on copies today: AVPlayer without an HDR display refuses the variant, and WebKit's native player times out.
+* Copying HLG sources to clients that name the codec: the copies played, but the playlist could not state their HLG range without the refusal above.
+* Leaving tone mapping to the worker's discretion: link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] requires the server to choose every change to the source, and the worker would probe the source a second time.
+* The bt2390 tone curve at the same 1000-nit peak: it folds above the peak, so a brighter highlight renders darker than a 1000-nit one.
+* The hable tone curve: its pictures are darker overall.
+
+== Evidence
+
+Every measurement used the pinned worker image with FFmpeg 8.1.2, libx264 and SVT-AV1 on a 10-core host.
+The players were hls.js 1.7.0 in Chromium, Chrome, Firefox and WebKit, WebKit's native player, and AVPlayer on macOS 26.6.2.
+
+[[evidence-sdr-output]]
+=== 8-bit SDR output
+
+* The worker encoded every 10-bit HEVC source to H.264 High 10 (13 of 13).
+* Firefox's `MediaSource.isTypeSupported` was false for `avc1.6E00xx` in 21 of 21 runs, so hls.js dropped the variant.
+* WebKit's native player and AVPlayer failed PQ-tagged High 10 in 16 of 16 runs with `CoreMediaErrorDomain -12927`.
+The trigger was the PQ transfer in a variant that the playlist declared SDR, so an 8-bit step alone does not fix it.
+* All 14 tone-mapped outputs (7 sources, 2 encoders) were 8-bit 4:2:0, with BT.709 color in limited range.
+None carried static HDR metadata or a Dolby Vision configuration record.
+* Against Apple's own SDR rendering, the mean chroma offsets of tone-mapped HLG stayed within 1.5 code values.
+Profile 5's offsets against the rendering of its profile 8.1 twin moved from −35 and −44 to −9.5 and −11.3, and its teal cast disappeared.
+* libx264 at 1080p cost 9.11 CPU seconds per media second from an HDR10 source before the change, and 6.07 after it.
+
+[[evidence-tone-mapping]]
+=== Tone mapping
+
+* On 1080p PQ and HLG sources, tone mapping cost at most 0.1 CPU seconds per media second more than a plain 8-bit conversion.
+Reshaping profile 5 added about 1.1 to 1.2 CPU seconds per media second at 1080p60.
+* One tone-mapped 1080p libx264 variant ran at 1.20–1.43× real time from 1080p60 HDR sources, and at 0.90–1.01× from 2160p60 sources.
+* The bt2390 curve at 1000 nits mapped a 983-nit PQ grey to luma 235, and a 10,000-nit grey to 168.
+The mobius curve clips at 235 instead of folding.
+* Below the peak, mobius and bt2390 gave the same brightness (mean luma 92.9 and 92.1).
+The hable curve gave a mean luma of 76.9.
+* The color, player and seek checks ran with the bt2390 curve.
+Mobius was compared only for brightness, so the tone-mapping work (https://github.com/streamarr/streamarr-transcode-worker/issues/26[streamarr/streamarr-transcode-worker#26]) repeats the color and player checks with it.
+* `tonemapx` leaked about 3 KB per reshaped profile 5 frame.
+A two-hour film at 24 fps would grow one FFmpeg process by about 0.55 GB (derived).
+
+[[evidence-levels-and-codec-strings]]
+=== Levels and codec strings
+
+* When left alone, libx264 and SVT-AV1 each chose the smallest level whose limits fit the output.
+* A level table of about 60 lines predicted 89 of 89 libx264 encodes and 85 of 85 SVT-AV1 encodes.
+These covered 24 sources at every rung, from 144p to 2160p and from 2 to 2400 frames per second.
+* With the profile and level forced, both encoders wrote exactly the forced values in 174 of 174 encodes.
+* Both encoders also wrote a forced level that was too low: libx264 only warned, and SVT-AV1 said nothing.
+* On every rotated source, the server computed a 1920x1080 rung where FFmpeg wrote 608x1080, so the unforced level differed from the prediction.
+* Strings computed from the source's decoder configuration record matched 54 of 59 video copies and 42 of 42 audio copies.
+The 5 misses were AV1 in IVF or raw OBU files, whose sequence header the predictor did not parse.
+* ffprobe's named fields matched 41 of 59 video copies, and the server's constant strings matched 6.
+* Copying with `-strict unofficial` changed only the Dolby Vision boxes, on 15 of 15 sources.
+* A four-rung ladder's last initialization segment arrived up to 11.1 s after FFmpeg started.
+WebKit's native player and AVPlayer request a playlist once and give up after 20.2 s.
+
+[[evidence-copies]]
+=== Copies to clients that declare no range
+
+* WebKit's native player and AVPlayer failed the PQ and Dolby Vision 8.1 copies in a variant declared SDR, with `-12927`, whether or not the copy kept its Dolby Vision configuration record.
+* With `VIDEO-RANGE=PQ` or `VIDEO-RANGE=HLG`, AVPlayer without an HDR display failed 4 of 4 variants with `-1002`, and WebKit's native player timed out on 4 of 4.
+The same variants declared `VIDEO-RANGE=SDR` played.
+* HLG copies played in Chrome, Firefox, WebKit's native player and AVPlayer without the attribute, in one run each.
+* The profile 5 copy failed in every engine except Chrome, and there only without its configuration record.
+
+== References
+
+* https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399] (playback capabilities epic) and its issues https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394], https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395], https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396], https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397], https://github.com/streamarr/streamarr-server/issues/398[streamarr/streamarr-server#398] and https://github.com/streamarr/streamarr-server/issues/58[streamarr/streamarr-server#58].
+* https://github.com/streamarr/streamarr-transcode-worker/issues/22[streamarr/streamarr-transcode-worker#22] (8-bit 4:2:0 encodes), https://github.com/streamarr/streamarr-transcode-worker/issues/24[streamarr/streamarr-transcode-worker#24] (probe version 2), https://github.com/streamarr/streamarr-transcode-worker/issues/25[streamarr/streamarr-transcode-worker#25] (forced profile and level, checked codec strings) and https://github.com/streamarr/streamarr-transcode-worker/issues/26[streamarr/streamarr-transcode-worker#26] (tone mapping).
+* link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032], which governs probe versions.
+* link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036], which defines the dynamic range, the planned output and the produced output.
+* link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037], which makes every media segment fragmented MP4 and keeps each variant's initialization segment across attempts.
+* https://www.itu.int/rec/T-REC-H.264[ITU-T H.264, Annex A: profiles and levels (Table A-1)]
+* https://aomediacodec.github.io/av1-spec/[AV1 Bitstream and Decoding Process Specification, Annex A: profiles and levels]
+* https://datatracker.ietf.org/doc/html/rfc6381[RFC 6381: the codecs parameter]
+* https://datatracker.ietf.org/doc/html/rfc8216[RFC 8216: HTTP Live Streaming]
+* https://developer.apple.com/documentation/http-live-streaming/hls-authoring-specification-for-apple-devices/[Apple HLS authoring specification: `CODECS` and `VIDEO-RANGE`]
+* The measurements behind this amendment were not committed, so the Evidence section gives their results.

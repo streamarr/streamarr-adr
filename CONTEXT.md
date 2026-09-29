@@ -56,6 +56,11 @@ The probe job chooses the output frame rate once per file.
 Every job attempt therefore encodes on one frame grid, which is the same sequence of output frame times.
 _Avoid_: target frame rate, frame rate (unqualified) for the encode's rate
 
+**Codec string**:
+The RFC 6381 value that names one stream's codec with its profile, level and other parameters, as a variant's `CODECS` attribute lists it, such as `avc1.640028`.
+An encode's codec string follows from its forced codec profile and level, a stream copy's comes from the probe, and each must match the produced initialization segment.
+_Avoid_: codec (the family name alone), codec tag (the sample-entry four-character code), CODECS string (the attribute can list several)
+
 ### Playback records
 
 **Playback session**:

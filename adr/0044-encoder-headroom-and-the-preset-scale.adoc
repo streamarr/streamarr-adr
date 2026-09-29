@@ -1,0 +1,317 @@
+= ADR 0044: Encoder Headroom, Measured in Pixel Rate, Decides When Extra Variants Start, and One Preset Scale Serves Every Software Encoder
+
+== Status
+
+Proposed
+
+This decision fills in the capacity policy that link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018] left to follow a working path.
+It builds on link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019], which starts and restarts the jobs that produce each variant.
+It relies on the rule in link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] that the server refuses a replacement attempt whose initialization segment differs from the variant's.
+
+== Context
+
+In this ADR, a variant is one HLS variant of a stream session's quality ladder, in the sense of RFC 8216's `EXT-X-STREAM-INF`.
+A variant is never an HLS rendition, which is an `EXT-X-MEDIA` audio or subtitle track.
+Production speed is the media seconds that a job attempt produces per second of wall-clock time.
+A variant produced at 2× real time delivers a 6 s media segment every 3 s.
+
+Before this decision, the server started every variant of a session together whenever the worker had free job slots.
+A worker with four slots and no hardware encoder therefore ran four software encodes at once.
+The worker passed no `-preset`, so libx264, libx265 and libsvtav1 each ran at their library's default preset.
+Those defaults suit offline encoding and are slow for live transcoding.
+
+Measured on a 10-core arm64 host with libx264 at its default preset, four variants at once made every variant about three times slower.
+The 1080p variant then came out at about real time, which is too slow for a player to keep.
+Free job slots say nothing about how fast each job will run.
+The server needs a measure of the encoding load that a host can carry, and a rule for spending it.
+
+Streamarr can serve several users from one worker at once.
+Headroom that one session's extra variants spend is headroom that another user's requested variant may need.
+
+The preset also decides how much load each variant costs.
+libx264 and libx265 name their presets with words from `ultrafast` to `veryslow`, while libsvtav1 numbers its presets.
+An administrator needs one name that means the same trade-off for every software encoder.
+
+== Decision
+
+[[decision-pixel-rate]]
+=== Pixel rate is the unit of encoding load
+
+Pixel rate is width × height × frames per second.
+Streamarr expresses encoding load in pixel rate wherever it models, compares or reports that load.
+The output pixel rate uses a variant's output size and output frame rate.
+The source pixel rate uses the source video stream's decoded size and frame rate.
+Encoding load is never expressed as a resolution or as a preset name.
+
+*Why:* At the same cost per frame, a 24 fps film encodes about 2.5 times faster relative to real time than a 60 fps source of the same size.
+A resolution cannot tell those two apart.
+A faster preset saved less at small variants: `superfast` cost 0.28× `medium`'s CPU at 1080p but 0.53× at 360p, because decoding the 1080p source does not shrink with the output.
+Evidence: <<evidence-presets>>, <<evidence-tonemap>>.
+
+[[decision-cost-model]]
+=== A cost model predicts the load, and capacity bounds it
+
+The cost of one job attempt, in core-seconds per media second, is:
+
+* a(encoder, preset) × output pixel rate,
+* plus d(source codec) × source pixel rate,
+* plus the cost of tone mapping when the attempt tone-maps.
+
+The encode coefficient `a` depends on the encoder and its preset.
+The decode coefficient `d` depends on the source's codec.
+The decode term counts once per FFmpeg process, because every variant's job decodes the source on its own.
+A worker's capacity is its cores × an efficiency factor, minus the load the host carries besides that worker's encodes.
+The efficiency factor is below one because the operating system shares cores equally between FFmpeg processes, so a large variant falls behind while small ones run ahead.
+
+*Why:* With constants fitted per source and preset, the model predicted each measured libx264 variant's CPU within about 7 %.
+One four-variant ladder at `medium` needed 6.1 core-seconds per media second, so 10 cores held 1.6 ladders on paper.
+Yet a single ladder's 1080p variant ran at only 0.93× real time, while its 360p variant ran at 3.6× or faster.
+Evidence: <<evidence-model>>, <<evidence-presets>>.
+
+[[decision-threshold]]
+=== A variant holds in hls.js at about 1.35× real time
+
+A variant holds in a player when the player keeps fetching it instead of switching down.
+A variant holds in hls.js when it is produced at about 1.35× real time or faster.
+The eager-start rule and Automatic both protect this speed for every running variant.
+
+*Why:* hls.js 1.7.0 keeps a variant while 0.95 × its throughput estimate is at least the variant's `BANDWIDTH`.
+A variant produced at speed s downloads at about s × its bitrate, and the server advertises `BANDWIDTH` as 1.2 × `AVERAGE-BANDWIDTH`.
+Those two rules give a threshold of 1.33× to 1.37× across the measured ladder.
+With four variants running, 1080p came out at 0.94× to 1.06×.
+hls.js then made 12 to 16 emergency aborts per session and showed mostly 360p on a 25 Mb/s link.
+Evidence: <<evidence-threshold>>, <<evidence-contention>>.
+
+[[decision-calibration]]
+=== The server calibrates the model online
+
+The server derives each job attempt's production speed from the arrival times of its media segments.
+It fits the model's constants to those speeds while sessions play.
+A benchmark that the worker runs may seed the constants, so that a new worker does not start from nothing.
+Seeding is optional.
+
+*Why:* The same preset cost different amounts on different content.
+A grain-heavy clip cost 1.3× to 1.9× as much per media second as a 24 fps film at every variant.
+A single set of constants fitted across four sources missed individual ladders by up to about a quarter.
+A repeated run of one set of three variants measured 1.39× where the first run measured 1.19×.
+Evidence: <<evidence-model>>, <<evidence-presets>>.
+
+[[decision-eager-start]]
+=== Extra variants start only while every session keeps its headroom
+
+A requested variant is the variant whose segment a player asks for.
+An extra variant is any other variant of the same session.
+The server starts extra variants eagerly only when the model predicts that every running variant stays at about 1.35× real time or faster with them running.
+That prediction must leave room for several users' concurrent encodes.
+One session's extra variants never slow another session's requested variant below 1.35×.
+Otherwise only the requested variant starts or restarts, and each other variant starts when a player first requests it.
+Until the model is validated, only the requested variant starts or restarts.
+
+*Why:* Restarting only the requested variant made it about three times faster than restarting all four.
+hls.js in Firefox and WebKit's native player then kept 1080p for 76 % to 83 % of playback before a bandwidth drop, and AVPlayer kept it for 100 %.
+With all four variants running, AVPlayer took about 19 s to become ready to play.
+The cost falls on WebKit's native player, which started in 3.5 s instead of 2.0 s because no lower variant was running to fall back on.
+Evidence: <<evidence-contention>>.
+
+[[decision-preset-setting]]
+=== The preset is Automatic unless an administrator fixes one
+
+A preset is the encoder setting that trades encoding time for compression efficiency.
+Streamarr has one preset setting whose default is Automatic.
+An administrator can override Automatic with one fixed preset.
+Today Automatic means `veryfast` for libx264 and libx265, and `10` for libsvtav1.
+
+Once the headroom model is validated, Automatic becomes headroom-driven.
+The server then picks each variant's preset at session start, and the job carries it to the worker.
+Automatic picks the slowest preset from `veryfast` to `medium` that keeps every running variant at about 1.35× real time or faster.
+For libsvtav1 that range runs from `10` to `8`.
+
+*Why:* After a seek, `veryfast` used 0.38× `medium`'s CPU per media second at 1080p.
+The first 1080p media segment of a 6 s period completed in 1.35 s with `veryfast` and 3.18 s with `medium`.
+Six concurrent 1080p encodes of a 24 fps film each stayed at 1.2× real time or faster with `veryfast`, but only two did with `medium`.
+SVT-AV1's documentation uses preset 10 as its example for fast and real-time encoding.
+Evidence: <<evidence-presets>>, <<evidence-svt-av1>>.
+
+[[decision-preset-scale]]
+=== One preset scale serves every software encoder
+
+The preset scale maps each preset name to one preset of every software encoder.
+libx264 and libx265 use the name itself.
+libsvtav1 uses the number in its column.
+
+[cols="2,2,2,1,4",options="header"]
+|===
+|Preset name |libx264 |libx265 |libsvtav1 |Role under Automatic
+
+|`ultrafast` |`ultrafast` |`ultrafast` |`13` |Not used
+|`superfast` |`superfast` |`superfast` |`12` |Not used
+|`veryfast` |`veryfast` |`veryfast` |`11` |Automatic today for libx264 and libx265, and the fastest headroom-driven choice for them
+|`faster` |`faster` |`faster` |`10` |Automatic today for libsvtav1, and its fastest headroom-driven choice
+|`fast` |`fast` |`fast` |`9` |Inside the headroom-driven range for all three encoders
+|`medium` |`medium` |`medium` |`8` |The slowest headroom-driven choice for all three encoders
+|`slow` |`slow` |`slow` |`7` |Not used
+|`slower` |`slower` |`slower` |`6` |Not used
+|`veryslow` |`veryslow` |`veryslow` |`5` |Not used
+|===
+
+"Not used" means that Automatic never picks the preset; an administrator can still fix it.
+libsvtav1 presets below `5` are excluded from the scale because they are too slow for live encoding.
+Hardware encoders get rows only when streamarr/streamarr-server#398 verifies them.
+
+*Why:* SVT-AV1's documentation reserves presets 1 to 3 for extremely high efficiency when encoding time does not matter, and presets 4 to 6 for a balance of efficiency and reasonable compute time.
+It describes presets 7 to 13 as the range for fast and real-time encoding, with 12 as the fastest intended for human use.
+Its default preset is 8, which the scale places beside `medium`, the default of libx264 and libx265.
+Evidence: <<evidence-svt-av1>>.
+
+[[decision-fixed-preset]]
+=== A variant keeps its preset for its whole life
+
+The preset stays fixed for a variant.
+Every replacement attempt of a variant uses the preset of the variant's first job attempt.
+Neither Automatic nor the headroom model changes a running variant's preset.
+
+*Why:* The preset changes the initialization segment, and the server refuses a replacement attempt whose initialization segment differs (ADR 0037).
+Within one preset, level and source, the initialization segment was byte-identical across 592 attempts, three segment periods and every seek.
+It differed between `medium`, `fast`, `faster` and `veryfast` in 16 of 16 pairs of the same level and source.
+Evidence: <<evidence-init>>.
+
+=== Implementation
+
+Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/23[streamarr/streamarr-transcode-worker#23] passes an explicit preset to every software encoder and adds the Automatic setting with its administrator override.
+The encoder-headroom issue under epic https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399] adds pixel rate, the cost model, online calibration and the eager-start rule.
+The headroom-driven preset is the last step of that issue.
+
+[[explicitly-deferred]]
+=== Explicitly deferred
+
+* Rows for hardware encoders in the preset scale, and their constants and session limits in the model (https://github.com/streamarr/streamarr-server/issues/398[streamarr/streamarr-server#398]).
+* The validated model and its constants.
+This decision fixes the model's form, not the values of `a`, `d`, the tone-mapping cost or the efficiency factor.
+The measurements cover libx264 only; libx265 and libsvtav1 presets have not been measured on a ladder.
+* The rate-control choices, including any CRF values.
+The quality that each preset gives up at a fixed bitrate is still being measured.
+* Which variants a ladder includes when capacity is short (https://github.com/streamarr/streamarr-server/issues/402[streamarr/streamarr-server#402]).
+
+== Consequences
+
+* With one software worker on a host like the one measured and today's Automatic, the model will not let every variant of a ladder run at 1.35×.
+Only the requested variant starts or restarts in that case.
+* A player that switches to a variant that is not running waits for that variant's start: 0.8 s to 3.0 s alone in the measurements.
+WebKit's native player starts later and seeks later, because no lower variant is running to fall back on.
+* The server now owns production speed per attempt and a per-worker model, and it needs segment arrival times to calibrate it.
+Free job slots still bound how many jobs a worker accepts; headroom decides only whether extra variants start.
+* Encoders, presets and sources become comparable in one unit, so metrics can show load against capacity directly.
+* A faster preset costs compression efficiency at a given bitrate.
+Automatic accepts that cost today to keep variants above the hold threshold.
+* A preset change, whether by the administrator or by Automatic, reaches only variants that start afterwards.
+
+== Rejected Alternatives
+
+* Resolution as the unit of load ignores frame rate and decode cost.
+A 1080p60 source costs about 2.5 times a 1080p24 source at the same cost per frame.
+* Preset names as the unit of load mean different costs in different encoders.
+libx265 ran at about half libx264's speed at their default presets, and libsvtav1 numbers its presets.
+* A fixed number of variants, or free job slots, cannot track the host, the preset, the content or other sessions.
+Concurrent 1080p encodes at 1.2× or faster ranged from two at `medium` to six at `veryfast` on the same host.
+A grain-heavy clip fits proportionally fewer.
+* Changing a variant's preset mid-stream changes its initialization segment, which the server refuses for a replacement attempt.
+It would amount to a new variant.
+* Starting every variant eagerly made every variant about three times slower and put hls.js into a cycle of emergency aborts.
+
+== Evidence
+
+Each group below holds the measurements behind one part of the Decision.
+Unless a group says otherwise, the measurements ran on a 10-core arm64 host, in the pinned worker image with FFmpeg 8.1.2 and libx264.
+The ladder was 1080p at 5 Mb/s, 720p at 3 Mb/s, 480p at 1.5 Mb/s and 360p at 800 kb/s, with 6 s segments.
+The sources were a 24 fps live-action film, a 30 fps animation, a grain-heavy clip at 25 fps and a dark clip at 24 fps.
+
+[[evidence-contention]]
+=== Contention across variants
+
+* 170 timed runs compared each variant alone with all four together after a seek and at first play.
+* With all four together, every variant took 2.78 to 3.22 times as long to complete its first segment.
+A 1080p seek took 9.0 s instead of 2.9 s.
+* One variant alone already used 6.9 to 8.7 of the 10 cores.
+* While all four ran, 1080p came out at 0.94× to 1.06× real time, against 2.96× to 2.99× alone.
+720p came out at 1.64× to 1.87×, against 5.41× to 5.45× alone.
+* An independent re-run reproduced the ratios at 2.95 to 3.22 and the all-four 1080p speed at 1.06× to 1.08×.
+* 36 simulated sessions compared restarting all four variants with restarting only the requested one, in hls.js 1.7.0 in Chromium and Firefox, WebKit's native player and AVPlayer on macOS 26.6.2.
+* With all four, hls.js made 12 to 16 emergency aborts about 6 s apart, and 30 to 34 reversals of the fetched variant per session.
+AVPlayer became ready to play after about 19 s.
+* With only the requested variant, Firefox's hls.js kept 1080p for 76 % to 82 % of playback before the bandwidth drop, WebKit's native player for 82 % to 83 %, and AVPlayer for 100 %.
+Chromium's hls.js kept it for 38 % to 82 %.
+AVPlayer started in 3.4 s to 5.2 s.
+* A control with every variant at its single-variant speed produced no abort cycle, so the cycle comes from the production speed.
+
+[[evidence-threshold]]
+=== The hold threshold
+
+* The threshold is derived from hls.js 1.7.0's source and checked by an independent reading.
+* hls.js keeps a variant while 0.95 × its estimate is at least the variant's `BANDWIDTH`, and switches up at 0.7 × its estimate.
+* After half a segment or more without a byte, hls.js abandons the load and resets its estimate to the lower variant's `BANDWIDTH`.
+* A variant produced at speed s downloads at about s × its bitrate, which gives a threshold of 1.33× to 1.37× for this ladder.
+* Of 15 measured sets of running variants on the animation, only two fell below the threshold: 1080p with all four (1.06×) and 1080p with 720p and 480p (1.19×).
+That second set measured 1.39× in the independent re-run.
+
+[[evidence-presets]]
+=== Preset cost and capacity
+
+* CPU per media second after a seek, relative to `medium` and averaged over four sources: `fast` 0.80, `faster` 0.59, `veryfast` 0.38 and `superfast` 0.28 at 1080p.
+At 360p the same presets cost 0.86, 0.72, 0.59 and 0.53.
+* At 1080p, `medium` needed 2.8 to 4.3 CPU seconds per media second and `veryfast` needed 1.0 to 1.6.
+The grain-heavy clip was the costliest source in every cell, at 1.3 to 1.9 times the 24 fps film.
+* Time to the first 1080p media segment after a seek, median of 12: `medium` 3.18 s, `fast` 2.58 s, `faster` 1.95 s, `veryfast` 1.35 s, `superfast` 0.99 s.
+* Concurrent 1080p encodes of the 24 fps film with every stream at 1.2× or faster: `medium` 2, `fast` 3, `faster` 4, `veryfast` 6, `superfast` 8.
+* Full four-variant ladders with 1080p at real time: none at `medium`, one at `fast`, two at `veryfast` with no margin, and one with margin.
+* Ladder CPU per media second on the 24 fps film: `medium` 6.11, `veryfast` 2.61.
+* On a 14-core arm64 host with a synthetic 1080p30 source, libx265 ran at 53 fps at its default preset and 82 fps at `veryfast`.
+libx264 ran at 110 and 251 fps, and libsvtav1 at 98 fps at its default preset and 222 fps at `10`.
+* Pending: the bitrate each preset needs for the same VMAF as `medium` is still being measured.
+
+[[evidence-model]]
+=== Model fit
+
+* Fitted per source and preset on the steady-state runs, the model predicted each libx264 variant's CPU per media second within about 7 %.
+* One set of constants fitted across all four sources missed individual ladders by up to about 25 %, which the per-worker online calibration absorbs.
+* Measured ladders stayed below the CPU budget that the fitted costs give.
+At `veryfast`, 10 cores held 3.8 ladders of the 24 fps film on paper, but only two ran with 1080p at real time.
+
+[[evidence-tonemap]]
+=== Tone-mapping cost
+
+* These runs used 60 fps HDR sources, libx264 and libsvtav1, with an 8-bit tone-mapping chain using the BT.2390 curve.
+The cost of the chosen curve is re-measured when tone mapping lands.
+* Tone mapping added no measurable CPU on PQ and HLG sources at 1080p.
+It added 0.4 to 0.9 CPU seconds per media second on 2160p PQ and HLG sources.
+* The Dolby Vision profile 5 reshape added about 1.1 to 1.2 CPU seconds per media second at 1080p60 and 1.9 to 2.0 at 2160p60.
+* One 1080p variant of a 60 fps 2160p source ran at 0.81× to 1.01× real time, at or below real time even without tone mapping.
+A 24 fps film would encode about 2.5 times faster relative to real time at the same cost per frame.
+
+[[evidence-init]]
+=== Initialization segments and presets
+
+* Within one preset, level and source, the initialization segment was byte-identical across 592 attempts, across 3 s, 4 s and 6 s periods, and after every seek.
+* Across presets it differed between `medium`, `fast`, `faster` and `veryfast` in all 16 pairs of level and source.
+* `veryfast` and `superfast` produced identical initialization segments in the pinned libx264, a coincidence of its current preset tables that this decision does not rely on.
+* Every preset kept keyframes exactly on the forced list in 592 of 592 attempts and passed the junction check at 20 of 20 junctions.
+
+[[evidence-svt-av1]]
+=== SVT-AV1's preset guidance
+
+* SVT-AV1 accepts presets −1 to 13, reserves negative presets for debugging, and defaults to 8.
+* Its documentation calls presets 1 to 3 extremely high efficiency, presets 4 to 6 a balance of efficiency and reasonable compute time, and presets 7 to 13 fast and real-time encoding.
+* For fast or real-time encoding it says the preset must be high enough that the CPU encodes without stuttering, and gives preset 10 as its example.
+* It names 13 as the highest preset and 12 as the highest intended for human use.
+
+== References
+
+* https://www.rfc-editor.org/rfc/rfc8216[RFC 8216: HTTP Live Streaming] — variants (`EXT-X-STREAM-INF`) and `BANDWIDTH`.
+* https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Docs/Ffmpeg.md[SVT-AV1: Using SVT-AV1 within FFmpeg] — the `preset` parameter and fast or real-time encoding.
+* https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Docs/CommonQuestions.md[SVT-AV1: Common Questions] — what presets do and their ranges.
+* https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Docs/Parameters.md[SVT-AV1: Parameters] — the preset range and default.
+* https://trac.ffmpeg.org/wiki/Encode/H.264[FFmpeg: H.264 encoding guide] — libx264 preset names.
+* https://github.com/video-dev/hls.js/tree/v1.7.0[hls.js 1.7.0] — the ABR rules behind the hold threshold.
+* https://github.com/streamarr/streamarr-transcode-worker/issues/23[streamarr/streamarr-transcode-worker#23] — explicit presets and the Automatic setting.
+* https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399] — the playback capabilities epic, which holds the encoder-headroom issue.
+* https://github.com/streamarr/streamarr-server/issues/398[streamarr/streamarr-server#398] — verified hardware encoders.
+* https://github.com/streamarr/streamarr-server/issues/402[streamarr/streamarr-server#402] — which variants a ladder includes.

@@ -203,6 +203,21 @@ _Avoid_: encoder capability, codec
 A job attempt whose FFmpeg exited cleanly after the producer read all of its output and the server acknowledged every delivered segment, while the attempt was still active. A completed attempt does not mean the run covered the advertised timeline; the server owns coverage.
 _Avoid_: finished, done, success
 
+### Encoding load
+
+**Pixel rate**:
+Width × height × frames per second, the unit in which Streamarr models, compares and reports encoding load.
+_Avoid_: resolution or preset name as a measure of load, pixel count
+
+**Encoder headroom**:
+The encoding load a worker can still take on while every running variant, in every session it serves, stays fast enough for players to keep.
+_Avoid_: free slots, spare capacity (unqualified)
+
+**Encoder preset**:
+The encoder setting that trades encoding time for compression efficiency, named on one preset scale that maps each name to every software encoder's own preset.
+A variant keeps one preset for its whole life.
+_Avoid_: speed, quality setting, profile (a codec profile is a different fact)
+
 ### Catalog
 
 **Library**:

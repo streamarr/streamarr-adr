@@ -6,11 +6,17 @@ Accepted
 
 This ADR narrows the "RFC 8216 compliance" consequence of link:0008-server-generated-hls-playlists.adoc[ADR 0008] and refines link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018] by un-deferring its request-driven recovery slice while leaving 0018's multi-control-plane failover and durable job recovery deferred.
 
+This ADR replaces the eager start of every variant that the playback capabilities epic (https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399]) describes.
+Only the requested variant starts or restarts until the headroom policy of https://github.com/streamarr/streamarr-adr/blob/main/adr/0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044: Encoder headroom and the preset scale] allows extra variants.
+Its two-segment relocation gap depends on the decode-only early-start seek that https://github.com/streamarr/streamarr-adr/blob/main/adr/0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] will record.
+
 === Implementation status
 
 Implemented.
 `SegmentDeliveryCoordinator` owns the liveness-and-progress-bounded wait and the bounded replacement budget; `ProducerLifecycleService` owns every producer mutation under the per-session mutex, with the attempt fence at the replacement write (https://github.com/streamarr/streamarr-server/issues/252[issue #252]).
 Worker-side upload back-pressure retry and the worker's stall-bounded segment wait are tracked in https://github.com/streamarr/streamarr-transcode-worker/issues/1[worker issue #1, transferred from streamarr-server issue #253].
+The requested-variant start and the two-segment relocation gap are not implemented.
+The server still starts every variant together, and it relocates only when the segment 24 s before the requested one has not been produced.
 
 == Context
 
@@ -46,8 +52,51 @@ A slow or resource-starved transcode must not surface to the client as a missing
 When an advertised segment is requested and no live producer covers it, the server starts a fresh producer seeking to that segment; recovery is pull-based, triggered by the segment request, not a supervised push loop.
 A recovered producer emits a contiguous run of segments from the requested index and never a single isolated segment, so audio and video boundaries stay continuous.
 Presentation timestamps continue the absolute timeline across a replacement producer (`-copyts`, input seek, `-start_number`); MPEG-TS continuity counters reset at the replacement boundary — an accepted, documented deviation from RFC 8216 §3's uninterrupted-counter requirement, shared with comparable JIT servers, because a static playlist cannot signal a discontinuity after the fact.
-Seeking uses this same mechanism: a request beyond the produced window restarts a producer at the requested offset, and because segment numbering derives from the offset the playlist never changes.
-A seek is a planned restart, not recovery: a relocation-distance request revives even a variant whose recovery has been exhausted.
+Seeking uses this same mechanism: a relocation restarts a producer at the requested offset, and because segment numbering derives from the offset the playlist never changes.
+A relocation is a planned restart, not recovery: it revives even a variant whose recovery has been exhausted.
+<<decision-relocation-gap>> defines when a request relocates.
+
+[[decision-requested-variant]]
+=== Only the requested variant starts or restarts
+
+A variant is one quality level of the stream session's ladder, RFC 8216's Variant Stream (ADR 0018).
+The requested variant is the variant whose media segment the player has just requested.
+A stream session starts a variant's producer only when the player requests one of that variant's media segments.
+That producer starts at the requested segment.
+A relocation stops every producer of the stream session and restarts only the requested variant.
+Each other variant starts again when the player next requests one of its media segments.
+No variant starts before the player requests it, unless the headroom policy of https://github.com/streamarr/streamarr-adr/blob/main/adr/0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] allows it.
+That policy starts extra variants only while every running variant stays at about 1.35× real time or faster.
+It also leaves room for other users' encodes, so one session's extra variants never slow another session's requested variant.
+
+*Why:* Starting a ladder's four variants together made every variant about 3× slower than starting it alone.
+The 1080p variant then produced 0.94–1.08 media seconds per wall second, against 2.95–2.99 alone.
+A player that adapts to measured throughput keeps a variant only while the server produces it at about 1.35× real time or faster.
+Below that speed, hls.js abandoned 1080p 12–16 times a session and showed mostly 360p on a 25 Mb/s link.
+Restarting only the requested variant kept 1080p for 76–83 % of playback in Firefox with hls.js and in WebKit's native player, and 100 % in AVPlayer.
+Evidence: <<evidence-requested-variant>>.
+
+[[decision-relocation-gap]]
+=== The relocation gap is two media segments
+
+A relocation is a planned restart of the requested variant's producer at the requested media segment.
+The relocation gap is how far a request may lie ahead of a running producer's output before the server restarts rather than waits.
+A request relocates when the requested segment lies before the running attempt's first segment.
+A request also relocates when the segment one relocation gap before it has not been produced.
+Once the decode-only early-start seek ships, the relocation gap is 2 media segments: 12 s at 6 s segments.
+ADR 0037 will record that seek, which also removes the junction gap that https://github.com/streamarr/streamarr-transcode-worker/issues/44[streamarr/streamarr-transcode-worker#44] describes.
+Until then the gap stays at today's 24 s, 4 segments at 6 s segments.
+The 2-segment gap was measured with the new seek's restart times, not with today's seek.
+
+*Why:* Waiting for a running producer and restarting a new one cost about the same when the request lies a few media seconds ahead.
+With the decode-only early-start seek, a fresh 1080p attempt completed its first segment in 2.9–3.0 s, against 5.1–5.2 s with today's seek.
+The difference is the media encoded before the first segment: about 7 s instead of 13 s at 6 s segments.
+A running 1080p producer delivered about 3 media seconds per wall second.
+The extra wait is how much longer a viewer waits than the better of waiting and restarting.
+With that seek, a gap of 2 segments had the smallest worst-case extra wait over four variants: 0.9 s for 1080p alone.
+The 24 s gap made the same viewer wait 4.9–5.0 s longer than a restart would have taken.
+A gap of 1 segment measured within 0.9 s of 2 segments, but it also restarts whenever a player requests the next segment while the current one is still in production.
+Evidence: <<evidence-relocation-gap>>.
 
 === Distributed producers are the recovery redundancy
 
@@ -71,8 +120,11 @@ A deeper platform-specific stream validator remains an optional local check outs
 * Explicitly deferred:
 ** cross-worker session affinity, durable job recovery, and multiple control-plane replicas — deferred by ADR 0018 and unchanged here;
 ** low-latency HLS (partial segments, blocking playlist reload, preload hints, delta playlist updates, rendition reports) — it targets live-edge latency, presumes a growing playlist, and is incompatible with the on-demand static-playlist contract; it would be revisited only if true live streaming is introduced, under its own ADR;
-** a growing or event-type media playlist for on-demand content; and
-** object-store delivery and any worker-to-client segment path.
+** a growing or event-type media playlist for on-demand content;
+** object-store delivery and any worker-to-client segment path;
+** starting extra variants before the player requests them, until ADR 0044's headroom model is validated;
+** how the server answers a request for the initialization segment of a variant that has no producer yet, since the measurements served every variant's initialization segment at once; and
+** the relocation gap at segment lengths other than 6 s, which were not measured.
 
 == Consequences
 
@@ -82,6 +134,10 @@ Pull-based recovery makes a failed producer invisible to the viewer in the commo
 The active playlist structure suite converts structural protocol assumptions into always-on checks; the delivery suite lands with the recovery implementation tracked by issue 252.
 ADR 0008's blanket "RFC 8216 compliance" consequence is narrowed: server-generated playlists remain fully controlled, but on-demand delivery intentionally deviates from §6.2.1 immediate-availability as recorded here.
 The costs are added producer-lifecycle and liveness logic in the streaming layer, per-request liveness evaluation on the segment path, continuity validation across producer boundaries, and additional build and continuous-integration time for the protocol suites.
+Starting only the requested variant has its own costs.
+A switch to a variant that is not running waits for that variant's first segment: 0.8–3.0 s when it runs alone.
+WebKit's native player started in 3.5 s instead of 2.0 s, and its first seek took 10.7 s instead of 6.6 s, because no lower variant was running to fall back on.
+These costs are accepted, because every other measured player held a higher variant and started sooner.
 
 == Rejected Alternatives
 
@@ -92,7 +148,50 @@ The costs are added producer-lifecycle and liveness logic in the streaming layer
 * Per-segment isolated transcoding on demand — independent single-segment encodes glitch at audio and video boundaries; a contiguous run per producer is required.
 * A per-window snapshot of eligible execution targets — the snapshot is a retained copy of live fleet state that must be defended against every concurrent mutation (supersession fences, exhausted-window retention, new-target set-difference); review found two high-severity staleness-of-the-copy defects in exactly that machinery, while live consultation admits newly eligible targets without retaining a second copy of fleet membership.
 * Producer lifetime driven by subscription-style demand handles (a producer runs only while a delivery holds a handle) — stateless HLS clients hold no standing connection to hang a handle on; last-request-time reaping is the honest demand signal for HTTP delivery.
+* Starting every variant of the ladder together at session start and on every relocation — each variant ran about 3× slower, hls.js cycled between 1080p and 360p, and AVPlayer took about 19 s to become ready to play.
+* Starting the requested variant's ladder neighbours once its first segment exists — the neighbours took the requested variant's CPU, so 720p fell from 5.45× to 2.04× real time and hls.js rarely switched up to 1080p.
+* Starting extra variants whenever a worker has a free slot — a free slot says nothing about the CPU left, and four software encodes on four slots each ran too slowly to hold.
+* Keeping the 24 s relocation gap after the decode-only early-start seek ships — at its edge, a viewer waits 4.9–5.0 s longer than a restart takes.
 * A push-based media transport (Media over QUIC) in place of HLS — dissolves the wait-for-segment inference class entirely, but clients speak HLS; per the settled transport-experiment rule this belongs on a spike branch, revisited when WebTransport reaches consumer playback devices.
+
+== Evidence
+
+The measurements behind the requested-variant start and the relocation gap ran from 2026-09-25 to 2026-09-28.
+They used the pinned worker image, libx264 at its then-default `medium` preset, 6 s segments and a 1080p, 720p, 480p and 360p ladder.
+The host had 10 cores.
+The sources were two openly licensed test films.
+
+[[evidence-requested-variant]]
+=== Starting every variant together
+
+* Four variants started together took about 3× as long to complete their first segment as each started alone; the paired ratios were 2.78–3.22.
+A 1080p seek completed its first segment in 8.4–9.0 s instead of 2.9–3.0 s.
+An independent re-run measured paired ratios of 2.95–3.22.
+* One variant alone already used 6.9–8.7 of the 10 cores, and four together used 9.8–9.9.
+* While all four ran, 1080p produced 0.94–1.08 media seconds per wall second, against 2.95–2.99 alone.
+* hls.js 1.7.0 keeps a variant only while 0.95 × production speed × bitrate is at least the variant's `BANDWIDTH` (derived from its source).
+For the measured ladder that means a production speed of about 1.33–1.37× real time.
+* Four players ran 180 s sessions against a simulated server with the measured speeds: hls.js in Chromium and Firefox, WebKit's native player, and AVPlayer on macOS.
+Each session sought twice, and its link dropped from 25 Mb/s to 2.5 Mb/s after 100 s.
+* With every variant running, hls.js made 12–16 emergency aborts a session and showed 1080p for 0–10 % of playback before the drop.
+AVPlayer became ready to play after 18.9–19.2 s.
+* With only the requested variant running, 1080p held for 38–82 % of playback in Chromium with hls.js, 76–82 % in Firefox with hls.js, 82–83 % in WebKit and 100 % in AVPlayer.
+AVPlayer became ready after 3.4 s, and after 5.2 s in the independent re-run.
+* Starting the neighbours of the requested variant gave hls.js 1080p for 6–13 % of playback and made WebKit's first seek 14.2 s.
+
+[[evidence-relocation-gap]]
+=== The relocation gap
+
+* The decode-only early-start seek completed a replacement attempt's first 1080p segment in 2.92–2.99 s, against 5.14–5.20 s for today's one-period-early seek.
+It encoded 7.05 s of media before that segment was complete, against 13.01 s.
+* A running 1080p producer delivered 2.96–2.99 media seconds per wall second.
+Waiting for it cost about (6.5 s + d) ÷ 3, where d is how far the request lies ahead of its last delivered fragment.
+* With the decode-only seek, the worst extra wait at the gap's edge was measured for gaps of 1 to 4 segments.
+For 1080p alone it was 1.1–1.2 s at 1 segment, 0.9 s at 2, 2.9–3.0 s at 3 and 4.9–5.0 s at 4 (24 s).
+With all four variants running it was 3.3 s, 2.4–3.1 s, 8.1–9.5 s and 13.7–15.9 s.
+* An independent re-analysis found 1 and 2 segments within 0.9 s of each other in both directions.
+It confirmed that both stay far below the 24 s gap's 13–17 s with all four variants running.
+* A comparable just-in-time server uses the same 24 s rule: it restarts only when a request lies more than 8 of its 3 s segments past its last written segment.
 
 == References
 
@@ -101,3 +200,8 @@ The costs are added producer-lifecycle and liveness logic in the streaming layer
 * link:0008-server-generated-hls-playlists.adoc[ADR 0008: Server-Generated HLS Playlists] — compliance consequence narrowed here
 * link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018: Live Playback Authority and Outbound Transcode Workers] — request-driven recovery slice un-deferred here
 * https://github.com/streamarr/streamarr-server/issues/252[Issue 252: Recover playback automatically when an on-the-fly transcode dies mid-stream] — implementation and behavioral conformance tracking
+* https://github.com/streamarr/streamarr-adr/blob/main/adr/0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037: The Worker Delivers Fragmented MP4 Segments From FFmpeg's Standard Output, and HLS Media Segments Are fMP4 Only] — the replacement attempt's seek, which the relocation gap depends on
+* https://github.com/streamarr/streamarr-adr/blob/main/adr/0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044: Encoder headroom and the preset scale] — when extra variants may start before the player requests them
+* https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399: Let clients declare what they decode, and make the playlist match the media] — the playback capabilities epic, whose eager start of every variant is replaced here
+* https://github.com/streamarr/streamarr-transcode-worker/issues/44[streamarr/streamarr-transcode-worker#44: Keep the frame a variable-frame-rate gap repeats when an encoded replacement attempt seeks] — the junction gap that the decode-only early-start seek removes
+* https://github.com/video-dev/hls.js/tree/v1.7.0[hls.js 1.7.0] — the throughput rule from which the 1.35× threshold is derived

@@ -167,6 +167,10 @@ _Avoid_: dispatch attempt, run, session
 A job attempt that replaces an earlier one for the same variant under ADR 0019's recovery. It keeps the variant's initialization segment, media time and encoder backend.
 _Avoid_: retry, restart, replacement (unqualified)
 
+**Relocation**:
+A planned restart of the requested variant's job at the media segment a player requested, because that segment lies before the running job attempt's first segment or more than the relocation gap ahead of its output. It is not ADR 0019's recovery.
+_Avoid_: seek (the player's action), restart (unqualified), recovery
+
 **Format attempt**:
 One output format that the server chooses within a playback session, delivered by its own stream session and initialization segment. The initial format is the first attempt, and each Auto recovery after a format error adds one to the playback session's budget.
 _Avoid_: fallback stream, replacement (unqualified)

@@ -51,7 +51,7 @@ _Avoid_: profile (unqualified), DV profile
 
 **Output frame rate**:
 The frame rate at which every encode of a chosen video stream runs.
-The probe outcome stores the output frame rate as an exact fraction.
+The probe outcome, the job and the worker's FFmpeg argument carry the output frame rate as an exact fraction, never as a decimal.
 The probe job chooses the output frame rate once per file.
 Every job attempt therefore encodes on one frame grid, which is the same sequence of output frame times.
 _Avoid_: target frame rate, frame rate (unqualified) for the encode's rate

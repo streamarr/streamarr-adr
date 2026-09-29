@@ -198,6 +198,8 @@ Under ADR 0033, the worker runs ffprobe and returns the result through the same 
 [[probe-version-2]]
 === Probe version 2 records the facts the transcode decision needs
 
+Streamarr computes facts at probe time wherever it can.
+Playback then reads those facts instead of computing them.
 Probe version 2 adds these facts to a successful outcome:
 
 * The chosen video stream, which the transcode decision and the frame-rate rule read.
@@ -210,6 +212,11 @@ The probe fills the `VideoDynamicRange` from each stream's headers and configura
 The probe computes the codec string from the stream's decoder configuration record.
 Depending on the codec, that record is `avcC`, `hvcC`, `av1C`, `dvcC` or `dvvC`, or `esds`.
 An HEVC codec string carries the `hvc1` or `hev1` tag that a stream copy of that stream will carry.
+The worker alone holds the rule that picks that tag.
+https://github.com/streamarr/streamarr-transcode-worker/issues/18[streamarr/streamarr-transcode-worker#18] changes the tag rule.
+Any change to the tag rule bumps the probe version.
+A scan then refreshes the stored codec strings.
+If streamarr/streamarr-transcode-worker#18 is ready before probe version 2 ships, probe version 2 includes its tag rule.
 AV1 in an IVF or raw OBU (open bitstream unit) file has no `av1C`.
 For such a file, the probe parses the AV1 stream's sequence header instead.
 The probe never derives the codec string from ffprobe's named profile and level.
@@ -238,8 +245,8 @@ The measurements are in <<evidence-stream-facts>>.
 The output frame rate is the rate at which every encode of the chosen video stream runs.
 The frame-rate rule chooses the output frame rate.
 The worker's probe job runs the frame-rate rule on the chosen video stream.
-link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] will record the rule itself.
-This ADR records only where the rule runs and what the outcome keeps.
+link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] defines the frame-rate rule.
+This ADR decides only where the rule runs and what the outcome keeps.
 The probe job reports the rule's inputs and the rate that the rule chose.
 The inputs are the declared rates, the field order, the time base and Matroska's track statistics.
 When the rule scans packets, the inputs also include three scan results.
@@ -247,6 +254,9 @@ Those results are the motion rate that the scan measured, the number of frames t
 The motion rate is the frame rate at which the video's motion actually runs.
 The outcome stores those inputs and the output frame rate.
 The outcome stores the output frame rate as an exact fraction, such as 24000/1001, never as a decimal.
+The rate stays an exact fraction from the probe to FFmpeg.
+The database, the job and the worker's FFmpeg argument all carry the fraction.
+None of them converts the rate to a decimal.
 The server passes the stored rate to every job attempt.
 Every attempt of every stream session therefore encodes the file on one frame grid.
 A frame grid is the sequence of output frame times that an encode produces.
@@ -298,6 +308,31 @@ Their results did not change.
 With `-scan_all_pmts 0`, all 19 transport streams gave the same results as with the limits alone.
 The 14 transport streams without PGS subtitles then read 0.4–1.9 MB.
 The measurements are in <<evidence-probe-limits>>.
+
+[[keyframe-positions]]
+=== The server learns where the source's keyframes are before it offers a stream copy
+
+A keyframe position is the media time of a keyframe in the chosen video stream.
+The probe reads the keyframe positions from the source container's own index when the container has one.
+For MP4 and MOV, that index is the sync-sample table.
+For Matroska, that index is the Cues element.
+A durable background step finds the keyframe positions of every other source.
+In that step, a worker scans every packet of the chosen video stream.
+The step runs for MPEG-TS and AVI files, which have no such index.
+The step also runs for Matroska files whose Cues are sparse or missing.
+Like the probe step, the keyframe step survives a server restart.
+Stored keyframe positions are probe facts, so <<probe-version-rules,the probe version rules>> apply to them.
+The server offers a stream copy only after it knows the source's keyframe positions.
+Until then, the server encodes the video.
+A stream copy's media playlist advertises the real duration of each media segment.
+The keyframe positions determine those durations.
+link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] defines how a job attempt seeks to a keyframe position.
+
+*Why:* A stream copy's segment boundaries depend on the source's keyframes.
+Without keyframe positions, the playlist advertised the same fixed duration for every stream-copy segment.
+A stream-copy seek to a media segment that held no source keyframe failed with `SKIPPED_SEGMENT_NUMBER`, as https://github.com/streamarr/streamarr-server/issues/66[streamarr/streamarr-server#66] describes.
+A container index already lists the keyframes.
+The probe therefore needs no packet scan for a source that has one.
 
 === File events and quiet periods
 
@@ -506,7 +541,7 @@ The worker contract and command builder would also need those indices.
 That later version also reads HDR10+ metadata and Dolby Vision RPUs from frames.
 An RPU (reference processing unit) carries Dolby Vision's per-frame picture-adjustment instructions.
 The later version can then report HDR10+ and Dolby Vision as present or absent.
-https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] describes that later version.
+https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] describes that later version, including the worker's part of it.
 * Record a `MediaFileProbePropertyIssue`.
 Probe version 2 records no such issue, as ADR 0036 decides.
 https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] decides where these issues are stored.
@@ -548,6 +583,8 @@ A version 2 scan reads an estimated 570 GB more.
 The 95 % interval for that extra amount is 270–990 GB.
 At 110 MB/s, the extra 570 GB takes about 86 minutes to transfer.
 About 2 % of files also need the frame-rate rule's packet scan over 30 s of media.
+* A source whose container has no usable keyframe index plays through an encode until its keyframe step finishes.
+That step reads the whole file once.
 * Probe version 2 leaves three known gaps.
 First, `-scan_all_pmts 0` could omit the streams of a later program in a multi-program transport stream.
 The library sample held no multi-program transport stream.
@@ -626,6 +663,16 @@ Their results did not change.
 FFmpeg analyzes the start of the file before it seeks.
 With the limits, an input that seeks into one MPEG-TS source read 220 MB instead of 8.8 MB.
 That input also opened 0.5–0.9 s later.
+* Have the probe report the facts behind the HEVC tag and have the server apply the tag rule.
+The tag rule would then live in two places, the worker and the server.
+* Scan every packet of every file to find its keyframe positions.
+The scan would read whole files whose container index already lists the keyframes.
+* Read keyframe positions only from Matroska Cues.
+MP4, MOV, MPEG-TS and AVI sources would have no keyframe positions.
+The server could then never copy those sources.
+* Offer a stream copy before the server knows the source's keyframe positions.
+A seek to a media segment without a source keyframe would fail.
+The playlist would also advertise durations that the copy does not have.
 * Compute the output frame rate at session start or in each job attempt.
 Each attempt that needed a packet scan would read the file again.
 Attempts that run different versions of the rule could encode on different frame grids.
@@ -720,12 +767,14 @@ Its 95 % intervals come from bootstrap resampling.
 * https://datatracker.ietf.org/doc/html/rfc6381[RFC 6381: The "Codecs" and "Profiles" Parameters for "Bucket" Media Types]
 * https://aomediacodec.github.io/av1-isobmff/[AV1 Codec ISO Media File Format Binding: `av1C` and the codec string]
 * https://developer.apple.com/documentation/http-live-streaming/hls-authoring-specification-for-apple-devices/[Apple HLS authoring specification: the `CODECS` attribute]
+* https://github.com/streamarr/streamarr-server/issues/66[streamarr/streamarr-server#66: Keyframe timestamps in the probe, and stream-copy segment boundaries from them]
 * https://github.com/streamarr/streamarr-server/issues/248[Issue #248: Restore Maven reactor]
 * https://github.com/streamarr/streamarr-server/issues/415[Issue #415: Probe existing library files without waiting for a quiet period]
 * https://github.com/streamarr/streamarr-server/issues/417[Issue #417: Record why each item fails]
 * https://github.com/streamarr/streamarr-server/issues/418[Issue #418: Finish scans after the server records all required results]
 * https://github.com/streamarr/streamarr-server/issues/344[streamarr/streamarr-server#344: Backfill missing and outdated persisted outcomes], closed as not planned
-* https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394: The later probe version's facts]
+* https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394: The later probe version's facts, with its server and worker parts]
 * https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399: Playback capabilities epic]
 * https://github.com/streamarr/streamarr-server/issues/446[streamarr/streamarr-server#446: Refuse a video encode without a usable frame rate]
-* https://github.com/streamarr/streamarr-transcode-worker/issues/24[streamarr/streamarr-transcode-worker#24: The worker's half of the new probe version]
+* https://github.com/streamarr/streamarr-transcode-worker/issues/18[streamarr/streamarr-transcode-worker#18: Tag HEVC output as hvc1 in fMP4]
+* https://github.com/streamarr/streamarr-transcode-worker/issues/24[streamarr/streamarr-transcode-worker#24: The worker's part of probe version 2]

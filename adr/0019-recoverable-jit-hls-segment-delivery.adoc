@@ -78,21 +78,23 @@ A variant is what RFC 8216 calls a Variant Stream, as ADR 0018 records.
 The ladder is the stream session's set of variants.
 The requested variant is the variant whose media segment the player has just requested.
 The first-listed variant is the variant that the multivariant playlist lists first.
-The current segment is the media segment at the stream session's current playback position.
+The current segment is the first media segment of the stream session's most recently started job attempt.
+Before any job attempt starts, the current segment is the media segment at which the stream session starts.
 
 The server starts and restarts variants by these rules:
 
 * Creating a stream session starts the first-listed variant.
 * A request for the initialization segment of a variant that has no producer starts that variant at the current segment.
 * A request for a media segment of a variant that has no producer starts that variant at the requested segment.
-* A relocation stops every producer of the stream session and restarts only the requested variant.
-* After a relocation, each other variant starts again when the player next requests one of that variant's segments.
+* A relocation restarts only the requested variant at the requested segment.
+* After a relocation, a variant that is not running starts when the player next requests one of that variant's segments.
 * Apart from the first-listed variant, no variant starts before the player requests one of that variant's segments, unless the headroom model of link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] allows that variant to start early.
 * Until the headroom model is validated, the headroom model allows no variant to start early.
 
 These rules hold for now.
 The long-term goal is a rule based on capacity.
 With enough encoder headroom, every variant may start eagerly.
+Enough encoder headroom leaves room for several users' encodes at once.
 Several workers or a strong hardware encoder can provide that headroom.
 ADR 0044 owns the headroom model that decides when enough headroom exists.
 
@@ -106,15 +108,16 @@ Starting the variant at the initialization request saves the time until the play
 *Why other variants wait for a request:* Starting the four variants of the measured ladder together made every variant about 3× slower than starting that variant alone.
 With all four variants running, the 1080p variant produced 0.94–1.08 media seconds per wall second.
 Alone, the 1080p variant produced 2.95–2.99 media seconds per wall second.
-hls.js keeps a variant only when the server produces that variant at about 1.35× real time or faster.
+For this ladder, hls.js keeps a variant that the player waits on only when the worker produces that variant at about 1.35× real time or faster.
 ADR 0044 calls that speed the hold threshold.
 The shared rate of 0.94–1.08 is below the hold threshold.
 Below the hold threshold, hls.js abandoned 1080p 12–16 times a session.
 hls.js showed mostly 360p on a 25 Mb/s link.
-When the server ran only the requested variant, Firefox with hls.js kept 1080p for 76–82 % of playback.
-WebKit's native player kept 1080p for 82–83 % of playback.
-AVPlayer kept 1080p for 100 % of playback.
-Chromium with hls.js kept 1080p for 38–82 % of playback.
+In each measured player session, the link dropped from 25 Mb/s to 2.5 Mb/s after 100 s.
+When the server ran only the requested variant, Firefox with hls.js kept 1080p for 76–82 % of playback before the link dropped.
+WebKit's native player kept 1080p for 82–83 % of playback before the link dropped.
+AVPlayer kept 1080p for 100 % of playback before the link dropped.
+Chromium with hls.js kept 1080p for 38–82 % of playback before the link dropped.
 Evidence: <<evidence-requested-variant>>.
 
 [[decision-relocation-gap]]
@@ -124,8 +127,8 @@ A relocation starts a new job attempt for the requested variant at the requested
 The relocation gap is how far a request may lie ahead of a running job attempt's output before the server starts a new job attempt instead of waiting for the running one.
 The server relocates when the requested segment lies before the first segment of the running job attempt.
 The server also relocates when the segment one relocation gap before the requested segment has not been produced.
-The relocation gap is counted in media segments, so the rule holds at every segment length.
-Once the decode-only early-start seek ships, the relocation gap is 2 media segments.
+The relocation gap is counted in media segments.
+Once the decode-only early-start seek ships, the relocation gap is 2 media segments at every segment length.
 At 6 s segments, 2 media segments are 12 s.
 At 3 s segments, 2 media segments are 6 s.
 link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] specifies the decode-only early-start seek for an encoded job attempt that starts after the first segment.
@@ -135,22 +138,23 @@ Until the decode-only early-start seek ships, the relocation gap stays at 24 s.
 At 6 s segments, 24 s is 4 segments.
 The relocation gap changes from 24 s to 2 segments in one step, when the decode-only early-start seek ships.
 The 2-segment gap was measured with the restart times of the decode-only early-start seek.
-The one-period-early seek is the seek that the worker used when these measurements ran.
+The one-period-early seek is the seek that the production worker used while these measurements ran.
 With the one-period-early seek, a job attempt starts encoding one segment duration before its first segment.
 The 2-segment gap was not measured with the restart times of the one-period-early seek.
 
 *Why:* A request can lie a few media seconds ahead of a running producer's output.
 For such a request, waiting for that producer and restarting a new one cost about the same.
+The measurements timed both seeks.
 With the decode-only early-start seek, a fresh 1080p job attempt completed its first segment in 2.9–3.0 s.
 With the one-period-early seek, a fresh 1080p job attempt took 5.1–5.2 s.
 The time difference comes from the media that each job attempt encodes before its first segment.
 At 6 s segments, a job attempt with the decode-only early-start seek encodes about 7 s of media.
 A job attempt with the one-period-early seek encodes about 13 s.
-A running 1080p producer delivered about 3 media seconds per wall second.
+A running 1080p job attempt alone delivered about 3 media seconds per wall second.
 The extra wait is how much longer a viewer waits than under the faster of two choices.
 The two choices are waiting for the running producer and restarting a new producer.
 With the decode-only early-start seek, a gap of 2 segments had the smallest worst-case extra wait.
-That result held both with 1080p alone and with all four variants running.
+That result held for each of the four variants, both when that variant ran alone and when all four variants ran.
 For 1080p alone, the worst-case extra wait at a gap of 2 segments was 0.9 s.
 For 1080p alone, the 24 s gap made a viewer wait 4.9–5.0 s longer than a restart would have taken.
 The worst-case extra wait at a gap of 1 segment was within 0.9 s of the worst-case extra wait at 2 segments.
@@ -211,6 +215,9 @@ The alternatives include:
 
 The measured sessions started no variant when the stream session was created.
 Starting the first-listed variant at creation was not measured.
+Starting a variant at its initialization request was not measured either.
+The server currently lists the highest-quality variant first.
+Creating a stream session therefore starts the most expensive encode.
 
 == Rejected Alternatives
 
@@ -232,7 +239,7 @@ The neighbours took CPU from the requested variant.
 hls.js rarely switched up to 1080p.
 * Starting extra variants whenever a worker has a free slot.
 A free slot says nothing about how much CPU is left.
-Four software encodes on four slots each ran below the hold threshold.
+With four software encodes on four slots, the 1080p variant ran below the hold threshold.
 * Keeping the 24 s relocation gap after the decode-only early-start seek ships.
 For 1080p alone, when a request lies at the edge of the 24 s gap, a viewer waits 4.9–5.0 s longer than a restart takes.
 * A push-based media transport (Media over QUIC) in place of HLS — dissolves the wait-for-segment inference class entirely, but clients speak HLS; per the settled transport-experiment rule this belongs on a spike branch, revisited when WebTransport reaches consumer playback devices.
@@ -243,6 +250,7 @@ The measurements behind starting only the requested variant and behind the reloc
 The measurements ran FFmpeg inside the worker image that streamarr-server pinned at the time.
 The encoder was libx264 at the `medium` preset, which was the worker's default preset then.
 Segments were 6 s long.
+No other segment length was measured.
 The ladder had four variants: 1080p, 720p, 480p and 360p.
 The host had 10 cores.
 The sources were two openly licensed test films.
@@ -267,10 +275,11 @@ The players were hls.js in Chromium, hls.js in Firefox, WebKit's native player a
 Each session sought twice.
 After 100 s, each session's link dropped from 25 Mb/s to 2.5 Mb/s.
 * With every variant running, hls.js made 12–16 emergency aborts a session.
-An emergency abort is hls.js abandoning a stalled segment download and switching to a lower variant.
-Before the link dropped, hls.js showed 1080p for 0–10 % of playback.
+In an emergency abort, hls.js abandons a segment load that has received no byte for half a segment duration or more.
+Before the link dropped, hls.js showed 1080p for 0–13 % of playback.
+hls.js showed mostly 360p on the 25 Mb/s link.
 AVPlayer became ready to play after 18.9–19.2 s.
-* With only the requested variant running, 1080p held for this share of playback:
+* With only the requested variant running, 1080p held for this share of playback before the link dropped:
 ** 38–82 % in Chromium with hls.js;
 ** 76–82 % in Firefox with hls.js;
 ** 82–83 % in WebKit's native player;
@@ -279,6 +288,11 @@ AVPlayer became ready to play after 18.9–19.2 s.
 In the independent re-run, AVPlayer became ready to play after 5.2 s.
 * In these player sessions, no variant started when the stream session was created.
 A variant started only when the player requested one of that variant's media segments.
+The simulated server served every variant's initialization segment at once.
+Starting a variant at its initialization request was therefore not measured.
+* In the measured sessions, when the server started or relocated the requested variant, the server stopped only the other variants' job attempts that lay more than the relocation gap from the requested segment.
+After a seek, the server stopped every other job attempt.
+After a switch between variants, the server stopped no job attempt.
 * With only the requested variant running, WebKit's native player started in 3.5 s.
 With every variant running, WebKit's native player started in 2.0 s.
 WebKit's native player gave up on 1080p segment 0 after about 1.3 s and requested 360p segment 0.
@@ -289,7 +303,7 @@ With every variant running, WebKit's first seek took 6.6 s.
 With every variant running, WebKit resumed on 360p segments that already existed.
 With only the requested variant running, WebKit waited for 1080p segments.
 * A switch to a variant that was not running waited 0.8–3.0 s for that variant's first segment when that variant ran alone.
-* With the neighbours of the requested variant also running, hls.js showed 1080p for 6–13 % of playback.
+* With the neighbours of the requested variant also running, hls.js showed 1080p for 6–13 % of playback before the link dropped.
 WebKit's first seek took 14.2 s.
 When 1080p and 480p started beside 720p, 720p fell from 5.45× to 2.04× real time.
 
@@ -300,7 +314,7 @@ When 1080p and 480p started beside 720p, 720p fell from 5.45× to 2.04× real ti
 With the one-period-early seek, a replacement attempt took 5.14–5.20 s.
 * With the decode-only early-start seek, the replacement attempt encoded 7.05 s of media before its first segment was complete.
 With the one-period-early seek, the replacement attempt encoded 13.01 s.
-* A running 1080p producer delivered 2.96–2.99 media seconds per wall second.
+* A running 1080p job attempt alone delivered 2.96–2.99 media seconds per wall second.
 Waiting for the running producer cost about (6.5 s + d) ÷ 3.
 Here d is how far the request lies ahead of the producer's last delivered fragment.
 * The extra wait is how much longer a viewer waits than under the faster of two choices.

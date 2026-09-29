@@ -8,32 +8,42 @@ This decision amends link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.
 A variant's media segments carry video alone instead of multiplexed video and audio.
 Each audio rendition gets its own initialization segment, and its segment 0 starts without the AAC priming frame.
 This decision extends link:0013-stream-decision-architecture.adoc[ADR 0013].
-The transcode decision chooses the audio and subtitle tracks, and each selected track keeps its own decision.
+The transcode decision chooses the audio and subtitle tracks.
+Each selected track keeps its own decision.
 
 == Context
 
 This section describes the system before this decision.
 
-The server delivers one audio track, multiplexed into every variant's media segments.
+The server delivers one audio track.
+Every variant's media segments multiplex that track with the video.
 The transcode decision (link:0013-stream-decision-architecture.adoc[ADR 0013]) reads only the source's first audio stream.
 The worker maps that stream beside the first video stream.
+To map a stream is to tell FFmpeg to include the stream in its output.
 The multivariant playlist lists one audio `EXT-X-MEDIA` tag with no URI.
 The subtitle decision always excludes subtitles, so the worker drops every subtitle stream.
-Clients can already send an audio language and a subtitle language when they start a stream session, and the server ignores both.
+Clients can already send an audio language and a subtitle language when they start a stream session.
+The server ignores both languages.
 The persisted probe (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]) records each stream's index, codec, language, channel count, and default and forced flags.
-It records no stream title and no other disposition, such as commentary or hearing impaired.
+The probe records no stream title.
+Besides the default and forced flags, the probe records no disposition flag, such as commentary or hearing impaired.
 
-With one multiplexed audio track, another language would need new job attempts for every variant.
+Every variant multiplexes the one audio track.
+So a switch to another language would need new job attempts for every variant.
 The viewer would see the video restart.
-link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018] and link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] use variant for an option in the quality ladder.
-They reserve rendition for an alternate HLS track, such as an audio language.
-RFC 8216 lists a rendition in the multivariant playlist with an `EXT-X-MEDIA` tag, and a player switches renditions without leaving its variant.
+link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018] and link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] use the term variant for an option in the quality ladder.
+Those ADRs reserve the term rendition for an alternate HLS track, such as an audio language.
+Under RFC 8216, the multivariant playlist lists each rendition in an `EXT-X-MEDIA` tag.
+A player switches renditions without leaving its variant.
 
 link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] has the worker read fragmented MP4 (fMP4) from FFmpeg's standard output.
-The worker rebuilds every media segment on the grid, where segment `N` covers media time `[N × period, (N + 1) × period)`.
-link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] serves each variant as multiplexed fMP4 with one initialization segment, or init, per variant.
-Issue https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60], with https://github.com/streamarr/streamarr-transcode-worker/issues/15[streamarr/streamarr-transcode-worker#15], asks for text subtitles as WebVTT.
-It left open whether a variant's job or a separate job produces them.
+The worker rebuilds every media segment on a fixed grid.
+Media time is presentation time measured from the source container's start time.
+On the grid, segment `N` covers media time `[N × period, (N + 1) × period)`, where period is the segment duration.
+Under link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037], the server serves each variant as multiplexed fMP4.
+Each variant has one initialization segment, or init.
+Issue https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60] and issue https://github.com/streamarr/streamarr-transcode-worker/issues/15[streamarr/streamarr-transcode-worker#15] ask for text subtitles as WebVTT.
+The two issues left open whether a variant's job or a separate job produces the WebVTT subtitles.
 Issue https://github.com/streamarr/streamarr-apple/issues/4[streamarr/streamarr-apple#4] asks for audio and subtitle menus in the Apple client.
 
 == Decision
@@ -41,61 +51,81 @@ Issue https://github.com/streamarr/streamarr-apple/issues/4[streamarr/streamarr-
 [[decision-audio-renditions]]
 === Each selected audio track is its own audio rendition
 
-The server delivers every audio track that the transcode decision selects as its own HLS audio rendition.
-A rendition is an alternate track that the multivariant playlist lists in an `EXT-X-MEDIA` tag, with its own media playlist.
+The server delivers each audio track that the transcode decision selects.
+Each selected audio track becomes its own HLS audio rendition.
+A rendition is an alternate track that the multivariant playlist lists in an `EXT-X-MEDIA` tag.
+Each rendition has its own media playlist.
 A rendition is never a variant, and a variant is never a rendition.
-The multivariant playlist lists one `EXT-X-MEDIA:TYPE=AUDIO` tag per audio rendition, all in one group that every variant references.
-Every variant's media segments carry video alone, in a stream copy as well as in an encode.
+The multivariant playlist lists one `EXT-X-MEDIA:TYPE=AUDIO` tag per audio rendition.
+All these tags belong to one group.
+Every variant references that group.
+Every variant's media segments carry video alone, whether the worker copies the video stream or encodes it.
 A viewer switches audio language by selecting another rendition in the player.
-The video keeps playing, and the switch starts no job attempt.
+The video keeps playing.
+The switch starts no job attempt.
 
-The transcode decision (link:0013-stream-decision-architecture.adoc[ADR 0013]) chooses which audio tracks become renditions and which rendition is the default.
-Each selected track keeps its own audio decision, so one track can be copied while another is encoded.
-Each `EXT-X-STREAM-INF` tag's `CODECS` attribute lists every audio codec in the group, and its `BANDWIDTH` counts the largest audio rendition, as RFC 8216 requires.
+The transcode decision (link:0013-stream-decision-architecture.adoc[ADR 0013]) chooses which audio tracks become renditions.
+The transcode decision also chooses which rendition is the default.
+Each selected track keeps its own audio decision, so the worker can copy one track and encode another.
+Each `EXT-X-STREAM-INF` tag's `CODECS` attribute lists every audio codec in the group.
+Each `EXT-X-STREAM-INF` tag's `BANDWIDTH` attribute counts the largest audio rendition.
+RFC 8216 requires both rules.
 
-*Why:* In all five players tested, switching audio renditions never restarted or rewound the video.
+*Why:* In all five players tested, a switch between audio renditions never restarted or rewound the video.
 The players were Chromium, Firefox and WebKit with hls.js 1.7.0, WebKit's native HLS, and AVPlayer.
-Chromium played the new language after about 0.3 s, and Firefox after about 1.0 s, from their audio output queues.
+Chromium played the new language after about 0.3 s.
+Firefox played the new language after about 1.0 s.
+Both delays came from the browsers' audio output queues.
 Evidence: <<evidence-switching>>.
 
 [[decision-video-job]]
 === The variant's own job attempt produces the audio renditions
 
-One FFmpeg process per job attempt writes the video and every selected audio track, each as its own track, to the standard output that link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]'s producer reads.
+Each job attempt runs one FFmpeg process.
+That process writes the video and every selected audio track to the standard output that link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]'s producer reads.
+The video and each audio track stay separate tracks in that output.
 The worker splits that output into the variant's video segments and each audio rendition's segments.
 The worker runs no job attempt that carries audio alone.
-Every audio rendition uses link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]'s grid, so its segment `N` covers the same media time as segment `N` of every variant.
-Each audio sample joins the segment whose interval holds its start, as link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] places audio.
-Media time zero stays the source container's start time whatever tracks a job attempt maps.
+Every audio rendition uses link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]'s grid.
+So an audio rendition's segment `N` covers the same media time as segment `N` of every variant.
+Each audio sample joins the segment whose interval holds the sample's start time.
+link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] places audio the same way.
+Media time zero stays the source container's start time, whatever tracks a job attempt maps.
 
 The server designates one variant of the stream session whose job attempts publish the audio renditions.
 The other variants' audio is never served.
-Under link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033], the server dispatches a job with audio renditions only to a worker that advertises support for it.
-A worker without that support would ignore the new fields and write multiplexed output.
+Under link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033], the server dispatches a job with audio renditions only to a worker that advertises support for audio renditions.
+A worker without that support would ignore the job's new fields and write multiplexed output.
 
-*Why:* Audio carried in the video job played exactly like one separate job per language in all five players.
-It reads almost nothing extra: 0 to 0.5 % more bytes, against 3.0 times the video attempt's bytes for three separate Matroska or MPEG-TS audio jobs.
+*Why:* In all five players, audio that the variant's job attempt carried played exactly like audio from one separate job per language.
+Carrying the audio in the variant's job attempt read only 0 to 0.5 % more source bytes.
+Three separate audio jobs on a Matroska or MPEG-TS source would read 3.0 times the video attempt's bytes.
 Every language exists from the start of the stream session, so no first switch waits for a job to start.
 Every variant of one relocation wrote byte-identical audio, in 2,208 of 2,208 segment pairs, so any variant can publish it.
-On an MPEG-TS source, FFmpeg's `-start_at_zero` measured zero from the earliest mapped stream.
+On an MPEG-TS source, FFmpeg's `-start_at_zero` option measured media time zero from the earliest mapped stream.
 Mapping a different set of languages moved media time by 170.7 ms.
 Evidence: <<evidence-video-job>>.
 
 [[decision-init]]
 === Each audio rendition has one initialization segment
 
-Each audio rendition has its own init, which describes its one track.
-That init equals the init a single-track FFmpeg job writes for the same track.
-It depends on neither the job attempt, the variant nor the other tracks the job maps.
-link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] rejects a replacement attempt whose init differs from the stored init, and that rule applies to each audio rendition as it applies to each variant.
-Copied audio's init declares its bitrate unknown, as the worker's copies already do.
-How the worker derives each init from FFmpeg's combined `moov` belongs to the worker's implementation and tests.
+Each audio rendition has its own init, which describes the rendition's one track.
+That init equals the init that a single-track FFmpeg job writes for the same track.
+The init depends on neither the job attempt, nor the variant, nor the other tracks that the job maps.
+link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] rejects a replacement attempt whose init differs from the stored init.
+That rule applies to each audio rendition's init as it applies to each variant's init.
+The init of copied audio declares the audio's bitrate unknown.
+The worker already declares that bitrate unknown for the audio it copies today.
+FFmpeg writes one combined `moov` box that describes every track of the job.
+The worker's implementation and tests define how the worker derives each init from that box.
 
-*Why:* FFmpeg's combined `moov` numbered, flagged and grouped each audio track by the job's track set.
-Its copied AAC from MPEG-TS gave 5 different inits in 12 attempts, because the demuxer's bitrate estimate depends on where it starts.
-The derived inits gave one init per rendition across every attempt, variant and seek recipe, on Matroska, MP4 and MPEG-TS.
-Each was byte-identical to a single-track FFmpeg job's init, in 4 of 4 renditions.
-An init that declares copied AAC's bitrate unknown played in all five players exactly like one that declares it.
+*Why:* FFmpeg's combined `moov` box set each audio track's track number, enabled flag and alternate group from the set of tracks in the job.
+For copied AAC from an MPEG-TS source, the combined `moov` box gave 5 different inits in 12 attempts.
+The inits differed because the demuxer's bitrate estimate depends on where the demuxer starts.
+The derived inits gave one init per rendition on Matroska, MP4 and MPEG-TS sources.
+That result held across every attempt, every variant and both tested ways of seeking a replacement attempt.
+In 4 of 4 renditions, the derived init was byte-identical to a single-track FFmpeg job's init.
+An init that declares copied AAC's bitrate unknown played in all five players exactly like an init that declares the bitrate.
 Evidence: <<evidence-init>>.
 
 [[decision-priming]]
@@ -106,42 +136,54 @@ No audio rendition's segment then starts at a negative decode time.
 Multiplexed segments under link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] keep the priming frame, because hls.js places a multiplexed fragment by its video track.
 An audio-only fragment has no other track to place it by.
 
-*Why:* With the priming frame kept, a language switch in the first 6 s stopped hls.js playback for good.
-That happened in 10 of 10 runs in Chromium, Firefox and WebKit, and in 3 of 3 runs of an independent re-check.
-hls.js 1.7.0 reads the frame's decode time, the 64-bit two's complement of −1024, as an invalid signed value.
-It keeps only the upper 32 bits, 89,478 s at 48 kHz, as the segment's start.
-With the frame dropped, every run played.
+*Why:* When segment 0 kept the priming frame, a language switch in the first 6 s stopped hls.js playback for good.
+The stall happened in 10 of 10 runs in Chromium, Firefox and WebKit.
+The stall also happened in 3 of 3 runs of an independent re-check.
+The frame's decode time is the 64-bit two's complement of −1024.
+hls.js 1.7.0 reads that value as an invalid signed value.
+hls.js keeps only the upper 32 bits as the segment's start.
+At 48 kHz, that start is 89,478 s.
+When the worker dropped the frame, every run played.
 Evidence: <<evidence-priming>>.
 
 [[decision-subtitles]]
 === Text subtitles are WebVTT renditions extracted once per media file
 
-The server delivers every text subtitle track that the transcode decision selects as a WebVTT subtitle rendition.
+The server delivers each text subtitle track that the transcode decision selects.
+Each selected text subtitle track becomes a WebVTT subtitle rendition.
 Text subtitle tracks are SubRip, ASS and SSA, mov_text and WebVTT.
-A durable job extracts every text track of a media file to WebVTT in one pass, once per media file and never per stream session.
+A durable job extracts every text track of a media file to WebVTT in one pass.
+The job runs once per media file, never once per stream session.
 The job survives a server restart, like the probe of link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032].
-A worker performs the extraction, because the server runs no FFmpeg (link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033]).
+A worker extracts the tracks, because the server runs no FFmpeg (link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033]).
 Extracted cue times are in media time, the timeline that every job attempt shares.
 
 A subtitle rendition's media playlist lists one WebVTT segment per grid segment.
-Each segment holds every cue that overlaps its interval, at the cue's own media time.
-A cue that spans a boundary appears in both segments, as RFC 8216 requires.
+Each WebVTT segment holds every cue that overlaps the segment's interval.
+Each cue keeps its own media time.
+A cue that spans a segment boundary appears in both segments, as RFC 8216 requires.
 Every WebVTT segment carries the header `X-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000`.
-Every subtitle rendition carries `AUTOSELECT=NO`, except a forced track, which carries `FORCED=YES` and `AUTOSELECT=YES`.
-Turning subtitles on or off, or switching their language, starts no job attempt and never restarts the video.
+That header maps media time zero to cue time zero, so this ADR calls it the identity map.
+Every subtitle rendition carries `AUTOSELECT=NO`, except a forced track.
+A forced track carries `FORCED=YES` and `AUTOSELECT=YES`.
+Turning subtitles on or off starts no job attempt and never restarts the video.
+A switch of subtitle language also starts no job attempt and never restarts the video.
 
-*Why:* With the identity map, every player placed every cue identically, as it places the picture.
-A constant map of 900000 ticks put every cue 10 s late in every player.
-Switching subtitle language while a line was due showed the new line within 43 ms in every player but AVPlayer, whose worst case was 131 ms.
-With `AUTOSELECT=YES`, WebKit's native HLS turned subtitles back on after the page had turned them off, once the audio changed language.
-Extraction reads a whole Matroska file, whether it extracts one track or all of them.
+*Why:* With the identity map, every player placed each cue on the same timeline that the player uses for the picture.
+An `X-TIMESTAMP-MAP` header with a constant `MPEGTS` offset of 900000 ticks put every cue 10 s late in every player.
+When a viewer switched subtitle language while a line was due, every player except AVPlayer showed the new line within 43 ms.
+AVPlayer's worst case was 131 ms.
+In one test, every subtitle rendition carried `AUTOSELECT=YES`.
+The page turned subtitles off, and then the audio changed language.
+WebKit's native HLS then turned the subtitles back on.
+Extracting subtitles reads a whole Matroska file, whether the job extracts one track or all of them.
 Evidence: <<evidence-subtitles>>, <<evidence-extraction>>.
 
 [[decision-image-subtitles]]
 === Image subtitles stay burned into the video
 
 An image subtitle track, such as PGS, VobSub or DVB, never becomes a rendition.
-When the transcode decision selects one, it burns the track into the video (link:0013-stream-decision-architecture.adoc[ADR 0013]).
+When the transcode decision selects an image subtitle track, the variant's job attempts burn that track into the video (link:0013-stream-decision-architecture.adoc[ADR 0013]).
 The server never converts an image subtitle track to text.
 
 [[explicitly-deferred]]
@@ -149,19 +191,24 @@ The server never converts an image subtitle track to text.
 
 * Deliver image subtitles as renditions.
 * Name renditions from stream titles, and mark commentary, hearing-impaired and described tracks.
-The probe reads no title or disposition beyond default and forced.
-AVPlayer labels each option by its language alone, so two tracks in one language look identical in a standard menu.
+The probe reads no stream title and no disposition flag besides default and forced.
+AVPlayer labels each option by its language alone.
+So two tracks in one language look identical in a standard menu.
 * Choose which variant publishes the audio renditions, and move that role when the variant stops or exhausts its recovery budget (link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]).
 Moving the role is a junction on the grid, not a byte-identical continuation.
 ADR 0019 starts only the requested variant, so the designated variant may not be running when the viewer's variant changes, and the choice must keep the audio renditions produced.
 * Decide whether the other variants' job attempts map the audio tracks at all.
 Mapping them costs about 1.2 CPU seconds per minute of media for each encoded language in each variant, and nobody is served that audio.
-* Give the server a rule for an audio request just before a relocated attempt's first segment.
-After 23 of 1,160 switches, hls.js first asked for the segment before the playhead's.
-Right after a relocation, that request lies behind the new attempt's start, so ADR 0019's rule would relocate again.
-None occurred in 20 runs of a model of the server's relocation rule, so the rule stays open.
+* Give the server a rule for an audio request for the segment just before a relocated attempt's first segment.
+A relocation starts a new job attempt at a requested segment that lies beyond the running attempt's output (link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]).
+After 23 of 1,160 switches, hls.js first asked for the segment before the playhead's segment.
+Right after a relocation, that request lies before the new attempt's first segment.
+So ADR 0019's rule would relocate again.
+In 20 runs of a model of the server's relocation rule, no second relocation occurred.
+So the rule for such an audio request stays open.
 * Decide what a stream session offers for a text track whose extraction has not finished.
-* Measure extraction from MPEG-TS sources, whose zero `-start_at_zero` sets from the mapped streams.
+* Measure subtitle extraction from MPEG-TS sources.
+On an MPEG-TS source, `-start_at_zero` sets media time zero from the streams that the job maps.
 * Measure what the evidence did not cover.
 That includes 5.1 and other channel layouts, E-AC-3, DTS and TrueHD sources, and Opus or FLAC renditions.
 It includes audio tracks that end early or have gaps, sources with long GOPs, and forced and hearing-impaired subtitles.
@@ -172,17 +219,23 @@ It also includes real Safari, iOS and tvOS apps, Android, cast receivers and TVs
 [[consequences]]
 == Consequences
 
-* A viewer switches audio language and subtitles without restarting the video.
-Choosing an image subtitle track still needs new video job attempts, because it is burned in.
-* A switch costs a short picture hold in some players.
+* A viewer switches audio language and subtitles without a restart of the video.
+Choosing an image subtitle track still needs new video job attempts, because the job attempts burn that track into the video.
+* In some players, a switch holds the picture for a short time.
+During a hold, the same frame stays on screen.
 The median hold within 3 s of a switch was about 0.2 s in WebKit with hls.js and 0.17 s in AVPlayer.
-In WebKit's native HLS, unmuted, it was 0.45 s.
-Chromium and Firefox held 64 to 85 ms, about as long as in quiet playback.
-* hls.js flushes the whole audio buffer on every switch and fetches it again, 25 to 45 segments in the measurements.
+In WebKit's native HLS with the sound unmuted, the median hold was 0.45 s.
+In Chromium and Firefox, the hold lasted 64 to 85 ms.
+Playback without a switch held the picture about as long.
+* hls.js flushes the whole audio buffer on every switch and then fetches the buffer again.
+In the measurements, hls.js fetched 25 to 45 segments again after each switch.
 Clients may cap their forward buffer to bound that traffic.
-* Every language exists from the start of the stream session, and relocation stays session-wide.
-The server needs no audio-only job kind, no audio slot accounting and no start policy for languages.
-* Each encoded language adds about 1.2 CPU seconds per minute of media to each job attempt that carries it.
+* Every language exists from the start of the stream session.
+A relocation still applies to the whole stream session.
+The server needs no audio-only job kind.
+The server counts no worker slots for audio.
+The server needs no policy for when to start a language.
+* Each encoded language adds about 1.2 CPU seconds per minute of media to each job attempt that carries the language.
 Three languages added 8 % to a 360p attempt and 0.7 % to a 1080p attempt.
 * An audio rendition's segment `N` is never ready before the designated variant's video segment `N`.
 The audio follows that variant's encoding speed.
@@ -190,51 +243,69 @@ The audio follows that variant's encoding speed.
 Copied audio stays byte-identical across the junction.
 Encoded audio differs from the earlier attempt's, because the decoders start on a different packet.
 The splice adds at most 0.2 dB to that difference.
-* The first 21 ms of audio in segment 0 decode without the priming frame's overlap.
+* The first 21 ms of audio in segment 0 decode without the overlap that the priming frame would supply.
 No player showed an error.
-* link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]'s multiplexed variants and its single init per variant give way to video-only variants and per-rendition inits.
-The worker contract gains, additively under link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033], a rendition label on uploads, audio and WebVTT content types, the extraction job and a capability for each.
-* Every player places a cue relative to the first video frame, exactly as it places the picture.
-WebKit, native and with hls.js, starts each cue about 0.2 s late because it evaluates cues on its `timeupdate` cadence.
+* Video-only variants replace link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]'s multiplexed variants.
+An init per rendition replaces ADR 0037's single init per variant.
+* The worker contract gains a rendition label on uploads, audio and WebVTT content types, and the extraction job.
+Each addition is additive under link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033].
+The worker advertises a capability for each addition.
+* Every player places a cue relative to the first video frame, exactly as the player places the picture.
+WebKit starts each cue about 0.2 s late, both in its native HLS and with hls.js.
+WebKit evaluates cues only as often as it fires its `timeupdate` event.
 * AVFoundation froze the picture for 1.6 to 2.0 s after a seek in WebKit's native HLS and in AVPlayer.
-It happened when a subtitle change, the seek's start and its target fell in the same segment.
+The freeze happened when a switch of subtitle language, the seek's start and the seek's target fell in the same segment.
 The mechanism is unknown, so the Apple clients need a closer look before they ship subtitle switching.
-* With `AUTOSELECT=NO`, Safari no longer turns on subtitles by itself when the audio language differs from the viewer's.
-The client chooses subtitles, and a forced track still selects itself.
-* Extraction reads a whole Matroska file once per media file, and an MP4 file's subtitle samples only.
-On network storage a large Matroska file takes minutes, which the durable job absorbs before playback.
+* With `AUTOSELECT=NO`, Safari no longer turns on subtitles by itself when the audio language differs from the viewer's language.
+The client chooses subtitles.
+A forced track still selects itself.
+* The extraction job reads a whole Matroska file once per media file.
+From an MP4 file, the extraction job reads only the subtitle samples.
+On network storage, subtitle extraction from a large Matroska file takes minutes.
+The durable job does that work before playback.
 * WebVTT drops ASS styling.
 * The web and Apple clients gain audio and subtitle menus.
 
 == Rejected Alternatives
 
-* Keeping audio multiplexed into every variant forces new job attempts for every variant to change language, so the video restarts.
-It also encodes every language once per variant.
-* One FFmpeg job per audio track reads the source region again for each language, 3.0 times the video attempt's bytes at three languages.
+* Audio that stays multiplexed into every variant forces new job attempts for every variant when the viewer changes language.
+The video then restarts.
+That design also encodes every language once per variant.
+* One FFmpeg job per audio track reads the source region again for each language.
+At three languages, those jobs read 3.0 times the video attempt's bytes.
 An earlier measurement found that one such job delayed the video's first segment by 0.45 s on 8 MB/s network storage.
-Started only when a viewer selects the language, such a job froze the picture for about its time to the first segment, in every player.
-Started with the stream session, each job needs its own worker slot, and a worker with one slot refuses the second job.
+In one form of that design, a language's job started only when a viewer selected the language.
+Every player then froze the picture for about as long as the job took to produce its first segment.
+In the other form of that design, every job started with the stream session.
+Each job then needed its own worker slot, and a worker with one slot refused the second job.
 A backward seek then relocated four jobs instead of one.
 * Publishing whichever variant's audio arrives first needs no designation, but it uploads every language once per variant.
 Each language adds 100 to 150 KB to every segment upload.
-* Keeping the AAC priming frame in an audio rendition's segment 0 stops hls.js after a language switch in the first segment.
-* Extracting subtitles for each stream session reads a whole Matroska file every time a viewer starts playback.
-At 8 MB/s, a 20 GB file would take about 40 minutes, derived from the read rate.
-A windowed extraction misses a line that is already on screen at the window's start.
-* Converting image subtitles to text by optical character recognition adds a recognition engine to the worker, and its output can differ from the image.
-No measurement assessed its accuracy.
+* An audio rendition whose segment 0 keeps the AAC priming frame stops hls.js after a language switch in the first segment.
+* Subtitle extraction for each stream session reads a whole Matroska file every time a viewer starts playback.
+At 8 MB/s, a 20 GB file would take about 40 minutes, a figure derived from the read rate.
+An extraction of only a time window misses a line that is already on screen when the window starts.
+* Optical character recognition could convert image subtitles to text.
+That conversion adds a recognition engine to the worker.
+The engine's output can differ from the image.
+No measurement assessed the engine's accuracy.
 * A constant `X-TIMESTAMP-MAP` offset of 900000 ticks suits MPEG-TS output whose timestamps start at 10 s.
-On Streamarr's zero-based fMP4 timeline it put every cue 10 s late in every player.
+On Streamarr's zero-based fMP4 timeline, that offset put every cue 10 s late in every player.
 * `AUTOSELECT=YES` on every subtitle rendition lets Safari override the viewer's choice to turn subtitles off.
 
 == Evidence
 
-The measurements used one 300 s excerpt of a Creative Commons film at 1080p and 23.976 fps, with 2 s keyframes and 6 s segments.
-It carried three audio programmes: English AAC, copied, and two AC-3 tracks encoded to stereo AAC at 128 kb/s.
-It carried four text subtitle tracks: SubRip, ASS, UTF-8 SubRip and WebVTT.
+The measurements used one 300 s excerpt of a Creative Commons film at 1080p and 23.976 fps.
+The excerpt had a keyframe every 2 s, and the measurements used 6 s segments.
+The excerpt carried three audio tracks.
+The English track was AAC, and the worker copied it.
+The two other tracks were AC-3, and the worker encoded them to stereo AAC at 128 kb/s.
+The excerpt carried four text subtitle tracks: SubRip, ASS, UTF-8 SubRip and WebVTT.
 The source was muxed as Matroska, MP4 and MPEG-TS.
-The players were Chromium 151, Firefox 153 and WebKit 26.5, each with hls.js 1.7.0, and WebKit's native HLS and AVPlayer on macOS 26.6.2.
-Every encode ran in the pinned worker image, and the played variants were libx264 at 360p and 480p.
+Three players ran hls.js 1.7.0, in Chromium 151, Firefox 153 and WebKit 26.5.
+The other two players were WebKit's native HLS and AVPlayer on macOS 26.6.2.
+Every encode ran in the pinned worker image.
+The played variants were libx264 at 360p and 480p.
 An independent re-check with new harness code repeated the main results.
 
 [[evidence-switching]]
@@ -242,110 +313,149 @@ An independent re-check with new harness code repeated the main results.
 
 * In 15 runs with 135 audio switches, no run restarted the video and no player hit a fatal error.
 The re-check played 12 runs with 156 switches and found no backward jump outside a seek.
-* hls.js asked for the new language within 2 to 17 ms, and the native players within 43 to 86 ms.
-* Chromium played the new language after 0.30 s (median), and Firefox after 1.05 s.
+* hls.js asked for the new language within 2 to 17 ms.
+The native players asked for the new language within 43 to 86 ms.
+* The median delay before the new language played was 0.30 s in Chromium and 1.05 s in Firefox.
 The re-check measured 0.27 s and 0.99 s.
-The delay is the browser's audio output queue: the old language plays on, then the new one, with no silence between.
-* The median hold within 3 s of a switch was 64 to 72 ms in Chromium and 82 to 85 ms in Firefox, as in quiet playback.
-It was 200 ms in WebKit with hls.js and 160 to 171 ms in AVPlayer.
-* Unmuted, WebKit's native HLS held the picture at 39 of 39 switches, for 236 to 631 ms (median 449 ms).
-Muted, it held 52 to 83 ms.
+* The browser's audio output queue causes the delay.
+The old language plays on, and then the new language plays.
+No silence falls between the two languages.
+* The median hold within 3 s of a switch was 64 to 72 ms in Chromium and 82 to 85 ms in Firefox.
+Playback without a switch held the picture about as long.
+The median hold was 200 ms in WebKit with hls.js and 160 to 171 ms in AVPlayer.
+* With the sound unmuted, WebKit's native HLS held the picture at 39 of 39 switches.
+The holds lasted 236 to 631 ms, and the median hold was 449 ms.
+With the sound muted, WebKit's native HLS held the picture for 52 to 83 ms.
 * Chromium's rendered audio kept its offset to the media clock within −0.1 to +0.4 ms across 27 switches.
 * hls.js flushed the audio buffer at 91 of 91 switches and fetched 25 to 42 segments again.
 
 [[evidence-video-job]]
 === Audio carried in the video job
 
-* One FFmpeg process per attempt wrote the video and three languages as separate tracks, and a prototype split them.
-The split video-only rendition matched FFmpeg's 7,199 video packets, and each encoded language its 14,080 packets.
-* In the five players, it played like one audio-only job per language, in two runs each on the same scenario.
-Chromium heard switches after 262 ms against 272 ms, and Firefox after 1,034 ms against 1,004 ms.
-Holds, stalls and seek times differed by no more than run-to-run spread.
+* One FFmpeg process per attempt wrote the video and three languages as separate tracks.
+A prototype split those tracks.
+The split video-only variant segments matched FFmpeg's 7,199 video packets.
+Each split encoded language matched its 14,080 packets.
+* In the five players, the split output played like one audio-only job per language.
+Each player ran each design twice on the same scenario.
+Chromium played a switched language after 262 ms with the split output and after 272 ms with separate jobs.
+Firefox played a switched language after 1,034 ms with the split output and after 1,004 ms with separate jobs.
+Holds, stalls and seek times differed by no more than the spread between runs.
 * In 37 runs across Matroska, MP4 and MPEG-TS, no run failed or jumped backwards.
-* At 96 of 96 audio junctions the step between attempts was 0 samples, and every first frame sat on the start-0 attempt's frame grid.
-At 24 of 24 video junctions, segment `K` started on the start-0 attempt's frame time.
+* A junction is the segment boundary where one job attempt's output ends and a replacement attempt's output begins.
+At 96 of 96 audio junctions, the step between attempts was 0 samples.
+At every audio junction, the replacement attempt's first audio frame sat on the frame grid of the attempt that started at 0.
+At 24 of 24 video junctions, the replacement attempt's first segment started at the frame time that the attempt from 0 gave that segment.
 * Copied audio was byte-identical across junctions.
 Encoded audio differed, because AC-3 dither and AAC noise substitution depend on where the decoder starts.
-Decoded, the splice added −11.1 to +0.2 dB to the replacement's own difference.
-* Audio segments were byte-identical across variants: 2,208 of 2,208 pairs, and 272 of 272 in the re-check.
+Away from a junction, the replacement attempt's encoded audio already differs from the earlier attempt's encoded audio.
+After decoding, the junction added −11.1 to +0.2 dB to that difference.
+* Audio segments were byte-identical across variants in 2,208 of 2,208 pairs.
+The re-check found 272 of 272.
 * Carrying three languages read 0 to 0.5 % more source bytes.
-Three audio-only jobs would read 3.0 times the video attempt's bytes for Matroska and MPEG-TS, and 1.6 times for MP4.
-* One encoded language cost about 1.2 CPU seconds per minute of media, in the video attempt or in its own job.
-* The first 1080p segment after a seek took 2.27 s without audio and 2.40 s with three languages (medians of 5).
-* Each audio segment completed in the same FFmpeg fragment as its variant's video segment, 1,170 of 1,170 per track.
+Three audio-only jobs would read 3.0 times the video attempt's bytes for Matroska and MPEG-TS.
+For MP4, three audio-only jobs would read 1.6 times the video attempt's bytes.
+* One encoded language cost about 1.2 CPU seconds per minute of media.
+The cost was the same in the video attempt and in a separate job.
+* Over 5 runs each, the first 1080p segment after a seek took a median of 2.27 s without audio and 2.40 s with three languages.
+* In 1,170 of 1,170 cases per track, each audio segment completed in the same FFmpeg fragment as its variant's video segment.
 The re-check found 760 of 760.
-* In a model of the server's relocation rule, a backward seek relocated once, where one job per language relocated four times.
-* In the audio-only job design, a language whose job started at the viewer's selection froze the picture in every player.
-The hold lasted 0.34 to 1.07 s when the first segment took 0.7 s, and 5.2 to 7.3 s when it took 6 s.
-At low load, FFmpeg alone produced that first segment in 0.04 s (copy) to 0.23 s (encode).
-* On MPEG-TS, mapping English alone put the zero 170.7 ms later than mapping all three languages.
-With `-discard none` on the input, the zero stayed at the container's earliest stream whatever was mapped.
-* From an MP4 source, Firefox with hls.js played 6 of 6 runs from 0.
-The previous producer's multiplexed output, which concatenated FFmpeg's fragments, played 0 of 6 cleanly.
+* In a model of the server's relocation rule, a backward seek relocated once.
+With one job per language, the same seek relocated four times.
+* In the audio-only job design, every player froze the picture when a language's job started only at the viewer's selection.
+The freeze lasted 0.34 to 1.07 s when the first segment took 0.7 s.
+The freeze lasted 5.2 to 7.3 s when the first segment took 6 s.
+At low load, FFmpeg alone produced that first segment in 0.04 s when it copied the audio and in 0.23 s when it encoded the audio.
+* On MPEG-TS, mapping English alone put media time zero 170.7 ms later than mapping all three languages.
+With `-discard none` on the input, media time zero stayed at the container's earliest stream, whatever streams the job mapped.
+* From an MP4 source, Firefox with hls.js played the split output from position 0 in 6 of 6 runs.
+The previous producer concatenated FFmpeg's fragments.
+The previous producer's multiplexed output played 0 of 6 runs cleanly.
 link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]'s rebuilt segments solve that case on their own.
 
 [[evidence-init]]
 === Initialization segments
 
-* FFmpeg's combined `moov` gave each audio track the track number of its position in the job.
-It wrote every audio track after the first disabled, and it put tracks in different alternate groups when two carried the default disposition.
+* FFmpeg's combined `moov` box gave each audio track the track number of the track's position in the job.
+FFmpeg marked every audio track after the first as disabled.
+When two tracks carried the default disposition, FFmpeg put them in different alternate groups.
 * Copied AAC from MPEG-TS gave 5 distinct inits in 12 attempts, because the bitrate hints depend on the start point.
-The re-check found 3 distinct in 3.
+The re-check found 3 distinct inits in 3 attempts.
 * The prototype rewrote four fields: the track number, the enabled flag, the alternate group, and copied audio's bitrate hints.
-It then produced one init per rendition across every attempt, variant and seek recipe.
-Each was byte-identical to a single-track FFmpeg job's init: 4 of 4 renditions, and 3 of 3 in the re-check.
+The prototype then produced one init per rendition across every attempt, every variant and both tested ways of seeking a replacement attempt.
+For 4 of 4 renditions, the rewritten init was byte-identical to a single-track FFmpeg job's init.
+The re-check found 3 of 3.
 * A disabled audio track played anyway in Chromium, WebKit's native HLS and AVPlayer.
-* An init with copied AAC's bitrate declared unknown was played beside a control init that declared it.
-Every player passed every run with either init, except Firefox from 0 on MP4.
-That case failed at segment 0 with both inits, for a cause in segment 0 that the init does not touch.
+* The test compared two inits for copied AAC.
+One init declared the bitrate unknown.
+A control init declared the bitrate.
+* Every player passed every run with either init.
+The one exception was Firefox playing from position 0 on an MP4 source.
+That case failed at segment 0 with both inits.
+In that test, segment 0 held several `moof` and `mdat` pairs, and Firefox kept only the first pair.
+The init does not affect that cause.
 * Chromium and Firefox rendered sample-identical audio from both inits in 96 of 96 comparisons.
 * hls.js, Chromium and Firefox skip the bitrate fields.
 AVFoundation and FFmpeg compute the data rate from the samples.
-No parser rejects zero.
+No parser rejects a bitrate of zero.
 
 [[evidence-priming]]
 === The priming frame
 
-* The AAC priming frame's decode time is −1024 ticks, written as a version 1 `tfdt` of 2^64^ − 1024.
-* hls.js 1.7.0 treats that value as an invalid signed decode time and keeps 2^32^ − 1 ticks as the segment's start.
-It logs its warning only with debug logging on.
-* With the frame kept, switches at 2, 5 and 9 s stalled playback for good at 5.93 to 5.97 s in Chromium and WebKit, and at 6.0 to 8.1 s in Firefox.
-That was 10 of 10 runs, and 3 of 3 in the re-check.
-* A switch after the first segment did not trigger it.
+* The AAC priming frame's decode time is −1024 ticks.
+A version 1 `tfdt` box writes that time as 2^64^ − 1024.
+* hls.js 1.7.0 treats that value as an invalid signed decode time.
+hls.js keeps 2^32^ − 1 ticks as the segment's start.
+hls.js logs a warning about that value only when debug logging is on.
+* When segment 0 kept the frame, switches at 2, 5 and 9 s stalled playback for good.
+Playback stalled at 5.93 to 5.97 s in Chromium and WebKit, and at 6.0 to 8.1 s in Firefox.
+The stall happened in 10 of 10 runs, and in 3 of 3 runs of the re-check.
+* A switch after the first segment did not trigger the stall.
 * WebKit's native HLS and AVPlayer played the priming frame in every run.
 * Multiplexed segments hide the failure, because hls.js syncs a multiplexed fragment on its video track.
-* With the frame dropped, every run in every player played.
+* When the worker dropped the frame, every run in every player played.
 
 [[evidence-subtitles]]
 === Subtitle renditions
 
-* With the identity map, no map, or a map per segment, every player that ran the case placed a cue served at 41.062 s at 41.020 s.
-That is one frame early, because each player starts its timeline at the first video frame.
+* The test served a cue at 41.062 s with three header choices: the identity map, no map, and a separate map in each segment.
+With each choice, every player that ran the case showed the cue at 41.020 s.
+That time is one frame early, because each player starts its timeline at the first video frame.
 * With a constant map of 900000 ticks, every player showed the same cue at 51.02 s, 10 s late.
-* Switching subtitle language while a line was due showed the new line after 0 to 43 ms, and at worst 131 ms in AVPlayer.
-* A cue that spanned a segment boundary, repeated in both segments, was never shown twice.
-* Chromium started cues 2 to 3 ms late, Firefox 13 to 23 ms, and WebKit with hls.js about 0.2 s.
-* With `AUTOSELECT=YES`, WebKit's native HLS showed English subtitles after the page had turned them off, once the audio switched to another language.
-It did so in 3 of 3 main runs and 2 of 2 targeted runs.
-With `AUTOSELECT=NO`, it showed none in 2 of 2.
-AVPlayer showed none either way.
+* When a viewer switched subtitle language while a line was due, players showed the new line after 0 to 43 ms.
+AVPlayer's worst case was 131 ms.
+* A cue that spanned a segment boundary appeared in both segments.
+No player showed that cue twice.
+* Chromium started cues 2 to 3 ms late.
+Firefox started cues 13 to 23 ms late.
+WebKit with hls.js started cues about 0.2 s late.
+* In one test, every subtitle rendition carried `AUTOSELECT=YES`.
+The page turned English subtitles off and then switched the audio to another language.
+WebKit's native HLS then showed the English subtitles again.
+That happened in 3 of 3 main runs and 2 of 2 targeted runs.
+With `AUTOSELECT=NO`, WebKit's native HLS showed no subtitles in 2 of 2 runs.
+AVPlayer showed no subtitles with either value.
 * WebKit's native HLS and AVPlayer froze the picture for 1.6 to 2.0 s in 25 of 25 runs of the reproducing cases.
-In every freeze, the change, the seek's start and its target fell in one 6 s segment.
-That rule was inferred from 18 cases, not traced.
-A seek into the next segment, or a change 11 s earlier, did not freeze.
-* The re-check found every cue in every segment it overlaps and in no other, in all four languages.
-* Extracted ASS lost its styling, and its centisecond times came through as such.
+In every freeze, the switch of subtitle language, the seek's start and the seek's target fell in one 6 s segment.
+The measurements inferred that pattern from 18 cases.
+The measurements did not trace the freeze's cause inside the player.
+A seek into the next segment did not freeze.
+A switch 11 s before the seek did not freeze either.
+* The re-check found every cue in every segment that the cue overlaps, and in no other segment, in all four languages.
+* Extracted ASS lost its styling.
+Its centisecond cue times came through unchanged.
 
 [[evidence-extraction]]
 === Subtitle extraction
 
 * Extracting one text track or all four from the 315 MB Matroska file read the whole file.
-It took 0.22 to 0.27 s with the file in the page cache, and 0.84 to 2.28 s on a loaded host.
+The extraction took 0.22 to 0.27 s with the file in the page cache, and 0.84 to 2.28 s on a loaded host.
 * From the MP4 file, extracting both mov_text tracks read 2.3 MB, 0.7 % of the file.
 * A windowed extraction of 70 s read 71 MB, 23 % of the file.
-It missed the line already on screen at its start, because a cue that began before the window is not sent again.
+The windowed extraction missed the line already on screen when the window started.
+It missed that line because a cue that began before the window is not sent again.
 * Cue times follow the source container's timeline.
-With `-copyts` they equalled the media time that the job attempts use.
+With `-copyts`, cue times equalled the media time that the job attempts use.
 
 == References
 

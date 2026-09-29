@@ -80,7 +80,7 @@ One movie-fragment pair (`moof` and `mdat`) that FFmpeg emits, and the smallest 
 _Avoid_: chunk, part
 
 **Rendition**:
-An alternate HLS track that the multivariant playlist lists in an `EXT-X-MEDIA` tag, such as one audio language or one text subtitle track, with its own media playlist. A viewer switches renditions without leaving the variant, the quality-ladder option that an `EXT-X-STREAM-INF` tag lists. A rendition is never a variant (ADR 0043).
+An alternate HLS track, such as one audio language or one text subtitle track. The multivariant playlist lists each rendition in an `EXT-X-MEDIA` tag. Each rendition has its own media playlist. A viewer switches renditions without leaving the variant. A variant is the quality-ladder option that an `EXT-X-STREAM-INF` tag lists. A rendition is never a variant (ADR 0043).
 _Avoid_: variant, audio variant, alternate stream, track (unqualified)
 
 **Media segment**:

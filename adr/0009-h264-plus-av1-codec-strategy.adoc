@@ -59,7 +59,9 @@ When the server encodes, it uses the first codec in `[av1, hevc, h264]` that the
 The server encodes HEVC only when the client declares HEVC and does not declare AV1.
 A client that declares no codec receives H.264, as it does today.
 The server reads the declared codecs from the typed client capability declaration that streamarr/streamarr-server#395 defines.
-The server does not read the codec-name strings that clients send today.
+The codec preference never reads the codec-name strings that clients send today.
+ADR 0013's interim copy rule still reads those codec-name strings when it decides whether to copy.
+Until streamarr/streamarr-server#395 lands, the codec preference therefore sees no declared codec, and every encode is H.264.
 
 The codec never chooses the container.
 Every variant is fMP4, as ADR 0037 requires.
@@ -76,30 +78,43 @@ AV1 stays first, as the first version decided.
 Apple TV declares HEVC and does not declare AV1.
 If the list left out HEVC, every encode for Apple TV would be H.264.
 
-=== HEVC encodes need a verified encoder
+=== Verified encoders filter every codec
 
-The server encodes HEVC only on a worker that reports a verified HEVC encoder (https://github.com/streamarr/streamarr-server/issues/398[streamarr/streamarr-server#398]).
-A verified encoder is one that the worker test-encoded and advertises (https://github.com/streamarr/streamarr-transcode-worker/issues/28[streamarr/streamarr-transcode-worker#28]).
-This replaces the first version's filter by available hardware encoders.
-An link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019] replacement attempt of an HEVC variant runs on the encoder backend of the attempt that produced its initialization segment, as ADR 0037 and streamarr/streamarr-server#398 require.
+The server filters the codec preference by what the client declares and by the encoders that workers have verified.
+https://github.com/streamarr/streamarr-server/issues/398[streamarr/streamarr-server#398] builds the verified-encoder filter, and the server does not have that filter yet.
+The filter applies to every codec in the preference, not only to HEVC.
+A verified encoder is an encoder that passed the worker's test encode and that the worker advertises (https://github.com/streamarr/streamarr-transcode-worker/issues/28[streamarr/streamarr-transcode-worker#28]).
+A verified encoder can be a hardware encoder or a software encoder.
+The verified-encoder filter replaces the first version's filter by available hardware encoders.
 
-*Why:* libx265 encoded a 1080p30 clip at 53 fps where libx264 encoded it at 110 fps, each at its default preset.
-Without verified-encoder data, a worker without a hardware encoder would take every HEVC encode in software at about twice the CPU cost of H.264.
+An encoder backend is the encoder that a worker runs for a codec family, such as libx265 or a hardware `hevc_*` encoder.
+A replacement attempt is a job attempt that replaces an earlier job attempt for the same variant under link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]'s recovery.
+A replacement attempt runs on the encoder backend of the job attempt that produced the variant's initialization segment, as ADR 0037 and streamarr/streamarr-server#398 require.
+
+*Why:* no version of the server applied the first version's hardware filter.
+Today a worker without an AV1 hardware encoder encodes AV1 with the SVT-AV1 software encoder.
+A filter by hardware encoders alone would stop those encodes.
 
 === An HEVC encode follows the SDR video decision
 
 An HEVC encode follows ADR 0013's video decision like every other encode.
 Its output is 8-bit 4:2:0 SDR.
 Its codec profile is Main.
-The worker forces a level that the server computes.
+ADR 0013's forced-level rule computes the encode's level from Annex A of ITU-T H.265, as that rule does for H.264 and AV1.
+The worker forces that profile and level.
 The playlist advertises the codec string that the forced profile and level determine.
 The worker fails the attempt when an initialization segment disagrees with that codec string.
-ADR 0013 defers computing an HEVC encode's level, so the server encodes HEVC only once that computation exists.
-The server also encodes HEVC only after the pinned worker image writes the `hvc1` sample entry for HEVC encodes (https://github.com/streamarr/streamarr-transcode-worker/issues/18[streamarr/streamarr-transcode-worker#18]).
+
+The server encodes HEVC only after the pinned worker image writes the `hvc1` sample entry for HEVC encodes (https://github.com/streamarr/streamarr-transcode-worker/issues/18[streamarr/streamarr-transcode-worker#18]).
 
 *Why:* the constant codec string `hvc1.1.6.L120.90` says level 4.0.
 At 1080p60, libx265 writes level 4.1, so the constant codec string misdescribes that encode.
-libx265 stops with an error when it cannot meet a forced level, so a wrong level table fails the attempt at the worker.
+libx264 and SVT-AV1 accept a forced level that is too low and write that level, as ADR 0013 records.
+libx265 instead refuses to start an encode whose forced level is too low for the output.
+A wrong HEVC level computation therefore fails the attempt at the worker.
+Apple's HLS authoring specification tells authors to use `hvc1` rather than `hev1` for HEVC.
+Nobody has checked `hev1` playback on iOS or tvOS devices.
+Evidence: <<evidence-strings>>, <<evidence-players>>.
 
 [[explicitly-deferred]]
 === Explicitly deferred
@@ -116,12 +131,15 @@ This ADR pins no SVT-AV1 version or commit.
 
 == Consequences
 
-* Apple TV, which declares HEVC and not AV1, receives HEVC whenever the server encodes for it.
-The interim copy rule refuses HDR HEVC sources, so those sources become HEVC SDR encodes instead of H.264 SDR encodes.
+* After streamarr/streamarr-server#395 lands, Apple TV receives HEVC whenever the server encodes for it, because Apple TV declares HEVC and does not declare AV1.
+* When ADR 0013's video decision encodes an HDR HEVC source to SDR for Apple TV, the encode becomes HEVC SDR instead of H.264 SDR.
 This outcome is wanted.
-* Until streamarr/streamarr-server#395 lands, no client reaches the HEVC or AV1 encode paths, their CPU cost or their bugs.
-Web and iOS sessions stay H.264-only, and Apple TV receives H.264 SDR encodes.
-* A worker whose verified HEVC encoder is libx265 spends about twice the CPU of an H.264 encode on each HEVC encode.
+* Until streamarr/streamarr-server#395 lands, no client reaches the HEVC or AV1 encode paths.
+No client meets the CPU cost or the bugs of those encode paths yet.
+Web and iOS sessions stay H.264-only.
+Apple TV still receives the copies that ADR 0013's interim copy rule allows, and every encode for Apple TV is H.264 SDR.
+* At their default presets, libx265 spends about twice the CPU of libx264 on the same encode.
+A worker whose verified HEVC encoder is libx265 pays that cost on each HEVC encode.
 * H.264 remains the codec that every client receives when it declares nothing better.
 * libx265 and a hardware `hevc_*` encoder write different initialization segments.
 A variant therefore stays on one encoder backend for its lifetime.
@@ -131,7 +149,8 @@ A variant therefore stays on one encoder backend for its lifetime.
 * Keeping `[av1, h264]` sends every Apple TV encode as H.264, although Apple TV declares HEVC.
 * Choosing HEVC from codec-name strings before streamarr/streamarr-server#395 would need client code.
 The typed client capability declaration of streamarr/streamarr-server#395 would later replace that client code.
-* Encoding HEVC on any worker before streamarr/streamarr-server#398 would silently run libx265 at about twice the CPU of libx264.
+* Keeping AV1 limited to hardware encoders while other codecs use verified encoders would stop the SVT-AV1 software encodes that workers run today.
+* Keeping the first version's hardware-encoder sentence until streamarr/streamarr-server#398 is designed would leave a filter that no version of the server applied.
 * Using this codec preference as the recovery order would conflate two separate policies.
 streamarr/streamarr-server#401 owns recovery.
 * Refusing `hev1` output because `canPlayType` reports `hev1` as unsupported would ignore a measurement.
@@ -161,6 +180,9 @@ Of 20 such copies, 15 kept `hvc1`, 4 kept `hev1` and 1 kept `dvh1`.
 * Forcing `hvc1` on a copy whose parameter sets travel only inside the video samples wrote an empty `hvcC` box without an error.
 * For all 50 H.264 and HEVC copies, the codec string that the test computed from the decoder configuration record matched the codec string that the copy's own initialization segment carried.
 * At 1080p60, libx265 wrote level 4.1 while the playlist advertised level 4.0.
+* On the pinned worker image, a 1080p60 libx265 encode that forced level 4.0 did not start.
+libx265 reported `frame rate is out of range for specified level`, and FFmpeg failed to open the encoder.
+The same encode started when it forced level 4.1.
 
 [[evidence-cost]]
 === Encoder cost
@@ -179,7 +201,7 @@ Each encoder encoded a synthetic 1080p30 clip at 8 Mb/s.
 * link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019: Recoverable Just-In-Time HLS Segment Delivery]
 * link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036: Video Contracts Share One Vocabulary and Preserve Dynamic-Range Facts]
 * link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037: The Worker Delivers Fragmented MP4 Segments From FFmpeg's Standard Output, and HLS Media Segments Are fMP4 Only]
-* The player, codec-string and encoder-cost measurements of 2026-09-27 to 2026-09-29 were not committed, so the Evidence section gives their results.
+* The player, codec-string, forced-level and encoder-cost measurements of 2026-09-27 to 2026-09-29 were not committed, so the Evidence section gives their results.
 * https://developer.apple.com/documentation/http-live-streaming/hls-authoring-specification-for-apple-devices/[Apple HLS authoring specification for Apple devices]
 * https://www.itu.int/rec/T-REC-H.265[ITU-T H.265: High efficiency video coding, Annex A (profiles, tiers and levels)]
 * https://datatracker.ietf.org/doc/html/rfc8216[RFC 8216: HTTP Live Streaming]

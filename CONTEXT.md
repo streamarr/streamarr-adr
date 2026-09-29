@@ -79,6 +79,10 @@ _Avoid_: engine, transcoder, pipeline
 One movie-fragment pair (`moof` and `mdat`) that FFmpeg emits, and the smallest unit the producer reads. A fragment starts at a keyframe or when the fragmentation target elapses.
 _Avoid_: chunk, part
 
+**Rendition**:
+An alternate HLS track that the multivariant playlist lists in an `EXT-X-MEDIA` tag, such as one audio language or one text subtitle track, with its own media playlist. A viewer switches renditions without leaving the variant, the quality-ladder option that an `EXT-X-STREAM-INF` tag lists. A rendition is never a variant (ADR 0043).
+_Avoid_: variant, audio variant, alternate stream, track (unqualified)
+
 **Media segment**:
 The unit an HLS playlist advertises, always fragmented MP4. Segment N is the fragments whose first video sample is a keyframe inside media time [N × period, (N + 1) × period), together with the fragments that follow them before the next such keyframe.
 _Avoid_: chunk, segment file, .ts, container format

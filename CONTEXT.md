@@ -44,6 +44,11 @@ The profile, level and base-layer compatibility that the Dolby Vision configurat
 Its values are claims that the probe checks against the picture signalling and the samples.
 _Avoid_: profile (unqualified), DV profile
 
+**Codec string**:
+The RFC 6381 value, such as `avc1.640028`, that names a stream's codec with the parameters a decoder checks, such as its sample-entry tag, profile and level; an HLS `CODECS` attribute carries it.
+The probe computes a source stream's codec string as a stream copy would deliver it, and a playlist's codec string must match the produced initialization segment.
+_Avoid_: codec name (the bare codec, such as `h264`), CODECS (the playlist attribute)
+
 ### Playback records
 
 **Playback session**:

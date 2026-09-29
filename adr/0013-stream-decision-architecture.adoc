@@ -72,6 +72,7 @@ The memory returns when the attempt's FFmpeg process exits, and each replacement
 Firefox refused High 10 in 21 of 21 runs.
 WebKit's native player and AVPlayer refused PQ-tagged H.264 in 16 of 16 runs.
 The tone-mapped output was 8-bit BT.709 in limited range, and profile 5 lost its teal cast.
+The tone-mapping filter treats an untagged input as PQ, so it darkened an untagged SDR source (mean luma 41 instead of 106).
 Evidence: <<evidence-sdr-output>>, <<evidence-tone-mapping>>.
 
 === Every encode forces a codec profile and level that the server computes
@@ -91,7 +92,7 @@ Evidence: <<evidence-levels-and-codec-strings>>.
 === An encode's codec string is forced, and a copy's comes from the probe
 
 An encode's codec string is the one that its forced codec profile and level determine, such as `avc1.6400LL` or `av01.0.LLM.08`.
-A stream copy's codec string is the one the probe computed from the source's decoder configuration record.
+A stream copy's codec string is the one the probe computed from the source's decoder configuration record, as link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032] records.
 The playlist builds each variant's `CODECS` attribute from these strings and never from a constant.
 The job carries each variant's codec string to the worker.
 The worker reads every initialization segment it produces and fails the attempt when that segment's codec string differs from the job's.
@@ -142,7 +143,7 @@ Evidence: <<evidence-copies>>.
 * Client-declared dynamic ranges (streamarr/streamarr-server#395), which replace the interim copy rule.
 * HDR10+ and RPUs read from the frames, which close the profile 5 gap in MPEG-TS (streamarr/streamarr-server#394).
 * The playlist attributes that announce a produced range and supplemental codecs, which link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] already defers to the epic.
-* Computing an HEVC encode's level, which the server needs only once it encodes HEVC (https://github.com/streamarr/streamarr-server/issues/58[streamarr/streamarr-server#58] and https://github.com/streamarr/streamarr-server/issues/398[streamarr/streamarr-server#398]).
+* Computing an HEVC encode's level, which the server needs only once it encodes HEVC under link:0009-h264-plus-av1-codec-strategy.adoc[ADR 0009] (https://github.com/streamarr/streamarr-server/issues/58[streamarr/streamarr-server#58] and https://github.com/streamarr/streamarr-server/issues/398[streamarr/streamarr-server#398]).
 * Choosing the HEVC sample-entry tag of a copy (https://github.com/streamarr/streamarr-transcode-worker/issues/18[streamarr/streamarr-transcode-worker#18]).
 Until then a copy keeps its source's tag, and its codec string names that tag.
 
@@ -164,7 +165,6 @@ The initialization segment then stays identical across attempts, as link:0037-wo
 
 * 10-bit H.264 output (High 10): Firefox refuses it, and today's worker produces it from every 10-bit source.
 * Constant codec strings: they matched 6 of 59 video copies and stated level 4.0 for 1080p60 encodes that need 4.2.
-* Codec strings from ffprobe's named profile and level fields: they matched only 41 of 59 video copies, because they drop constraint flags, compatibility flags and the HEVC tier.
 * Reading every codec string from the produced initialization segments: the playlist would wait for the slowest variant, and one failed first attempt would block it.
 * Declaring `VIDEO-RANGE=PQ` or `VIDEO-RANGE=HLG` on copies today: AVPlayer without an HDR display refuses the variant, and WebKit's native player times out.
 * Copying HLG sources to clients that name the codec: the copies played, but the playlist could not state their HLG range without the refusal above.
@@ -175,7 +175,8 @@ The initialization segment then stays identical across attempts, as link:0037-wo
 == Evidence
 
 Every measurement used the pinned worker image with FFmpeg 8.1.2, libx264 and SVT-AV1 on a 10-core host.
-The players were hls.js 1.7.0 in Chromium, Chrome, Firefox and WebKit, WebKit's native player, and AVPlayer on macOS 26.6.2.
+The players were hls.js 1.7.0 in Chromium, Chrome, Firefox and WebKit, WebKit's native player, and AVPlayer on macOS 26.6.2, without an HDR display.
+The sources covered HDR10, HDR10+, HLG from an iPhone, Dolby Vision profiles 5, 7 (base layer), 8.1 and 8.4, 10-bit SDR with an untagged transfer, and 8-bit SDR.
 
 [[evidence-sdr-output]]
 === 8-bit SDR output
@@ -186,8 +187,11 @@ The players were hls.js 1.7.0 in Chromium, Chrome, Firefox and WebKit, WebKit's 
 The trigger was the PQ transfer in a variant that the playlist declared SDR, so an 8-bit step alone does not fix it.
 * All 14 tone-mapped outputs (7 sources, 2 encoders) were 8-bit 4:2:0, with BT.709 color in limited range.
 None carried static HDR metadata or a Dolby Vision configuration record.
-* Against Apple's own SDR rendering, the mean chroma offsets of tone-mapped HLG stayed within 1.5 code values.
+* Against Apple's own SDR rendering, the mean chroma offsets (Cb, Cr) of an HDR10 encode moved from −32 and −12 before tone mapping to −7.3 and −3.1 after it.
+Those of tone-mapped HLG stayed within 1.5 code values.
 Profile 5's offsets against the rendering of its profile 8.1 twin moved from −35 and −44 to −9.5 and −11.3, and its teal cast disappeared.
+* The tone-mapped libx264 output played in Chromium, Chrome, WebKit with hls.js, WebKit's native player and AVPlayer from every source.
+Firefox played 6 of 7; its one failure matched a separate, intermittent Firefox failure on H.264 with muxed AAC that also occurs without tone mapping.
 * libx264 at 1080p cost 9.11 CPU seconds per media second from an HDR10 source before the change, and 6.07 after it.
 
 [[evidence-tone-mapping]]
@@ -195,7 +199,10 @@ Profile 5's offsets against the rendering of its profile 8.1 twin moved from −
 
 * On 1080p PQ and HLG sources, tone mapping cost at most 0.1 CPU seconds per media second more than a plain 8-bit conversion.
 Reshaping profile 5 added about 1.1 to 1.2 CPU seconds per media second at 1080p60.
+* The profile 5 reshape scored 32.7 dB PSNR against the profile 8.1 version of the same master, and 14.8 dB without the reshape.
+* The tone-mapping filter treats an untagged input as PQ; on a 10-bit SDR source with an untagged transfer it gave a mean luma of 41 instead of 106.
 * One tone-mapped 1080p libx264 variant ran at 1.20–1.43× real time from 1080p60 HDR sources, and at 0.90–1.01× from 2160p60 sources.
+A four-variant ladder from 60 fps HDR sources ran at 0.35–0.56× real time, with or without tone mapping.
 * The bt2390 curve at 1000 nits mapped a 983-nit PQ grey to luma 235, and a 10,000-nit grey to 168.
 The mobius curve clips at 235 instead of folding.
 * Below the peak, mobius and bt2390 gave the same brightness (mean luma 92.9 and 92.1).
@@ -216,8 +223,9 @@ These covered 24 sources at every rung, from 144p to 2160p and from 2 to 2400 fr
 * On every rotated source, the server computed a 1920x1080 rung where FFmpeg wrote 608x1080, so the unforced level differed from the prediction.
 * Strings computed from the source's decoder configuration record matched 54 of 59 video copies and 42 of 42 audio copies.
 The 5 misses were AV1 in IVF or raw OBU files, whose sequence header the predictor did not parse.
-* ffprobe's named fields matched 41 of 59 video copies, and the server's constant strings matched 6.
-* Copying with `-strict unofficial` changed only the Dolby Vision boxes, on 15 of 15 sources.
+* The server's constant strings matched 6 of 59 video copies.
+* Without `-strict unofficial`, none of the 9 Dolby Vision copies kept `dvcC` or `dvvC`; with it, all 9 did.
+The flag changed no other box on any of the 15 sources, and no encode wrote either box.
 * A four-rung ladder's last initialization segment arrived up to 11.1 s after FFmpeg started.
 WebKit's native player and AVPlayer request a playlist once and give up after 20.2 s.
 
@@ -229,6 +237,8 @@ WebKit's native player and AVPlayer request a playlist once and give up after 20
 The same variants declared `VIDEO-RANGE=SDR` played.
 * HLG copies played in Chrome, Firefox, WebKit's native player and AVPlayer without the attribute, in one run each.
 * The profile 5 copy failed in every engine except Chrome, and there only without its configuration record.
+Chromium, Chrome and Firefox report no decoder for `dvh1`.
+* One open-source media server copies a video stream only when the client's declared ranges include the source's range, and encodes every HDR source to 8-bit SDR BT.709 with a playlist that declares SDR.
 
 == References
 

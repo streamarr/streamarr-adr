@@ -44,6 +44,11 @@ _Avoid_: base layer (a Dolby Vision layer, not a picture format), HDR10 (PQ with
 The profile and level that a video codec such as H.264, HEVC or AV1 signals for a video stream.
 _Avoid_: profile (unqualified), viewing profile (the household concept in ADR 0024)
 
+**Codec string**:
+The RFC 6381 value that names one stream's codec with its profile, level and other parameters, as a variant's `CODECS` attribute lists it, such as `avc1.640028`.
+An encode's codec string follows from its forced codec profile and level, a stream copy's comes from the probe, and each must match the produced initialization segment.
+_Avoid_: codec (the family name alone), codec tag (the sample-entry four-character code), CODECS string (the attribute can list several)
+
 **Dolby Vision profile**:
 The profile, level and base-layer compatibility that the Dolby Vision configuration record declares for a video stream, kept separate from the codec profile.
 Its values are claims that the probe checks against the picture signalling and the samples.
@@ -55,11 +60,6 @@ The probe outcome, the transcode job and the worker's FFmpeg argument carry the 
 The probe job chooses the output frame rate once per file.
 Every job attempt therefore encodes on one frame grid, which is the same sequence of output frame times.
 _Avoid_: target frame rate, frame rate (unqualified) for the encode's rate
-
-**Codec string**:
-The RFC 6381 value that names one stream's codec with its profile, level and other parameters, as a variant's `CODECS` attribute lists it, such as `avc1.640028`.
-An encode's codec string follows from its forced codec profile and level, a stream copy's comes from the probe, and each must match the produced initialization segment.
-_Avoid_: codec (the family name alone), codec tag (the sample-entry four-character code), CODECS string (the attribute can list several)
 
 ### Playback records
 

@@ -168,7 +168,7 @@ A job attempt that replaces an earlier one for the same variant under ADR 0019's
 _Avoid_: retry, restart, replacement (unqualified)
 
 **Relocation**:
-A planned restart of the requested variant's job at the media segment a player requested, because that segment lies before the running job attempt's first segment or more than the relocation gap ahead of its output. It is not ADR 0019's recovery.
+A planned restart of the requested variant's job at the media segment that a player requested. The requested variant is the variant whose media segment the player requested. The server relocates when the requested segment lies before the running job attempt's first segment. The server also relocates when the requested segment lies more than the relocation gap ahead of the running job attempt's output. ADR 0019 defines the relocation gap. A relocation is not ADR 0019's recovery.
 _Avoid_: seek (the player's action), restart (unqualified), recovery
 
 **Format attempt**:

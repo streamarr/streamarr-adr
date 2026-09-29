@@ -11,15 +11,20 @@ This ADR replaces that eager start.
 For now, variants start on demand.
 <<decision-requested-variant>> gives the rules for when each variant starts.
 The headroom model of link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] decides when extra variants may start early.
+Extra variants are variants that the player has not requested.
 This ADR sets the relocation gap to two media segments.
+The relocation gap is how far a requested media segment may lie ahead of a running job attempt's output before the server starts a new job attempt at the requested segment.
 The two-segment relocation gap depends on the decode-only early-start seek that link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] specifies.
+With the decode-only early-start seek, a job attempt decodes the media before its first segment but does not encode that media.
 
 === Implementation status
 
 Implemented.
 `SegmentDeliveryCoordinator` owns the liveness-and-progress-bounded wait and the bounded replacement budget; `ProducerLifecycleService` owns every producer mutation under the per-session mutex, with the attempt fence at the replacement write (https://github.com/streamarr/streamarr-server/issues/252[issue #252]).
 Worker-side upload back-pressure retry and the worker's stall-bounded segment wait are tracked in https://github.com/streamarr/streamarr-transcode-worker/issues/1[worker issue #1, transferred from streamarr-server issue #253].
-The on-demand variant start and the two-segment relocation gap are not implemented.
+The recovery rules are implemented.
+The server does not yet start variants on demand.
+The server does not yet use the two-segment relocation gap.
 The server still starts every variant together.
 The server still relocates forward when the segment 24 s before the requested segment has not been produced.
 
@@ -58,7 +63,8 @@ When an advertised segment is requested and no live producer covers it, the serv
 A recovered producer emits a contiguous run of segments from the requested index and never a single isolated segment, so audio and video boundaries stay continuous.
 Presentation timestamps continue the absolute timeline across a replacement producer (`-copyts`, input seek, `-start_number`); MPEG-TS continuity counters reset at the replacement boundary — an accepted, documented deviation from RFC 8216 §3's uninterrupted-counter requirement, shared with comparable JIT servers, because a static playlist cannot signal a discontinuity after the fact.
 When a player seeks, the server uses the same request-driven mechanism.
-A relocation restarts a producer at the requested segment's offset.
+A relocation is a planned restart of the requested variant's job at the requested media segment.
+A relocation starts a new job attempt at the requested segment's offset.
 Each segment's number derives from that segment's offset, so the playlist never changes.
 A relocation is a planned restart, not recovery.
 A relocation revives even a variant whose recovery has been exhausted.
@@ -70,7 +76,7 @@ A relocation revives even a variant whose recovery has been exhausted.
 A variant is one quality level that the stream session offers.
 A variant is what RFC 8216 calls a Variant Stream, as ADR 0018 records.
 The ladder is the stream session's set of variants.
-The requested variant is the variant whose segment the player has just requested.
+The requested variant is the variant whose media segment the player has just requested.
 The first-listed variant is the variant that the multivariant playlist lists first.
 The current segment is the media segment at the stream session's current playback position.
 
@@ -81,7 +87,7 @@ The server starts and restarts variants by these rules:
 * A request for a media segment of a variant that has no producer starts that variant at the requested segment.
 * A relocation stops every producer of the stream session and restarts only the requested variant.
 * After a relocation, each other variant starts again when the player next requests one of that variant's segments.
-* No other variant starts before the player requests it, unless the headroom model of link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] allows that variant to start early.
+* Apart from the first-listed variant, no variant starts before the player requests one of that variant's segments, unless the headroom model of link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] allows that variant to start early.
 * Until the headroom model is validated, the headroom model allows no variant to start early.
 
 These rules hold for now.
@@ -114,8 +120,8 @@ Evidence: <<evidence-requested-variant>>.
 [[decision-relocation-gap]]
 === The relocation gap is two media segments
 
-A relocation is a planned restart of the requested variant's producer at the requested media segment.
-The relocation gap is how far a request may lie ahead of a running producer's output before the server restarts the producer instead of waiting for it.
+A relocation starts a new job attempt for the requested variant at the requested media segment.
+The relocation gap is how far a request may lie ahead of a running job attempt's output before the server starts a new job attempt instead of waiting for the running one.
 The server relocates when the requested segment lies before the first segment of the running job attempt.
 The server also relocates when the segment one relocation gap before the requested segment has not been produced.
 The relocation gap is counted in media segments, so the rule holds at every segment length.
@@ -129,11 +135,12 @@ Until the decode-only early-start seek ships, the relocation gap stays at 24 s.
 At 6 s segments, 24 s is 4 segments.
 The relocation gap changes from 24 s to 2 segments in one step, when the decode-only early-start seek ships.
 The 2-segment gap was measured with the restart times of the decode-only early-start seek.
+The one-period-early seek is the seek that the worker used when these measurements ran.
+With the one-period-early seek, a job attempt starts encoding one segment duration before its first segment.
 The 2-segment gap was not measured with the restart times of the one-period-early seek.
 
 *Why:* A request can lie a few media seconds ahead of a running producer's output.
 For such a request, waiting for that producer and restarting a new one cost about the same.
-The one-period-early seek is the seek that the worker used when these measurements ran.
 With the decode-only early-start seek, a fresh 1080p job attempt completed its first segment in 2.9–3.0 s.
 With the one-period-early seek, a fresh 1080p job attempt took 5.1–5.2 s.
 The time difference comes from the media that each job attempt encodes before its first segment.
@@ -147,7 +154,7 @@ That result held both with 1080p alone and with all four variants running.
 For 1080p alone, the worst-case extra wait at a gap of 2 segments was 0.9 s.
 For 1080p alone, the 24 s gap made a viewer wait 4.9–5.0 s longer than a restart would have taken.
 The worst-case extra wait at a gap of 1 segment was within 0.9 s of the worst-case extra wait at 2 segments.
-A gap of 1 segment also makes the server restart whenever a player requests the next segment while the producer is still producing the current segment.
+A gap of 1 segment also makes the server relocate whenever a player requests the next segment while the running job attempt is still producing the current segment.
 Evidence: <<evidence-relocation-gap>>.
 
 === Distributed producers are the recovery redundancy
@@ -188,13 +195,13 @@ Starting variants on demand has its own costs.
 When a player switches to a variant that is not running, the player waits for that variant's first segment.
 That wait was 0.8–3.0 s when the new variant ran alone.
 
-Open question: WebKit's native player started and sought more slowly with only the requested variant running.
+Open question: WebKit's native player started and sought more slowly with only the requested variant running than with every variant running.
 WebKit's native player started in 3.5 s instead of 2.0 s.
 The first seek in WebKit's native player took 10.7 s instead of 6.6 s.
 Both were slower because no lower variant was running for the player to fall back on.
 Streamarr does not accept this cost yet.
 Low latency is the goal, so Streamarr accepts the cost only if no alternative is left.
-Measurements of the alternatives are in progress.
+Streamarr is measuring the alternatives.
 The alternatives include:
 
 * the order of the variants in the multivariant playlist;
@@ -233,8 +240,8 @@ For 1080p alone, when a request lies at the edge of the 24 s gap, a viewer waits
 == Evidence
 
 The measurements behind starting only the requested variant and behind the relocation gap ran from 2026-09-25 to 2026-09-28.
-The measurements used the pinned worker image.
-The encoder was libx264 at the `medium` preset, which was its default then.
+The measurements ran FFmpeg inside the worker image that streamarr-server pinned at the time.
+The encoder was libx264 at the `medium` preset, which was the worker's default preset then.
 Segments were 6 s long.
 The ladder had four variants: 1080p, 720p, 480p and 360p.
 The host had 10 cores.

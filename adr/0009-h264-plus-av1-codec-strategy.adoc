@@ -6,25 +6,30 @@ Accepted
 
 This text amends the accepted decision.
 The first version preferred AV1, then H.264, and deferred HEVC.
-link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] superseded its container clause, and that supersession stands.
+link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] superseded the first version's container clause.
+That change still stands.
 link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] and ADR 0037 left the codec-preference clause to the playback capabilities epic, https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399].
 This amendment settles that clause.
-https://github.com/streamarr/streamarr-server/issues/58[streamarr/streamarr-server#58] implements it.
+https://github.com/streamarr/streamarr-server/issues/58[streamarr/streamarr-server#58] implements this amendment.
 
 == Context
 
 This section describes the system before the amendment.
 
-An encode is a job attempt whose worker re-encodes the video (`VIDEO_TRANSCODE` or `FULL_TRANSCODE`).
+An encode is a job attempt whose worker re-encodes the video.
+The transcode mode of an encode is `VIDEO_TRANSCODE` or `FULL_TRANSCODE`.
 A stream copy passes the source video through unchanged.
 The server encodes only when it does not copy.
-link:0013-stream-decision-architecture.adoc[ADR 0013]'s video decision decides whether it copies.
+link:0013-stream-decision-architecture.adoc[ADR 0013]'s video decision decides whether the server copies.
 
-The first version of this ADR chose H.264 for universal compatibility and AV1 for bandwidth savings.
-It filtered its preference by the codecs that the client declares and by the hardware encoders available.
+The first version of this ADR chose H.264 because every client plays H.264.
+The first version chose AV1 because AV1 needs less bandwidth.
+The first version kept only the codecs that the client declares.
+The first version also kept only the codecs that an available hardware encoder can encode.
 No version of the server applied the hardware filter.
 The first version also put H.264 in MPEG-TS and AV1 in fMP4.
-ADR 0037 replaced that rule: every HLS variant is fMP4, whatever its codec.
+ADR 0037 replaced that container rule.
+Every HLS variant is fMP4, whatever its codec.
 
 The server encodes to the first codec in `[av1, h264]` that the client supports.
 A client that declares HEVC but not AV1 therefore receives H.264 whenever the server encodes.
@@ -34,7 +39,11 @@ The Apple app sends codec names as strings: `h264` on iOS, and `h264` and `hevc`
 
 The worker already handles HEVC.
 It resolves `hevc` to libx265, or to a hardware `hevc_*` encoder that passed a test encode.
-The playlist advertises the constant codec string `hvc1.1.6.L120.90` (Main, level 4.0) for every HEVC variant.
+The playlist advertises the constant codec string `hvc1.1.6.L120.90` for every HEVC variant.
+That codec string names the Main profile at level 4.0.
+The sample entry is the MP4 field that names a track's coding format, such as `hvc1` or `hev1`.
+An `hvc1` sample entry carries the parameter sets in the initialization segment.
+An `hev1` sample entry lets the parameter sets travel inside the video samples instead.
 FFmpeg's mp4 muxer writes the `hev1` sample entry for an HEVC encode.
 WebKit's `canPlayType` reports `hev1` as unsupported.
 
@@ -44,22 +53,27 @@ WebKit's `canPlayType` reports `hev1` as unsupported.
 
 The server chooses an output codec only when it does not copy the video.
 ADR 0013's video decision decides what the server copies.
-Until clients declare dynamic ranges (https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395]), its interim copy rule decides.
+Until clients declare dynamic ranges (https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395]), ADR 0013's interim copy rule decides what the server copies.
 
 When the server encodes, it uses the first codec in `[av1, hevc, h264]` that the client declares.
 The server encodes HEVC only when the client declares HEVC and does not declare AV1.
 A client that declares no codec receives H.264, as it does today.
-The server reads these declarations from the typed client capabilities of streamarr/streamarr-server#395, not from codec-name strings.
+The server reads the declared codecs from the typed client capability declaration that streamarr/streamarr-server#395 defines.
+The server does not read the codec-name strings that clients send today.
 
 The codec never chooses the container.
 Every variant is fMP4, as ADR 0037 requires.
 
-This preference chooses the initial output.
-It never changes an explicit manual quality, HDR or Original choice after a playback failure.
-It does not define the order in which Auto format recovery tries replacement formats (https://github.com/streamarr/streamarr-server/issues/401[streamarr/streamarr-server#401]).
+This codec preference chooses the codec of the initial output.
+The codec preference never changes an explicit manual quality, HDR or Original choice after playback fails.
+Original is a video quality mode that https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396] adds.
+The codec preference does not define the order in which Auto format recovery tries replacement formats.
+https://github.com/streamarr/streamarr-server/issues/401[streamarr/streamarr-server#401] owns that order.
 
-*Why:* the order follows compression efficiency, and AV1 stays first as the first version decided.
-Apple TV declares HEVC and not AV1, so without HEVC in the list every encode for Apple TV is H.264.
+*Why:* the order ranks codecs by how well they compress.
+AV1 stays first, as the first version decided.
+Apple TV declares HEVC and does not declare AV1.
+If the list left out HEVC, every encode for Apple TV would be H.264.
 
 === HEVC encodes need a verified encoder
 
@@ -74,25 +88,29 @@ Without verified-encoder data, a worker without a hardware encoder would take ev
 === An HEVC encode follows the SDR video decision
 
 An HEVC encode follows ADR 0013's video decision like every other encode.
-Its output is 8-bit 4:2:0 SDR, its codec profile is Main, and the worker forces a level that the server computes.
-The playlist advertises the forced codec string, and the worker fails the attempt when an initialization segment disagrees with it.
+Its output is 8-bit 4:2:0 SDR.
+Its codec profile is Main.
+The worker forces a level that the server computes.
+The playlist advertises the codec string that the forced profile and level determine.
+The worker fails the attempt when an initialization segment disagrees with that codec string.
 ADR 0013 defers computing an HEVC encode's level, so the server encodes HEVC only once that computation exists.
 The server also encodes HEVC only after the pinned worker image writes the `hvc1` sample entry for HEVC encodes (https://github.com/streamarr/streamarr-transcode-worker/issues/18[streamarr/streamarr-transcode-worker#18]).
 
-*Why:* the constant string `hvc1.1.6.L120.90` says level 4.0, while libx265 writes level 4.1 at 1080p60.
+*Why:* the constant codec string `hvc1.1.6.L120.90` says level 4.0.
+At 1080p60, libx265 writes level 4.1, so the constant codec string misdescribes that encode.
 libx265 stops with an error when it cannot meet a forced level, so a wrong level table fails the attempt at the worker.
 
 [[explicitly-deferred]]
 === Explicitly deferred
 
-* 10-bit and HDR HEVC and AV1 output (https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397] with https://github.com/streamarr/streamarr-transcode-worker/issues/27[streamarr/streamarr-transcode-worker#27]).
-Until then every encode is 8-bit SDR.
-* Whether the server moves to the next codec when no worker has a verified encoder for the client's first codec.
-streamarr/streamarr-server#398 decides that.
-* Playback of the `hev1` sample entry on iOS and tvOS devices.
+* This ADR defers 10-bit and HDR output for HEVC and AV1 to https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397] and https://github.com/streamarr/streamarr-transcode-worker/issues/27[streamarr/streamarr-transcode-worker#27].
+Until those issues land, every encode is 8-bit SDR.
+* This ADR does not decide whether the server moves to the next codec when no worker has a verified encoder for the client's first codec.
+streamarr/streamarr-server#398 decides that fallback.
+* This ADR defers checking whether iOS and tvOS devices play the `hev1` sample entry.
 The measurements covered macOS only.
 * AV1 encodes still run SVT-AV1 with the upstream reorder bug that https://github.com/streamarr/streamarr-transcode-worker/issues/42[streamarr/streamarr-transcode-worker#42] records.
-That issue is blocked by the SVT-AV1 fix that https://gitlab.com/AOMediaCodec/SVT-AV1/-/work_items/2385[AOMediaCodec/SVT-AV1#2385] tracks.
+streamarr/streamarr-transcode-worker#42 waits for the SVT-AV1 fix that https://gitlab.com/AOMediaCodec/SVT-AV1/-/work_items/2385[AOMediaCodec/SVT-AV1#2385] tracks.
 This ADR pins no SVT-AV1 version or commit.
 
 == Consequences
@@ -104,15 +122,19 @@ This outcome is wanted.
 Web and iOS sessions stay H.264-only, and Apple TV receives H.264 SDR encodes.
 * A worker whose verified HEVC encoder is libx265 spends about twice the CPU of an H.264 encode on each HEVC encode.
 * H.264 remains the codec that every client receives when it declares nothing better.
-* libx265 and a hardware `hevc_*` encoder write different initialization segments, so a variant stays on one encoder backend for its lifetime.
+* libx265 and a hardware `hevc_*` encoder write different initialization segments.
+A variant therefore stays on one encoder backend for its lifetime.
 
 == Rejected Alternatives
 
 * Keeping `[av1, h264]` sends every Apple TV encode as H.264, although Apple TV declares HEVC.
-* Choosing HEVC from codec-name strings before streamarr/streamarr-server#395 would need client code that the typed contract then replaces.
+* Choosing HEVC from codec-name strings before streamarr/streamarr-server#395 would need client code.
+The typed client capability declaration of streamarr/streamarr-server#395 would later replace that client code.
 * Encoding HEVC on any worker before streamarr/streamarr-server#398 would silently run libx265 at about twice the CPU of libx264.
-* Using this preference as the recovery order conflates two separate policies; streamarr/streamarr-server#401 owns recovery.
-* Refusing `hev1` output because `canPlayType` reports it unsupported ignores that WebKit's native player and AVPlayer played it.
+* Using this codec preference as the recovery order would conflate two separate policies.
+streamarr/streamarr-server#401 owns recovery.
+* Refusing `hev1` output because `canPlayType` reports `hev1` as unsupported would ignore a measurement.
+On macOS, WebKit's native player and AVPlayer played `hev1` output.
 
 == Evidence
 
@@ -120,28 +142,32 @@ Web and iOS sessions stay H.264-only, and Apple TV receives H.264 SDR encodes.
 === HEVC sample entries in players
 
 * WebKit's `canPlayType` for HLS returned an empty string for `hev1` and `probably` for `hvc1`.
-* On macOS 26.6.2, WebKit's native player and AVPlayer still played `hev1` fMP4 whose parameter sets travel only in the samples.
+* On macOS 26.6.2, WebKit's native player and AVPlayer still played `hev1` fMP4 whose parameter sets travel only inside the video samples.
 Chrome and Firefox with hls.js played it too.
 iOS and tvOS devices were not checked.
-* Chrome, Firefox and WebKit with hls.js, WebKit's native player and AVPlayer each played an `hvc1` Main 10 stream under every declared string tried, 2 runs per cell.
-The strings included the exact one, the server's constant, other levels, `hev1` and none.
+* Five players each played an `hvc1` Main 10 stream under every declared codec string that the test tried.
+The players were Chrome with hls.js, Firefox with hls.js, WebKit with hls.js, WebKit's native player and AVPlayer.
+The test ran each pair of player and declared codec string twice.
+The declared codec strings were the stream's exact codec string, the server's constant codec string, codec strings with other levels, an `hev1` codec string, and no declared codec string.
 * The Chromium headless shell has no HEVC decoder.
 
 [[evidence-strings]]
 === Codec strings and tags
 
-* Copying an MP4 or MOV source kept its tag: 15 `hvc1`, 4 `hev1` and 1 `dvh1`.
+* Copying an MP4 or MOV source kept the source's sample entry.
+Of 20 such copies, 15 kept `hvc1`, 4 kept `hev1` and 1 kept `dvh1`.
 * Copying HEVC from Matroska, MPEG-TS or raw streams wrote `hev1` in 8 of 8 copies.
-* Forcing `hvc1` on a copy whose parameter sets travel only in the samples wrote an empty `hvcC` without an error.
-* Computing the copy's codec string from its decoder configuration record matched all 50 H.264 and HEVC copies.
+* Forcing `hvc1` on a copy whose parameter sets travel only inside the video samples wrote an empty `hvcC` box without an error.
+* For all 50 H.264 and HEVC copies, the codec string that the test computed from the decoder configuration record matched the codec string that the copy's own initialization segment carried.
 * At 1080p60, libx265 wrote level 4.1 while the playlist advertised level 4.0.
 
 [[evidence-cost]]
 === Encoder cost
 
-* On the pinned worker image (FFmpeg 8.1.2), a synthetic 1080p30 clip at 8 Mb/s on 14 arm64 cores encoded at these speeds.
-* libx264: 110 fps at its default preset and 251 fps at `veryfast`.
-* libx265: 53 fps at its default preset and 82 fps at `veryfast`.
+* The encoders ran on the pinned worker image, which ships FFmpeg 8.1.2, on 14 arm64 cores.
+Each encoder encoded a synthetic 1080p30 clip at 8 Mb/s.
+* libx264 encoded at 110 fps at its default preset and at 251 fps at `veryfast`.
+* libx265 encoded at 53 fps at its default preset and at 82 fps at `veryfast`.
 
 == References
 

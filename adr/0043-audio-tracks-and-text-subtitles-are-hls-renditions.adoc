@@ -6,7 +6,11 @@ Proposed
 
 This decision amends link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037].
 A variant's media segments carry video alone instead of multiplexed video and audio.
-Each audio rendition gets its own initialization segment, and its segment 0 starts without the AAC priming frame.
+Each audio rendition gets its own initialization segment.
+Every running variant's job attempts write the audio renditions.
+The server keeps the first delivery of each audio segment.
+An audio rendition's segment 0 drops the AAC priming frame.
+A multiplexed variant's segment 0 keeps the AAC priming frame, as ADR 0037 decides.
 This decision extends link:0013-stream-decision-architecture.adoc[ADR 0013].
 The transcode decision chooses the audio and subtitle tracks.
 Each selected track keeps its own decision.
@@ -79,7 +83,7 @@ Both delays came from the browsers' audio output queues.
 Evidence: <<evidence-switching>>.
 
 [[decision-video-job]]
-=== The variant's own job attempt produces the audio renditions
+=== Every running variant's job attempt produces the audio renditions
 
 Each job attempt runs one FFmpeg process.
 That process writes the video and every selected audio track to the standard output that link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]'s producer reads.
@@ -92,8 +96,11 @@ Each audio sample joins the segment whose interval holds the sample's start time
 link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] places audio the same way.
 Media time zero stays the source container's start time, whatever tracks a job attempt maps.
 
-The server designates one variant of the stream session whose job attempts publish the audio renditions.
-The other variants' audio is never served.
+Every running job attempt of every variant writes every selected audio track.
+The server keeps the first delivery of each audio segment that it receives.
+That first delivery can come from any running variant.
+A later delivery of the same audio segment replaces nothing.
+The server designates no variant for audio.
 Under link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033], the server dispatches a job with audio renditions only to a worker that advertises support for audio renditions.
 A worker without that support would ignore the job's new fields and write multiplexed output.
 
@@ -101,7 +108,10 @@ A worker without that support would ignore the job's new fields and write multip
 Carrying the audio in the variant's job attempt read only 0 to 0.5 % more source bytes.
 Three separate audio jobs on a Matroska or MPEG-TS source would read 3.0 times the video attempt's bytes.
 Every language exists from the start of the stream session, so no first switch waits for a job to start.
-Every variant of one relocation wrote byte-identical audio, in 2,208 of 2,208 segment pairs, so any variant can publish it.
+Variants whose job attempts started at the same segment wrote byte-identical audio in 2,208 of 2,208 segment pairs.
+So the first delivery of an audio segment matches a later delivery from a variant that started at the same segment.
+When the viewer's variant changes, the newly requested variant's job attempt writes every audio track from its first segment.
+So the audio renditions never wait for the server to move a role from one variant to another.
 On an MPEG-TS source, FFmpeg's `-start_at_zero` option measured media time zero from the earliest mapped stream.
 Mapping a different set of languages moved media time by 170.7 ms.
 Evidence: <<evidence-video-job>>.
@@ -131,10 +141,18 @@ Evidence: <<evidence-init>>.
 [[decision-priming]]
 === Audio renditions start without the AAC priming frame
 
-The worker drops the AAC priming frame from each audio rendition's segment 0.
+The AAC priming frame is the first frame of an AAC track.
+Its decode time is −1024 ticks, about 21 ms at 48 kHz, so the frame starts before media time zero.
+Two rules cover the priming frame, one for each kind of media segment that carries audio.
+
+* An audio rendition's media segment carries one audio track alone.
+The worker drops the priming frame from each audio rendition's segment 0.
 No audio rendition's segment then starts at a negative decode time.
-Multiplexed segments under link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] keep the priming frame, because hls.js places a multiplexed fragment by its video track.
-An audio-only fragment has no other track to place it by.
+* A multiplexed variant's media segment carries video and audio together under link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037].
+A multiplexed variant's segment 0 keeps the priming frame, as ADR 0037 decides.
+
+A video-only variant's media segment carries no audio, so neither rule applies to it.
+The real server-and-worker player check that gates the implementation proves the drop again in every tested player.
 
 *Why:* When segment 0 kept the priming frame, a language switch in the first 6 s stopped hls.js playback for good.
 The stall happened in 10 of 10 runs in Chromium, Firefox and WebKit.
@@ -144,6 +162,9 @@ hls.js 1.7.0 reads that value as an invalid signed value.
 hls.js keeps only the upper 32 bits as the segment's start.
 At 48 kHz, that start is 89,478 s.
 When the worker dropped the frame, every run played.
+hls.js places a multiplexed fragment by the fragment's video track.
+So the priming frame's decode time does not decide where hls.js places a multiplexed segment.
+An audio rendition's fragment has no video track, so hls.js places that fragment by its audio decode time.
 Evidence: <<evidence-priming>>.
 
 [[decision-subtitles]]
@@ -186,6 +207,27 @@ An image subtitle track, such as PGS, VobSub or DVB, never becomes a rendition.
 When the transcode decision selects an image subtitle track, the variant's job attempts burn that track into the video (link:0013-stream-decision-architecture.adoc[ADR 0013]).
 The server never converts an image subtitle track to text.
 
+[[measurements-before-acceptance]]
+=== Cases that measurements must cover before acceptance
+
+The Evidence section covers one film excerpt with stereo AAC and AC-3 audio.
+Measurements must cover the following cases before this decision is accepted.
+This ADR records no result for them yet.
+
+* 5.1 and other channel layouts.
+* E-AC-3, DTS and TrueHD sources.
+* Opus and FLAC audio renditions.
+* Audio tracks with gaps.
+* Sources with long GOPs. A GOP, or group of pictures, is the run of frames from one keyframe to the next.
+* Forced and hearing-impaired subtitles.
+* Right-to-left languages.
+* SVT-AV1 variants with audio renditions.
+* A switch between variants during playback.
+* Safari on macOS and Safari on an iPhone.
+
+An audio track that ends before the video is not on this list.
+link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]'s rule for closing a media segment covers that case.
+
 [[explicitly-deferred]]
 === Explicitly deferred
 
@@ -194,11 +236,6 @@ The server never converts an image subtitle track to text.
 The probe reads no stream title and no disposition flag besides default and forced.
 AVPlayer labels each option by its language alone.
 So two tracks in one language look identical in a standard menu.
-* Choose which variant publishes the audio renditions, and move that role when the variant stops or exhausts its recovery budget (link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]).
-Moving the role is a junction on the grid, not a byte-identical continuation.
-ADR 0019 starts only the requested variant, so the designated variant may not be running when the viewer's variant changes, and the choice must keep the audio renditions produced.
-* Decide whether the other variants' job attempts map the audio tracks at all.
-Mapping them costs about 1.2 CPU seconds per minute of media for each encoded language in each variant, and nobody is served that audio.
 * Give the server a rule for an audio request for the segment just before a relocated attempt's first segment.
 A relocation starts a new job attempt at a requested segment that lies beyond the running attempt's output (link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]).
 After 23 of 1,160 switches, hls.js first asked for the segment before the playhead's segment.
@@ -209,11 +246,10 @@ So the rule for such an audio request stays open.
 * Decide what a stream session offers for a text track whose extraction has not finished.
 * Measure subtitle extraction from MPEG-TS sources.
 On an MPEG-TS source, `-start_at_zero` sets media time zero from the streams that the job maps.
-* Measure what the evidence did not cover.
-That includes 5.1 and other channel layouts, E-AC-3, DTS and TrueHD sources, and Opus or FLAC renditions.
-It includes audio tracks that end early or have gaps, sources with long GOPs, and forced and hearing-impaired subtitles.
-It includes right-to-left languages, hardware encoders and SVT-AV1 with renditions, and a switch between variants during playback.
-It also includes real Safari, iOS and tvOS apps, Android, cast receivers and TVs.
+* Test audio and subtitle renditions in tvOS apps, on Android, on cast receivers and on TVs.
+Test the renditions with hardware encoders too.
+The measurements run on macOS computers and an iPhone, with software encoders only.
+Issue https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] covers hardware encoders.
 * Find the mechanism of the AVFoundation picture freeze that <<consequences>> describes.
 
 [[consequences]]
@@ -235,14 +271,19 @@ A relocation still applies to the whole stream session.
 The server needs no audio-only job kind.
 The server counts no worker slots for audio.
 The server needs no policy for when to start a language.
-* Each encoded language adds about 1.2 CPU seconds per minute of media to each job attempt that carries the language.
+* Every running job attempt carries every selected language.
+Each encoded language adds about 1.2 CPU seconds per minute of media to each running job attempt.
 Three languages added 8 % to a 360p attempt and 0.7 % to a 1080p attempt.
-* An audio rendition's segment `N` is never ready before the designated variant's video segment `N`.
-The audio follows that variant's encoding speed.
-* A replacement attempt of the designated variant continues every audio rendition from its first segment, as a junction on the grid.
-Copied audio stays byte-identical across the junction.
-Encoded audio differs from the earlier attempt's, because the decoders start on a different packet.
-The splice adds at most 0.2 dB to that difference.
+* Whenever several variants run, each running variant uploads every language.
+Each language adds 100 to 150 KB to each segment upload.
+* An audio rendition's segment `N` is ready as soon as the first running variant delivers segment `N`.
+The audio renditions follow the fastest running variant.
+* Consecutive audio segments can come from different job attempts.
+That happens after a replacement attempt, and when two running variants started at different segments.
+A junction is the segment boundary where one job attempt's output ends and another attempt's output begins.
+Copied audio stays byte-identical across a junction.
+Encoded audio differs from the earlier attempt's encoded audio, because the decoders start on a different packet.
+After decoding, the junction adds at most 0.2 dB to that difference.
 * The first 21 ms of audio in segment 0 decode without the overlap that the priming frame would supply.
 No player showed an error.
 * Video-only variants replace link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]'s multiplexed variants.
@@ -279,8 +320,13 @@ Every player then froze the picture for about as long as the job took to produce
 In the other form of that design, every job started with the stream session.
 Each job then needed its own worker slot, and a worker with one slot refused the second job.
 A backward seek then relocated four jobs instead of one.
-* Publishing whichever variant's audio arrives first needs no designation, but it uploads every language once per variant.
-Each language adds 100 to 150 KB to every segment upload.
+* The server could designate one variant whose job attempts publish the audio renditions.
+link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019] starts only the requested variant.
+So the designated variant may not be running after the viewer's variant changes.
+The server would then need a rule that moves the designation to another variant.
+* One separate job per stream session could write every audio rendition.
+That job reads the source region a second time and needs its own worker slot.
+A seek relocates that job as well as the variant's job attempt.
 * An audio rendition whose segment 0 keeps the AAC priming frame stops hls.js after a language switch in the first segment.
 * Subtitle extraction for each stream session reads a whole Matroska file every time a viewer starts playback.
 At 8 MB/s, a 20 GB file would take about 40 minutes, a figure derived from the read rate.
@@ -350,7 +396,7 @@ At 24 of 24 video junctions, the replacement attempt's first segment started at 
 Encoded audio differed, because AC-3 dither and AAC noise substitution depend on where the decoder starts.
 Away from a junction, the replacement attempt's encoded audio already differs from the earlier attempt's encoded audio.
 After decoding, the junction added −11.1 to +0.2 dB to that difference.
-* Audio segments were byte-identical across variants in 2,208 of 2,208 pairs.
+* Audio segments were byte-identical across variants whose job attempts started at the same segment, in 2,208 of 2,208 pairs.
 The re-check found 272 of 272.
 * Carrying three languages read 0 to 0.5 % more source bytes.
 Three audio-only jobs would read 3.0 times the video attempt's bytes for Matroska and MPEG-TS.

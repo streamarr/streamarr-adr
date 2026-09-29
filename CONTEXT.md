@@ -206,15 +206,15 @@ _Avoid_: finished, done, success
 ### Encoding load
 
 **Pixel rate**:
-Width × height × frames per second, the unit in which Streamarr models, compares and reports encoding load.
+Width × height × frames per second. Streamarr models, compares and reports encoding load in pixel rate.
 _Avoid_: resolution or preset name as a measure of load, pixel count
 
 **Encoder headroom**:
-The encoding load a worker can still take on while every running variant, in every session it serves, stays fast enough for players to keep.
+The encoding load that a worker can still take on. After the worker takes on that load, every running variant in every session that the worker serves must stay fast enough that players keep fetching the variant instead of switching down.
 _Avoid_: free slots, spare capacity (unqualified)
 
 **Encoder preset**:
-The encoder setting that trades encoding time for compression efficiency, named on one preset scale that maps each name to every software encoder's own preset.
+The encoder setting that trades encoding time for compression efficiency. Streamarr names each preset on one preset scale. The preset scale maps each name to every software encoder's own preset.
 A variant keeps one preset for its whole life.
 _Avoid_: speed, quality setting, profile (a codec profile is a different fact)
 

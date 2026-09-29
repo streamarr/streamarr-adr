@@ -215,6 +215,7 @@ _Avoid_: free slots, spare capacity (unqualified)
 
 **Encoder preset**:
 The encoder setting that trades encoding time for compression efficiency. Streamarr names each preset on one preset scale. The preset scale maps each name to every software encoder's own preset.
+The preset setting is a server setting. Every job carries its variant's preset to the worker.
 A variant keeps one preset for its whole life.
 _Avoid_: speed, quality setting, profile (a codec profile is a different fact)
 

@@ -5,7 +5,7 @@
 Proposed
 
 This decision fills in the capacity policy that link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018] left to follow a working path.
-It builds on link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019], which starts and restarts the jobs that produce each variant.
+It builds on link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019], which starts and restarts the jobs that produce each variant and starts only the requested variant unless this ADR's policy allows more.
 It relies on the rule in link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] that the server refuses a replacement attempt whose initialization segment differs from the variant's.
 
 == Context
@@ -104,13 +104,12 @@ An extra variant is any other variant of the same session.
 The server starts extra variants eagerly only when the model predicts that every running variant stays at about 1.35× real time or faster with them running.
 That prediction must leave room for several users' concurrent encodes.
 One session's extra variants never slow another session's requested variant below 1.35×.
-Otherwise only the requested variant starts or restarts, and each other variant starts when a player first requests it.
-Until the model is validated, only the requested variant starts or restarts.
+Otherwise ADR 0019's rule applies: only the requested variant starts or restarts.
+Until the model is validated, ADR 0019's rule applies unconditionally.
 
-*Why:* Restarting only the requested variant made it about three times faster than restarting all four.
-hls.js in Firefox and WebKit's native player then kept 1080p for 76 % to 83 % of playback before a bandwidth drop, and AVPlayer kept it for 100 %.
-With all four variants running, AVPlayer took about 19 s to become ready to play.
-The cost falls on WebKit's native player, which started in 3.5 s instead of 2.0 s because no lower variant was running to fall back on.
+*Why:* Four variants running together pushed 1080p down to 0.94× to 1.06× real time, below the hold threshold.
+An extra variant is worth starting only when it leaves every running variant above that threshold.
+ADR 0019 gives the player measurements behind starting only the requested variant.
 Evidence: <<evidence-contention>>.
 
 [[decision-preset-setting]]
@@ -196,8 +195,6 @@ The quality that each preset gives up at a fixed bitrate is still being measured
 
 * With one software worker on a host like the one measured and today's Automatic, the model will not let every variant of a ladder run at 1.35×.
 Only the requested variant starts or restarts in that case.
-* A player that switches to a variant that is not running waits for that variant's start: 0.8 s to 3.0 s alone in the measurements.
-WebKit's native player starts later and seeks later, because no lower variant is running to fall back on.
 * The server now owns production speed per attempt and a per-worker model, and it needs segment arrival times to calibrate it.
 Free job slots still bound how many jobs a worker accepts; headroom decides only whether extra variants start.
 * Encoders, presets and sources become comparable in one unit, so metrics can show load against capacity directly.
@@ -216,7 +213,6 @@ Concurrent 1080p encodes at 1.2× or faster ranged from two at `medium` to six a
 A grain-heavy clip fits proportionally fewer.
 * Changing a variant's preset mid-stream changes its initialization segment, which the server refuses for a replacement attempt.
 It would amount to a new variant.
-* Starting every variant eagerly made every variant about three times slower and put hls.js into a cycle of emergency aborts.
 
 == Evidence
 
@@ -235,12 +231,8 @@ A 1080p seek took 9.0 s instead of 2.9 s.
 * While all four ran, 1080p came out at 0.94× to 1.06× real time, against 2.96× to 2.99× alone.
 720p came out at 1.64× to 1.87×, against 5.41× to 5.45× alone.
 * An independent re-run reproduced the ratios at 2.95 to 3.22 and the all-four 1080p speed at 1.06× to 1.08×.
-* 36 simulated sessions compared restarting all four variants with restarting only the requested one, in hls.js 1.7.0 in Chromium and Firefox, WebKit's native player and AVPlayer on macOS 26.6.2.
+* 36 simulated sessions in hls.js 1.7.0 in Chromium and Firefox, WebKit's native player and AVPlayer on macOS 26.6.2 compared restarting all four variants with restarting only the requested one; ADR 0019 gives their playback results.
 * With all four, hls.js made 12 to 16 emergency aborts about 6 s apart, and 30 to 34 reversals of the fetched variant per session.
-AVPlayer became ready to play after about 19 s.
-* With only the requested variant, Firefox's hls.js kept 1080p for 76 % to 82 % of playback before the bandwidth drop, WebKit's native player for 82 % to 83 %, and AVPlayer for 100 %.
-Chromium's hls.js kept it for 38 % to 82 %.
-AVPlayer started in 3.4 s to 5.2 s.
 * A control with every variant at its single-variant speed produced no abort cycle, so the cycle comes from the production speed.
 
 [[evidence-threshold]]

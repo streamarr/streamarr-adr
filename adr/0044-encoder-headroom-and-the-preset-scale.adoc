@@ -35,7 +35,7 @@ The 1080p variant was then produced at about real time.
 That speed is too slow for a player to keep fetching the 1080p variant instead of switching down.
 Free job slots say nothing about how fast each job will run.
 The server needs a measure of the encoding load that a host can carry.
-The server also needs a rule for spending that load.
+The server also needs a rule that decides which variants may run within that encoding load.
 
 Streamarr can serve several users from one worker at once.
 A session's extra variants are the variants that its player has not requested.
@@ -47,7 +47,8 @@ An encoder preset is the encoder setting that trades encoding time for compressi
 The preset also decides how much encoding load each variant costs.
 libx264 and libx265 name their presets with words from `ultrafast` to `veryslow`.
 libsvtav1 numbers its presets instead.
-An administrator needs one name that means the same trade-off for every software encoder.
+A ServerAdmin is an account that holds the global superuser authority of link:0024-identity-authority-by-relationship.adoc[ADR 0024].
+A ServerAdmin needs one name that means the same trade-off for every software encoder.
 
 == Decision
 
@@ -71,7 +72,7 @@ Evidence: <<evidence-presets>>, <<evidence-tonemap>>.
 === A headroom model predicts each variant's production speed
 
 The headroom model predicts the encoding load that each job attempt puts on a worker.
-The model states that load as the job attempt's cost in core-seconds per media second.
+The model states that load as the job attempt's cost in CPU seconds per media second.
 The cost of one job attempt is the sum of three terms.
 
 * The encode term is an encoder-and-preset constant `a` × the output pixel rate.
@@ -90,7 +91,7 @@ The model's prediction therefore accounts for each variant's share of the worker
 The model sizes a worker's encoder headroom for several users' encodes at once, not for a single session.
 
 *Why:* With constants fitted per source and preset, the model predicted the CPU of each measured libx264 variant within about 7 %.
-One four-variant ladder at `medium` needed 6.1 core-seconds per media second.
+One four-variant ladder at `medium` needed 6.1 CPU seconds per media second.
 On paper, 10 cores therefore held 1.6 such ladders.
 Yet in a single ladder, the 1080p variant ran at only 0.93× real time.
 The 360p variant of the same ladder ran at 3.6× or faster.
@@ -108,7 +109,7 @@ The Automatic preset in <<decision-preset-setting>> protects the hold threshold 
 *Why:* hls.js 1.7.0 keeps a variant while 0.95 × the hls.js throughput estimate is at least the variant's `BANDWIDTH`.
 A variant produced at speed s downloads at about s × its bitrate.
 The server advertises `BANDWIDTH` as 1.2 × `AVERAGE-BANDWIDTH`.
-Those two rules give a threshold of 1.33× to 1.37× across the measured ladder.
+The hls.js rule for keeping a variant, the download speed and the advertised `BANDWIDTH` together give a threshold of 1.33× to 1.37× across the measured ladder.
 With four variants running, the 1080p variant was produced at 0.94× to 1.06× real time.
 hls.js then made 12 to 16 emergency aborts per session.
 In an emergency abort, hls.js abandons a segment load that has received no byte for half a segment duration or more.
@@ -122,6 +123,8 @@ The server derives each job attempt's production speed from the arrival times of
 The server fits each worker's constants to those speeds continuously while sessions play.
 A new worker starts with a short benchmark.
 The server takes the new worker's first constants from that benchmark.
+The encoder-headroom issue is the server issue that builds the headroom model.
+The encoder-headroom issue is still to be filed under epic https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399].
 The encoder-headroom issue validates the constants by measurement before the eager-start rule or Automatic depends on them.
 
 *Why:* The same preset cost different amounts on different content.
@@ -131,9 +134,9 @@ With one set of three variants running, 1080p measured 1.19× real time in the f
 Evidence: <<evidence-model>>, <<evidence-presets>>.
 
 [[decision-eager-start]]
-=== Extra variants start only while every session keeps its headroom
+=== Extra variants start only while every running variant stays above the hold threshold
 
-A requested variant is the variant whose media segment the player has just requested.
+The requested variant is the variant whose segment the player has just requested.
 An extra variant is any other variant of the same session.
 The server starts extra variants eagerly only when the headroom model predicts that every running variant stays at about 1.35× real time or faster with the extra variants running.
 That prediction must leave room for several users' concurrent encodes.
@@ -149,13 +152,13 @@ ADR 0019 gives the player measurements behind starting only the requested varian
 Evidence: <<evidence-contention>>.
 
 [[decision-preset-setting]]
-=== The preset is Automatic unless an administrator fixes one
+=== The preset is Automatic unless a ServerAdmin fixes one
 
 A preset is the encoder setting that trades encoding time for compression efficiency.
 The preset setting is a server setting.
 The web client shows the preset setting on its ServerAdmin settings page.
 The preset setting's default is Automatic.
-An administrator can override Automatic with one fixed preset from the preset scale in <<decision-preset-scale>>.
+A ServerAdmin can replace Automatic with one fixed preset from the preset scale in <<decision-preset-scale>>.
 One fixed preset covers libx264, libx265 and libsvtav1.
 Every job carries its variant's preset to the worker.
 The worker has no preset setting.
@@ -206,9 +209,9 @@ libsvtav1 uses the number in its column.
 |===
 
 "Not used" means that Automatic never picks the preset.
-An administrator can still choose that preset as the fixed preset.
+A ServerAdmin can still choose that preset as the fixed preset.
 The scale has no name for a libsvtav1 preset below `5`.
-An administrator therefore cannot fix libsvtav1 at a preset below `5`.
+A ServerAdmin therefore cannot fix libsvtav1 at a preset below `5`.
 Hardware encoders get rows only when https://github.com/streamarr/streamarr-server/issues/398[streamarr/streamarr-server#398] verifies them.
 
 *Why:* SVT-AV1's documentation reserves presets 1 to 3 for extremely high efficiency when encoding time does not matter.
@@ -228,7 +231,7 @@ Every replacement attempt of a variant uses the preset of the variant's first jo
 Neither Automatic nor the headroom model changes a running variant's preset.
 
 *Why:* The preset changes the initialization segment.
-Under ADR 0037, the server refuses a replacement attempt whose initialization segment differs.
+Under ADR 0037, the server refuses a replacement attempt whose initialization segment differs from the variant's initialization segment.
 Within one preset, variant and source, the initialization segment was byte-identical across 592 attempts.
 The initialization segment stayed identical with 3 s, 4 s and 6 s segments and after every seek.
 The initialization segment differed between `medium`, `fast`, `faster` and `veryfast` for all 16 combinations of variant and source.
@@ -271,9 +274,9 @@ Headroom decides only whether extra variants start.
 Metrics can therefore show load against capacity directly.
 * A faster preset costs compression efficiency at a given bitrate.
 Automatic accepts that cost today to keep variants above the hold threshold.
-* A preset change, whether by the administrator or by Automatic, reaches only variants that start afterwards.
+* A preset change, whether by a ServerAdmin or by Automatic, reaches only variants that start afterwards.
 * Every job carries a preset, even while Automatic stays at today's presets.
-An administrator changes the preset on the web ServerAdmin settings page, never in a worker's configuration.
+A ServerAdmin changes the preset on the web ServerAdmin settings page, never in a worker's configuration.
 
 == Rejected Alternatives
 
@@ -286,7 +289,7 @@ libsvtav1 numbers its presets instead of naming them.
 On the same host, the number of concurrent 1080p encodes that each stayed at 1.2× real time or faster ranged from two at `medium` to six at `veryfast`.
 A grain-heavy clip fits proportionally fewer encodes.
 * Changing a variant's preset mid-stream changes the variant's initialization segment.
-The server refuses a replacement attempt whose initialization segment differs.
+The server refuses a replacement attempt whose initialization segment differs from the variant's initialization segment.
 A mid-stream preset change would therefore amount to a new variant.
 
 == Evidence
@@ -326,7 +329,7 @@ hls.js switches up at 0.7 × that estimate.
 * When a segment load receives no byte for half a segment duration or more, hls.js abandons that load.
 hls.js then resets its throughput estimate to the `BANDWIDTH` of the next lower variant.
 * A variant produced at speed s downloads at about s × its bitrate.
-That rule gives a threshold of 1.33× to 1.37× for this ladder.
+With the hls.js rule for keeping a variant and with `BANDWIDTH` at 1.2 × `AVERAGE-BANDWIDTH`, that download speed gives a threshold of 1.33× to 1.37× for this ladder.
 * The runs measured 15 sets of running variants on the animation.
 1080p fell below the threshold in only two sets.
 1080p ran at 1.06× with all four variants, and at 1.19× with 720p and 480p.
@@ -411,6 +414,6 @@ SVT-AV1 names 12 as the highest preset intended for human use.
 * https://trac.ffmpeg.org/wiki/Encode/H.264[FFmpeg: H.264 encoding guide] — libx264 preset names.
 * https://github.com/video-dev/hls.js/tree/v1.7.0[hls.js 1.7.0] — the ABR rules behind the hold threshold.
 * https://github.com/streamarr/streamarr-transcode-worker/issues/23[streamarr/streamarr-transcode-worker#23] — the worker passes the job's preset to every software encoder.
-* https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399] — the playback capabilities epic, which holds the encoder-headroom issue.
+* https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399] — the playback capabilities epic, under which the encoder-headroom issue is to be filed.
 * https://github.com/streamarr/streamarr-server/issues/398[streamarr/streamarr-server#398] — verified hardware encoders.
 * https://github.com/streamarr/streamarr-server/issues/402[streamarr/streamarr-server#402] — which variants a ladder includes.

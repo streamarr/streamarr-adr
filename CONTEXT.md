@@ -76,11 +76,11 @@ The worker module that owns one job attempt's FFmpeg process, reads its standard
 _Avoid_: engine, transcoder, pipeline
 
 **Fragment**:
-One movie-fragment pair (`moof` and `mdat`) that FFmpeg emits, and the smallest unit the producer reads. A fragment starts at a keyframe or when the fragmentation target elapses.
+One movie-fragment pair (`moof` and `mdat`) that FFmpeg emits, and the smallest unit the producer reads. A fragment starts at a keyframe or when the fragmentation target elapses. The producer never delivers a fragment as FFmpeg wrote it.
 _Avoid_: chunk, part
 
 **Media segment**:
-The unit an HLS playlist advertises, always fragmented MP4. Segment N starts at the first video keyframe inside media time [N × period, (N + 1) × period). It contains that keyframe's fragment and every following fragment until a video keyframe starts a later segment.
+The unit an HLS playlist advertises, always fragmented MP4, delivered as one `moof` and one `mdat`. Segment N starts at the first video keyframe inside media time [N × period, (N + 1) × period). Its video is the video of that keyframe's fragment and every following fragment until a video keyframe starts a later segment. Its audio is every audio sample that starts inside its interval, whichever fragment carried it.
 _Avoid_: chunk, segment file, .ts, container format
 
 **Initialization segment**:

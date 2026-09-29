@@ -26,7 +26,8 @@ One video track of a media file as the probe describes it.
 _Avoid_: track, stream (unqualified), stream session (the runtime playback concept)
 
 **Chosen video stream**:
-The video stream of a media file that the transcode decision reads and FFmpeg maps: the first video stream that is not an attached picture such as cover art.
+The video stream of a media file that the transcode decision reads and FFmpeg maps.
+The chosen video stream is the first video stream that is not an attached picture, such as embedded cover art.
 _Avoid_: first video stream, `0:v:0`, main video stream
 
 **Dynamic range**:
@@ -49,8 +50,10 @@ Its values are claims that the probe checks against the picture signalling and t
 _Avoid_: profile (unqualified), DV profile
 
 **Output frame rate**:
-The frame rate, stored as an exact fraction, at which every encode of a chosen video stream runs.
-The probe job chooses it once per file, so every job attempt encodes on one frame grid.
+The frame rate at which every encode of a chosen video stream runs.
+The probe outcome stores the output frame rate as an exact fraction.
+The probe job chooses the output frame rate once per file.
+Every job attempt therefore encodes on one frame grid, which is the same sequence of output frame times.
 _Avoid_: target frame rate, frame rate (unqualified) for the encode's rate
 
 ### Playback records

@@ -45,7 +45,7 @@ The profile and level that a video codec such as H.264, HEVC or AV1 signals for 
 _Avoid_: profile (unqualified), viewing profile (the household concept in ADR 0024)
 
 **Codec string**:
-The RFC 6381 value that names one stream's codec with its profile, level and other parameters, such as `avc1.640028`.
+The RFC 6381 value that names one stream's codec with its codec profile, level and other parameters, such as `avc1.640028`.
 A variant's `CODECS` attribute lists the codec strings of the variant's streams.
 An encode's codec string follows from its forced codec, codec profile, level, tier and bit depth.
 The probe computes the codec string of every video and audio stream.

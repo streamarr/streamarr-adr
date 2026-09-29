@@ -57,7 +57,6 @@ ADR 0013's video decision decides what the server copies.
 Until clients declare dynamic ranges (https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395]), ADR 0013's interim copy rule decides what the server copies.
 
 When the server encodes, it uses the first codec in `[av1, hevc, h264]` that the client declares.
-The server encodes HEVC only when the client declares HEVC and does not declare AV1.
 A client that declares no codec receives H.264, as it does today.
 The server reads the declared codecs from the typed client capability declaration that streamarr/streamarr-server#395 defines.
 The codec preference never reads the codec-name strings that clients send today.
@@ -92,7 +91,7 @@ The verified-encoder filter replaces the first version's filter by available har
 
 An encoder backend is the encoder that a worker runs for a codec family, such as libx265 or a hardware `hevc_*` encoder.
 A replacement attempt is a job attempt that replaces an earlier job attempt for the same variant under link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]'s recovery.
-A replacement attempt runs on the encoder backend of the job attempt that produced the variant's initialization segment, as ADR 0037 and streamarr/streamarr-server#398 require.
+Once streamarr/streamarr-server#398 lands, a replacement attempt runs on the encoder backend of the job attempt that produced the variant's initialization segment, as ADR 0037 requires.
 
 *Why:* no version of the server applied the first version's hardware filter.
 Today a worker without an AV1 hardware encoder encodes AV1 with the SVT-AV1 software encoder.
@@ -104,8 +103,12 @@ An HEVC encode follows ADR 0013's video decision like every other encode.
 Its output is 8-bit 4:2:0 SDR (standard dynamic range).
 Its codec profile is Main.
 ADR 0013's forced-level rule computes the encode's level from Annex A of ITU-T H.265, the standard that defines HEVC, as that rule does for H.264 and AV1.
-The worker forces that profile and level.
-The playlist advertises the codec string that the forced profile and level determine.
+The HEVC encode work (streamarr/streamarr-server#58) checks the H.265 level computation against libx265 output before the server encodes HEVC with libx265, as ADR 0013 requires.
+Each hardware `hevc_*` encoder needs the same check before the server encodes HEVC with that hardware encoder.
+The server also chooses the encode's tier, as ADR 0013 requires.
+The tier, Main or High, selects which bitrate limits of the level apply.
+The worker forces that profile, tier and level.
+The playlist advertises the codec string that the forced profile, tier and level determine.
 The worker fails the attempt when an initialization segment disagrees with that codec string.
 
 The server encodes HEVC only after the pinned worker image writes the `hvc1` sample entry for HEVC encodes (https://github.com/streamarr/streamarr-transcode-worker/issues/18[streamarr/streamarr-transcode-worker#18]).
@@ -115,7 +118,7 @@ At 1080p60, libx265 writes level 4.1, so the constant codec string misdescribes 
 libx264 and SVT-AV1 accept a forced level that is too low and write that level, as ADR 0013 records.
 libx265 instead refuses to start an encode whose forced level is too low for the output.
 A wrong HEVC level computation therefore fails the attempt at the worker.
-Apple's HLS authoring specification tells authors to use `hvc1` rather than `hev1` for HEVC.
+Apple's HLS authoring specification recommends that authors use `hvc1` rather than `hev1` for HEVC.
 FFmpeg's mp4 muxer writes `hev1` for an HEVC encode until streamarr/streamarr-transcode-worker#18 makes the worker write `hvc1`.
 The measurements did not check `hev1` playback on iOS or tvOS devices.
 Evidence: <<evidence-strings>>, <<evidence-players>>.
@@ -135,8 +138,9 @@ This ADR pins no SVT-AV1 version or commit.
 
 == Consequences
 
-* After streamarr/streamarr-server#395 lands, Apple TV receives HEVC whenever the server encodes for it, because Apple TV declares HEVC and does not declare AV1.
-* When ADR 0013's video decision encodes an HDR HEVC source to SDR for Apple TV, the encode becomes HEVC SDR instead of H.264 SDR.
+* After streamarr/streamarr-server#395 and streamarr/streamarr-transcode-worker#18 land, Apple TV receives HEVC when the server encodes for it on a worker with a verified HEVC encoder.
+Apple TV declares HEVC and does not declare AV1.
+An HDR HEVC source that ADR 0013's video decision encodes to SDR for Apple TV then becomes an HEVC SDR encode instead of an H.264 SDR encode.
 This outcome is wanted.
 * Until streamarr/streamarr-server#395 lands, no client reaches the HEVC or AV1 encode paths.
 The CPU cost and the bugs of the HEVC and AV1 encode paths therefore affect no session yet.
@@ -147,18 +151,18 @@ Every encode for Apple TV is H.264 SDR.
 A worker whose verified HEVC encoder is libx265 pays that cost on each HEVC encode.
 * H.264 remains the codec that every client receives when it declares nothing better.
 * libx265 and a hardware `hevc_*` encoder write different initialization segments.
-A variant therefore stays on one encoder backend for its lifetime.
+Once streamarr/streamarr-server#398 lands, a variant therefore stays on one encoder backend for its lifetime.
 
 == Rejected Alternatives
 
 * Keeping `[av1, h264]` sends every Apple TV encode as H.264, although Apple TV declares HEVC.
-* Choosing HEVC from codec-name strings before streamarr/streamarr-server#395 would need client code.
-The typed client capability declaration of streamarr/streamarr-server#395 would later replace that client code.
-* Keeping AV1 limited to hardware encoders while other codecs use verified encoders would stop the SVT-AV1 software encodes that workers run today.
+* Choosing HEVC from codec-name strings before streamarr/streamarr-server#395 would trust a string that names no codec profile, level or bit depth.
+The typed client capability declaration of streamarr/streamarr-server#395 replaces those strings.
+* Keeping AV1 limited to hardware encoders while other codecs use verified encoders would stop the SVT-AV1 software encodes that workers can run today.
 * Keeping the first version's hardware-encoder sentence until streamarr/streamarr-server#398 is designed would leave a filter that no version of the server applied.
 * Using this codec preference as the recovery order would conflate two separate policies.
 streamarr/streamarr-server#401 owns recovery.
-* Refusing `hev1` output because `canPlayType` reports `hev1` as unsupported would ignore a measurement.
+* Refusing to copy an HEVC source whose sample entry is `hev1`, because `canPlayType` reports `hev1` as unsupported, would ignore a measurement.
 On macOS, WebKit's native player and AVPlayer played `hev1` output.
 
 == Evidence

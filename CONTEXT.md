@@ -80,7 +80,7 @@ One movie-fragment pair (`moof` and `mdat`) that FFmpeg emits, and the smallest 
 _Avoid_: chunk, part
 
 **Media segment**:
-The unit an HLS playlist advertises, always fragmented MP4, delivered as one `moof` and one `mdat`. Segment N starts at the first video keyframe inside media time [N × period, (N + 1) × period). Its video is the video of that keyframe's fragment and every following fragment until a video keyframe starts a later segment. Its audio is every audio sample that starts inside its interval, whichever fragment carried it.
+The unit an HLS playlist advertises, always fragmented MP4, delivered as one `moof` and one `mdat`. Segment N opens at the first video keyframe at or after N × period, which must lie inside media time [N × period, (N + 1) × period), even when that keyframe sits inside one of FFmpeg's fragments. Its video is every video sample from that keyframe up to the keyframe that opens a later segment. Its audio is every audio sample that starts inside its interval, whichever fragment carried it, except a sample that arrives after the segment was delivered, which the producer drops.
 _Avoid_: chunk, segment file, .ts, container format
 
 **Initialization segment**:

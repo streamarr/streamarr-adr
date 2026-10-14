@@ -223,33 +223,49 @@ The capacity metric tells the ServerAdmin that the worker needs more capacity.
 === The preset is Automatic unless a ServerAdmin fixes one
 
 A preset is the encoder setting that trades encoding time for compression efficiency.
-The preset setting is a server setting.
+The preset setting is one server-wide setting.
 The web client shows the preset setting on its ServerAdmin settings page.
 The preset setting's default is Automatic.
 A ServerAdmin can replace Automatic with one fixed preset from the preset scale in <<decision-preset-scale>>.
-One fixed preset covers libx264, libx265 and libsvtav1.
-Every job carries its variant's preset to the worker.
+One fixed preset covers every software encoder: libx264, libx265 and libsvtav1.
+A variant's resolved preset is the encoder's own preset that the server derives from the preset setting for that variant.
+Every job carries its variant's resolved preset to the worker.
 The worker has no preset setting.
 The worker passes the job's preset to the encoder.
 
-Today Automatic means `veryfast` for libx264 and libx265.
-Today Automatic means preset `10` for libsvtav1.
+Automatic means `faster` for libx264.
+Automatic means `veryfast` for libx265.
+Automatic means preset `10` for libsvtav1.
 On the preset scale, libsvtav1 preset `10` is `faster`.
+Until a measurement validates the headroom model's constants, Automatic keeps exactly those presets.
 
-Once a measurement validates the headroom model's constants, Automatic becomes headroom-driven.
-The server picks a variant's preset when that variant's first job attempt starts, and keeps it for that variant, as <<decision-fixed-preset>> requires.
-The server picks the slowest preset from `veryfast` to `medium` that keeps every running variant at or above the speed floor.
-For libsvtav1, that range runs from `faster` to `medium`.
-Those two names map to libsvtav1 presets `10` and `8`.
+Once a measurement validates the headroom model's constants, headroom may move an encoder's preset under load.
+The server picks a variant's preset when that variant's first job attempt starts.
+The server picks the slowest preset in the encoder's range that keeps every running variant at or above the speed floor.
+The server keeps that preset for that variant, as <<decision-fixed-preset>> requires.
+Each encoder has its own range under Automatic.
+
+* libx264 runs at `faster`.
+libx264 moves to `veryfast` only when `faster` would push a running variant below the speed floor.
+The server never picks a libx264 preset slower than `faster`.
+* libx265 stays at `veryfast` until libx265's seek waits are measured.
+* libsvtav1 runs at preset `10`.
+libsvtav1 moves to preset `11` only when preset `10` would push a running variant below the speed floor.
+Until libsvtav1's seek waits are measured, the server never picks a libsvtav1 preset slower than `10`.
 
 *Why:* The server picks each headroom-driven preset.
 The headroom model needs to know which preset each job runs.
 The server therefore owns the preset setting.
 The job therefore always carries the preset.
-After a seek at 1080p, `veryfast` used 0.38× `medium`'s CPU per media second.
-With 6 s segments, the first 1080p media segment after a seek completed in 1.35 s with `veryfast` and in 3.18 s with `medium`.
-With `veryfast`, six concurrent 1080p encodes of a 24 fps film each stayed at 1.2× real time or faster.
-With `medium`, only two concurrent encodes stayed that fast.
+On a 10-core arm64 host, with libx264 over four sources and the four-variant ladder, `faster` used 0.59× `medium`'s CPU per media second at 1080p.
+At equal VMAF, `faster` needed about 10 % more bitrate than `medium`.
+At equal VMAF, `veryfast` needed 34 % to 39 % more bitrate than `medium`.
+At 3 s segments, the first 1080p media segment after a seek took 1.28 s with `faster` and 2.09 s with `medium`.
+Those two times are medians of 12 runs.
+Automatic therefore starts libx264 at `faster` and moves libx264 only toward `veryfast` under load.
+A slower preset lengthens the wait for the first media segment after a seek.
+The seek waits of libx265 and libsvtav1 have not been measured, so neither encoder runs slower than its Automatic preset.
+On a 14-core arm64 host with a synthetic 1080p30 source, libx265 at `veryfast` already spent about three times the CPU of libx264.
 SVT-AV1's documentation uses preset 10 as its example for fast and real-time encoding.
 Evidence: <<evidence-presets>>, <<evidence-svt-av1>>.
 
@@ -266,10 +282,10 @@ libsvtav1 uses the number in its column.
 
 |`ultrafast` |`ultrafast` |`ultrafast` |`13` |Not used
 |`superfast` |`superfast` |`superfast` |`12` |Not used
-|`veryfast` |`veryfast` |`veryfast` |`11` |Automatic today for libx264 and libx265, and the fastest headroom-driven choice for them
-|`faster` |`faster` |`faster` |`10` |Automatic today for libsvtav1, and its fastest headroom-driven choice
-|`fast` |`fast` |`fast` |`9` |Inside the headroom-driven range for all three encoders
-|`medium` |`medium` |`medium` |`8` |The slowest headroom-driven choice for all three encoders
+|`veryfast` |`veryfast` |`veryfast` |`11` |Automatic for libx265, and the choice under load for libx264 and libsvtav1
+|`faster` |`faster` |`faster` |`10` |Automatic for libx264 and libsvtav1
+|`fast` |`fast` |`fast` |`9` |Not used
+|`medium` |`medium` |`medium` |`8` |Not used
 |`slow` |`slow` |`slow` |`7` |Not used
 |`slower` |`slower` |`slower` |`6` |Not used
 |`veryslow` |`veryslow` |`veryslow` |`5` |Not used
@@ -296,6 +312,7 @@ Evidence: <<evidence-svt-av1>>.
 The preset stays fixed for a variant.
 Every replacement attempt of a variant uses the preset of the variant's first job attempt.
 Neither Automatic nor the headroom model changes a running variant's preset.
+A preset change, whether by a ServerAdmin or by Automatic, reaches only variants that start afterwards.
 
 *Why:* The preset changes the initialization segment.
 Under ADR 0037, the server refuses a replacement attempt whose initialization segment differs from the variant's initialization segment.
@@ -306,9 +323,9 @@ Evidence: <<evidence-init>>.
 
 === Implementation
 
-Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/23[streamarr/streamarr-transcode-worker#23] makes the worker pass the job's preset to every software encoder.
-The server adds the preset setting, with Automatic as its default.
-The server puts the preset on every job.
+https://github.com/streamarr/streamarr-server/issues/497[streamarr/streamarr-server#497] adds the preset setting, with Automatic as its default and Automatic's fixed presets.
+That issue puts the resolved preset on every job.
+That issue also makes the worker pass the job's preset to every software encoder.
 The web client shows the preset setting on its ServerAdmin settings page.
 https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499] adds pixel rate, the headroom model, the continuous measurement of each worker's constants, the kept calibrations and the benchmark.
 The same issue adds the speed floor, the extra variants and the capacity metric.
@@ -323,6 +340,8 @@ The headroom-driven Automatic preset is the last step of that issue.
 This decision fixes the model's form, not the values of `a`, `d` or the tone-mapping cost.
 The measurements cover libx264 only.
 libx265 and libsvtav1 presets have not been measured on a ladder.
+* Any headroom-driven move of libx265 away from `veryfast`, until libx265's seek waits are measured.
+* Any libsvtav1 preset slower than `10` under Automatic, until libsvtav1's seek waits are measured.
 * The rate-control choices, including any CRF values.
 
 == Consequences
@@ -347,9 +366,11 @@ Viewers keep playing, but a quality switch then waits for an on-demand start und
 * Encoders, presets and sources become comparable in one unit, pixel rate.
 Metrics can therefore show load against capacity directly.
 * A faster preset costs compression efficiency at a given bitrate.
-Automatic accepts that cost today to keep every running variant at or above the speed floor.
+In libx264 at equal VMAF, Automatic's `faster` needs about 10 % more bitrate than `medium`.
+Under load, `veryfast` needs 34 % to 39 % more bitrate than `medium`.
+Automatic accepts those costs to keep every running variant at or above the speed floor.
 * A preset change, whether by a ServerAdmin or by Automatic, reaches only variants that start afterwards.
-* Every job carries a preset, even while Automatic stays at today's presets.
+* Every job carries a preset, even while Automatic keeps its fixed presets.
 A ServerAdmin changes the preset on the web ServerAdmin settings page, never in a worker's configuration.
 
 == Rejected Alternatives
@@ -358,7 +379,7 @@ A ServerAdmin changes the preset on the web ServerAdmin settings page, never in 
 At the same cost per frame, a 1080p60 source costs about 2.5 times a 1080p24 source.
 * Preset names as the unit of load mean different costs in different encoders.
 At the encoders' own default preset, `medium`, libx265 spends about twice the CPU of libx264 on the same encode.
-At `veryfast`, which Automatic uses today, libx265 spends about three times the CPU of libx264.
+At `veryfast`, which Automatic uses for libx265, libx265 spends about three times the CPU of libx264.
 libsvtav1 numbers its presets instead of naming them.
 * A fixed number of variants, or free job slots, cannot track the host, the preset, the content or other sessions.
 On the same host, the number of concurrent 1080p encodes that each stayed at 1.2× real time or faster ranged from two at `medium` to six at `veryfast`.
@@ -386,6 +407,21 @@ Stopping extra variants keeps every viewer playing.
 * Benchmarking every worker at every registration, before the worker takes jobs, delays every restart of a worker whose hardware and FFmpeg build have not changed.
 * Taking jobs at once with cautious default constants, and benchmarking when the worker is idle, runs a new worker on constants that no measurement supports.
 A busy worker may also never be idle.
+* A fixed `veryfast` default with a ServerAdmin override ignores the headroom that a worker actually has.
+At equal VMAF, `veryfast` also needs 34 % to 39 % more bitrate than `medium`.
+* Keeping each encoder's default preset, `medium`, makes the first 1080p media segment after a seek take 2.09 s instead of 1.28 s at 3 s segments.
+On the measured host, `medium` also kept only two concurrent 1080p encodes at 1.2× real time or faster.
+* Starting libx264 at `faster` with a headroom range from `veryfast` to `medium` would let a worker with spare headroom pick `medium`.
+`medium` lengthens the wait for the first media segment after a seek.
+* Keeping `veryfast` as libx264's Automatic preset needs 34 % to 39 % more bitrate than `medium` at equal VMAF, against about 10 % for `faster`.
+* Using `faster` for 1080p and 720p and `medium` for 480p and 360p adds a preset rule for each resolution.
+After a seek at 360p, `medium` still cost about 1.4 times the CPU of `faster`, averaged over four sources.
+* Using `fast` for libx264 costs 0.80× `medium`'s CPU at 1080p, against 0.59× for `faster`.
+At 6 s segments, `fast` also took 2.58 s to the first 1080p media segment after a seek, against 1.95 s for `faster`.
+* Mapping Automatic to libsvtav1 preset `11`, so that `veryfast` names Automatic for every encoder, moves libsvtav1 off preset `10`.
+SVT-AV1's documentation gives preset `10` as its example for fast and real-time encoding.
+* Keeping libsvtav1's headroom range from `10` down to `8` would let libsvtav1 run slower than `10` before libsvtav1's seek waits are measured.
+* A preset setting on the worker would hide each job's preset from the headroom model, which needs that preset.
 
 == Evidence
 
@@ -467,6 +503,7 @@ At 360p the same presets cost 0.86, 0.72, 0.59 and 0.53.
 `veryfast` needed 1.0 to 1.6.
 The grain-heavy clip was the costliest source in every cell, at 1.3 to 1.9 times the 24 fps film.
 * Over 12 runs, the median time to the first 1080p media segment after a seek was 3.18 s for `medium`, 2.58 s for `fast`, 1.95 s for `faster`, 1.35 s for `veryfast` and 0.99 s for `superfast`.
+* At 3 s segments, over 12 runs, the median time to the first 1080p media segment after a seek was 2.09 s for `medium` and 1.28 s for `faster`.
 * The most concurrent 1080p encodes of the 24 fps film that all stayed at 1.2× or faster were 2 at `medium`, 3 at `fast`, 4 at `faster`, 6 at `veryfast` and 8 at `superfast`.
 * No full four-variant ladder kept 1080p at real time at `medium`.
 One ladder did at `fast`.
@@ -555,7 +592,7 @@ SVT-AV1 names 12 as the highest preset intended for human use.
 * https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Docs/Parameters.md[SVT-AV1: Parameters] — the preset range and default.
 * https://trac.ffmpeg.org/wiki/Encode/H.264[FFmpeg: H.264 encoding guide] — libx264 preset names.
 * https://github.com/video-dev/hls.js/tree/v1.7.0[hls.js 1.7.0] — the ABR rules behind the speed floor's 1.35× real time.
-* https://github.com/streamarr/streamarr-transcode-worker/issues/23[streamarr/streamarr-transcode-worker#23] — the worker passes the job's preset to every software encoder.
+* https://github.com/streamarr/streamarr-server/issues/497[streamarr/streamarr-server#497] — the preset setting, Automatic's fixed presets and the preset on every job.
 * https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399] — the playback capabilities epic.
 * https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499] — the headroom model, its calibration, the speed floor, extra variants and presets under Automatic.
 * https://github.com/streamarr/streamarr-server/issues/398[streamarr/streamarr-server#398] — verified hardware encoders.

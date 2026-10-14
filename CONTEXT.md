@@ -7,7 +7,7 @@ This glossary defines shared Streamarr domain terms.
 ### Probe
 
 **Probe properties**:
-The technical facts about a media file's container and streams that a probe reports; stream properties are the facts about one stream.
+The technical facts about a media file's container and streams that a probe reports. Stream properties are the facts about one stream.
 _Avoid_: metadata, technical metadata
 
 **Metadata**:
@@ -88,7 +88,7 @@ The worker module that owns one job attempt's FFmpeg process, reads its standard
 _Avoid_: engine, transcoder, pipeline
 
 **Fragment**:
-One movie-fragment pair (`moof` and `mdat`) that FFmpeg emits, and the smallest unit the producer reads. A fragment starts at a keyframe or when the fragmentation target elapses.
+One movie-fragment pair (`moof` and `mdat`) that FFmpeg emits, and the smallest unit the producer reads. A fragment starts at a keyframe or when the fragmentation target elapses. The producer never delivers a fragment as FFmpeg wrote it.
 _Avoid_: chunk, part
 
 **Rendition**:
@@ -96,7 +96,7 @@ An alternate HLS track, such as one audio language or one text subtitle track. T
 _Avoid_: variant, audio variant, alternate stream, track (unqualified)
 
 **Media segment**:
-The unit an HLS playlist advertises, always fragmented MP4. Segment N is the fragments whose first video sample is a keyframe inside media time [N × period, (N + 1) × period), together with the fragments that follow them before the next such keyframe.
+The unit an HLS playlist advertises, always fragmented MP4, delivered as one `moof` and one `mdat`. The stream session's segment list gives every segment's start, and segment N's interval runs in media time from its start up to the next segment's start. A stream session that only encodes uses the plain 3 s grid, where segment N starts at N × 3 s. A stream session with a copied variant builds its segment list from 3 s slots and merges each slot that holds no source keyframe into the segment before it. Segment N opens at the first video keyframe at or after its start, which must lie inside its interval, even when that keyframe sits inside one of FFmpeg's fragments. Its video is every video sample from that keyframe up to the keyframe that opens a later segment. Its audio is every audio sample that starts inside its interval, whichever fragment carried it, except a sample that arrives after the segment was delivered, which the producer drops.
 _Avoid_: chunk, segment file, .ts, container format
 
 **Initialization segment**:
@@ -112,7 +112,7 @@ The configured maximum media duration of a fragment. The muxer honours it at the
 _Avoid_: fragment bound, chunk size
 
 **Preroll**:
-Media before the requested seek point that a stream copy emits, because a seek lands on the keyframe at or before the target. The previous attempt already delivered it, so the producer discards it.
+Preroll is media that a job attempt's seek emits before the attempt's first media segment. A stream-copy seek starts at the keyframe at or before the target. An attempt that encodes video and starts after segment 0 decodes the media before its first segment without encoding that media, so that media never reaches the producer. The producer discards preroll because this media belongs to earlier segments.
 _Avoid_: overlap, lead-in
 
 **Stream copy**:
@@ -123,8 +123,12 @@ _Avoid_: passthrough, remux (when only the video is copied)
 An encoder that passed a worker's test encode and that the worker advertises. It can be a hardware or a software encoder. A worker-verified encoder is not necessarily keyframe-verified.
 _Avoid_: verified encoder (unqualified)
 
+**Keyframe-verified encoder**:
+An encoder is keyframe-verified when recordings under the pinned FFmpeg show that every forced keyframe is a sync sample and starts a closed GOP. The recordings must also show that the encoder restarts its GOP count at each forced keyframe. Whether a particular worker can run the encoder is a separate fact, which the term worker-verified encoder describes.
+_Avoid_: verified encoder (unqualified), GOP-verified encoder
+
 **Source container**:
-The container of a media file as the probe found it, such as Matroska, MP4 or MPEG-TS. It is a source fact that decides direct-play eligibility, and it never describes HLS delivery, which is always fragmented MP4.
+The container of a media file as the probe found it, such as Matroska, MP4 or MPEG-TS. This source fact decides whether the file qualifies for direct play. HLS delivery always uses fragmented MP4.
 _Avoid_: container format, ContainerFormat, output container
 
 ### Jobs and library operations
@@ -192,15 +196,15 @@ A planned restart of the requested variant's job at the media segment that a pla
 _Avoid_: seek (the player's action), restart (unqualified), recovery
 
 **Format attempt**:
-One output format that the server chooses within a playback session, delivered by its own stream session and initialization segment. The initial format is the first attempt, and each Auto recovery after a format error adds one to the playback session's budget.
+One output format that the server chooses within a playback session. Each format attempt has its own stream session and initialization segment. The initial format is the first attempt. Each Auto recovery after a format error adds one to the playback session's budget.
 _Avoid_: fallback stream, replacement (unqualified)
 
 **Encoder backend**:
-The encoder a worker actually runs for a codec family, together with whether it is hardware or software. A variant's first job attempt pins the backend for every replacement attempt.
+The encoder a worker actually runs for a codec family, together with whether it is hardware or software. Every replacement attempt for a variant must use the backend that the variant's first job attempt used.
 _Avoid_: encoder capability, codec
 
 **Completed attempt**:
-A job attempt whose FFmpeg exited cleanly after the producer read all of its output and the server acknowledged every delivered segment, while the attempt was still active. A completed attempt does not mean the run covered the advertised timeline; the server owns coverage.
+A job attempt completes when FFmpeg has exited cleanly, the producer has read all output, and the server has acknowledged every delivered segment. The attempt must still be active when all three conditions hold. The server must still handle requests for any advertised segment that the attempt did not produce.
 _Avoid_: finished, done, success
 
 ### Encoding load

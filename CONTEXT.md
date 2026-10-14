@@ -25,6 +25,11 @@ _Avoid_: VideoPropertyIssue, MediaPropertyIssue, MediaFilePropertyIssue
 One video track of a media file as the probe describes it.
 _Avoid_: track, stream (unqualified), stream session (the runtime playback concept)
 
+**Chosen video stream**:
+The video stream of a media file that the transcode decision reads and FFmpeg maps.
+The chosen video stream is the first video stream that is not an attached picture, such as embedded cover art.
+_Avoid_: first video stream, `0:v:0`, main video stream
+
 **Dynamic range**:
 The structured description of a video stream's HDR features: its compatible base, whether HDR10+ is present, and its Dolby Vision details.
 Each feature is present, absent, or unspecified when the probe could not check, and the broad HDR or SDR label is derived from the description and never stored.
@@ -43,6 +48,13 @@ _Avoid_: profile (unqualified), viewing profile (the household concept in ADR 00
 The profile, level and base-layer compatibility that the Dolby Vision configuration record declares for a video stream, kept separate from the codec profile.
 Its values are claims that the probe checks against the picture signalling and the samples.
 _Avoid_: profile (unqualified), DV profile
+
+**Output frame rate**:
+The frame rate at which every encode of a chosen video stream runs.
+The probe outcome, the transcode job and the worker's FFmpeg argument carry the output frame rate as an exact fraction, never as a decimal.
+The probe job chooses the output frame rate once per file.
+Every job attempt therefore encodes on one frame grid, which is the same sequence of output frame times.
+_Avoid_: target frame rate, frame rate (unqualified) for the encode's rate
 
 ### Playback records
 

@@ -7,7 +7,8 @@ Accepted
 NOTE: Since link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033], the buildpack, lock, notices, and smoke tests described here live in the `streamarr-transcode-worker` repository.
 The server image ships no FFmpeg.
 
-An amendment to this ADR records how tests guard each upgrade of the pinned FFmpeg build (<<decision-upgrade-guard>>).
+An amendment to this ADR pins a second FFmpeg build for native macOS workers (<<decision-macos-pin>>).
+The amendment also records how tests guard each upgrade of a pinned FFmpeg build (<<decision-upgrade-guard>>).
 
 == Context
 
@@ -18,6 +19,11 @@ Jellyfin publishes numbered FFmpeg releases with media-server patches and portab
 Its packaging revision is a fourth numeric version component, not a prerelease indicator.
 
 An upgrade of the pinned FFmpeg build can change the initialization segment and the media segments that the worker produces from the same source file.
+
+VideoToolbox is Apple's hardware video framework.
+Only a process that runs natively on macOS can reach VideoToolbox.
+A container on a Mac runs in a Linux virtual machine.
+The FFmpeg build in the Linux worker image therefore cannot reach VideoToolbox on a Mac.
 
 == Decision
 
@@ -43,13 +49,25 @@ Use a short-lived GitHub App token to create a signed commit containing only tha
 Include the App's commit identity in Renovate's ignored authors so generated commits do not prevent future updates.
 Unprivileged PR CI may execute the proposed resolver to test changes to that resolver.
 
+[[decision-macos-pin]]
+=== A pinned macOS FFmpeg build serves native macOS workers
+
+Streamarr supports native macOS workers on Apple silicon.
+A native macOS worker runs directly on macOS, outside any container.
+A native macOS worker can therefore use VideoToolbox.
+https://github.com/streamarr/streamarr-transcode-worker/issues/54[streamarr/streamarr-transcode-worker#54] packages the worker for macOS and runs the worker natively.
+This ADR pins a macOS FFmpeg build for native macOS workers, beside the FFmpeg build in the Linux worker image.
+The macOS pin covers Apple silicon (arm64) only.
+A native macOS worker is supported only with a server that runs natively on the same Mac.
+The native macOS worker reaches the server over loopback.
+
 [[decision-upgrade-guard]]
 === Committed fixtures guard each upgrade of the pinned FFmpeg build
 
 FFmpeg's test sources are built-in source filters that synthesize video and audio signals.
 The worker repository holds committed test fixtures that FFmpeg's test sources generate.
-The worker's CI runs tests against those fixtures with the pinned FFmpeg build.
-An upgrade of the pinned FFmpeg build must pass those tests.
+The worker's CI runs tests against those fixtures with the pinned FFmpeg build of the Linux worker image.
+An upgrade of the Linux worker image's pinned FFmpeg build must pass those tests.
 The tests follow link:0005-tdd-and-behavior-testing.adoc[ADR 0005] and assert the worker's produced output, not how the worker invokes FFmpeg.
 
 FATE, the FFmpeg Automated Testing Environment, is FFmpeg's own test suite with its own set of real sample media files.
@@ -90,6 +108,9 @@ Tests of image-subtitle burn-in also run only locally, against real PGS and VobS
 
 * A Streamarr-owned permanent binary/source archive and independent build pipeline.
 * Hardware-accelerator certification or new codec selection behavior.
+* Workers on another host outside a service mesh (link:0035-worker-uses-spring-boot-and-mesh-transport-security.adoc[ADR 0035]) wait for https://github.com/streamarr/streamarr-server/issues/509[streamarr/streamarr-server#509].
+A worker outside a service mesh needs mutual TLS and a decision on how workers authenticate.
+* This ADR leaves open whether an upgrade of the macOS FFmpeg build must pass the committed-fixture tests in CI or only in a local run on a Mac.
 
 == Consequences
 
@@ -107,6 +128,9 @@ One generated fixture also covers a stream copy of Dolby Vision profile 8.2.
 CI downloads no FATE samples.
 Only a local test run checks an FFmpeg upgrade against PGS subtitles, image-subtitle burn-in, and Dolby Vision color and tone mapping.
 
+Streamarr reviews the upgrades of two pinned FFmpeg builds instead of one.
+A ServerAdmin who wants VideoToolbox runs both the server and the worker natively on one Apple silicon Mac.
+
 == Rejected Alternatives
 
 * Refresh daily-build pins more frequently — postpones the retention failure without removing the dependency on an expiring artifact.
@@ -118,6 +142,7 @@ Only a local test run checks an FFmpeg upgrade against PGS subtitles, image-subt
 * Commit FATE sample files as fixtures — the FATE samples stay outside every repository, and every committed fixture is generated.
 * Keep every Dolby Vision test local — one small generated fixture lets CI guard the retag, the RPUs, the configuration record and the codec string.
 * Keep the Dolby Vision tests local and add the four checks of the Dolby Vision copy to the local suite — the four checks belong in CI, because one small generated fixture covers them.
+* Defer native macOS workers in link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033] and decode seek attempts in hardware only with NVDEC on Linux — Streamarr supports native macOS workers now, with their own pinned FFmpeg build.
 
 == References
 

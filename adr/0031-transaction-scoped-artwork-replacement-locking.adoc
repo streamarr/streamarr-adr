@@ -14,19 +14,21 @@ There is no stable database row that survives that sequence and can carry an ord
 
 `SELECT FOR UPDATE` alone did not serialize concurrent replacements.
 After the first transaction deleted the locked rows, a waiting transaction could continue without observing the first replacement paths, delete the first replacement rows, and leave their files orphaned.
-The in-memory `MutexFactory` in `ImageEnrichmentListener` prevents duplicate work inside one application instance but cannot coordinate multiple instances or direct service callers.
+The in-memory `MutexFactory` in `ArtworkFetcher` prevents duplicate work inside one application instance but cannot coordinate multiple instances or direct service callers.
 
 Image download, processing, and file writes can involve slow external systems or network storage.
 They must not extend a database critical section or consume a connection while retrying.
 
 == Decision
 
-`ImageEnrichmentListener` keeps its per-entity in-memory mutex around source comparison, download, processing, and saving to avoid redundant work within one application instance.
+`ArtworkFetcher` keeps its per-entity in-memory mutex around source comparison, download, processing, and saving to avoid redundant work within one application instance.
 The cross-instance correctness boundary is `ImageService.replaceImages`, whose `REQUIRES_NEW` transaction validates the already-written replacement files before calling `ImageRepositoryCustomImpl.replaceLogicalArtwork`.
 
 The repository acquires a PostgreSQL transaction-scoped advisory lock before selecting or locking artwork rows.
 The logical lock identity is the complete `entityId|entityType|imageType` tuple, encoded as UTF-8 and mapped to a stable 64-bit key from a name-based UUID.
-Every writer that replaces a logical artwork set must use the same identity algorithm and acquire locks in this order: advisory lock, then artwork row locks.
+After the advisory lock, the repository takes a `FOR KEY SHARE` lock on the item row that owns the artwork, so a concurrent item deletion cannot remove that row mid-replacement.
+If the item row no longer exists, the replacement fails.
+Every writer that replaces a logical artwork set must use the same identity algorithm and acquire locks in this order: advisory lock, then the item row lock, then artwork row locks.
 Advisory locks are cooperative; SQL that bypasses this protocol is not protected.
 
 Both the timeout and lock acquisition use jOOQ in the repository layer.
@@ -57,7 +59,7 @@ Bytes changing behind the same provider key remain undetectable regardless of co
 * Concurrent replacements across application instances persist one coherent variant set and clean original and losing replacement files.
 * Waiters consume a database connection, but the configured timeout bounds that exposure and the critical section contains only database work.
 * Transaction-scoped locks release automatically on commit, rollback, or connection loss and cannot leak into a pooled connection's next transaction.
-* The current listener mutex ordinarily limits an instance to one contender per entity, while the repository lock remains the correctness backstop for every service caller.
+* The current fetcher mutex ordinarily limits an instance to one contender per entity, while the repository lock remains the correctness backstop for every service caller.
 * The 64-bit key has a theoretical collision risk; an unrelated artwork replacement could briefly serialize but cannot corrupt either identity.
 * PostgreSQL is an intentional backing-service dependency for this repository contract.
 

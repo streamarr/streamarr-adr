@@ -4,6 +4,58 @@ This glossary defines shared Streamarr domain terms.
 
 ## Language
 
+### Identity
+
+**Account**:
+The login and security principal.
+An Account authenticates and makes every request, and a Profile never does.
+Every Account is a member of exactly one Household and has exactly one Personal Profile.
+_Avoid_: user (unqualified), Profile (the viewing identity that an Account selects)
+
+**Household**:
+A private boundary for administration, catalog and local policy.
+Every Account is a member of exactly one Household, and every Profile belongs to exactly one Household.
+An Account may also use another Household while its Personal Profile is shared there.
+_Avoid_: home Household (ADR 0022's wording)
+
+**Profile**:
+A portable viewing identity with its own name, picture, PIN, Kid or Adult kind, optional Content Ceiling, viewing history, progress and preferences.
+A Profile belongs to exactly one Household and can be shared into others, and its data and policy go with it.
+A Profile cannot sign in or hold administrative authority.
+_Avoid_: viewing profile, profile (unqualified, where a codec profile could be meant)
+
+**Personal Profile**:
+The one Profile that represents an Account.
+Every Account has exactly one Personal Profile, and a Profile represents at most one Account.
+The Account and its Personal Profile transfer together, and the Account cannot unlink its Personal Profile.
+
+**HouseholdAdmin**:
+The Household role that edits a Household's settings and manages its Devices.
+Every Household that has Accounts keeps at least one HouseholdAdmin.
+HouseholdAdmins are peers, and every HouseholdAdmin is also a HouseholdMember.
+While a Profile is shared into the Household, its HouseholdAdmins administer that Profile there and supervise it if it is restricted.
+_Avoid_: owner, HouseholdOwner, parent (household roles that ADR 0024 removed)
+
+**ProfileManager**:
+An Account with durable authority to edit a Profile and its policy, manage its PIN, offer it to Households and invite other managers.
+The authority comes from a direct grant, or it derives from the Account's own unrestricted Adult Personal Profile.
+ProfileManager authority survives the end of a share, unlike a HouseholdAdmin's authority over a shared Profile.
+_Avoid_: owner, parent
+
+**ServerAdmin**:
+Global superuser authority that an Account may hold beside its Household role.
+ServerAdmin authority is not Household membership.
+Every ServerAdmin operation checks live authority in PostgreSQL rather than trusting a token claim.
+At least one enabled ServerAdmin must always remain.
+_Avoid_: admin (unqualified), `ADMIN` account role (ADR 0015's superseded role)
+
+**Device registration**:
+The durable record that fixes a shared Device, such as a television, to one Household.
+A Device registration records the Device name, its Electronic Serial Number (ESN), the Household and the Account that linked the Device.
+Only the winning poll of ADR 0021's pairing flow creates a Device registration.
+A Device registration never expires, and only revocation ends it.
+_Avoid_: pairing grant (the short-lived approval record that comes before it)
+
 ### Probe
 
 **Probe properties**:
@@ -36,13 +88,13 @@ Each feature is present, absent, or unspecified when the probe could not check, 
 _Avoid_: HDR flag, HDR type, HDR format, HDR boolean
 
 **Compatible base**:
-The standard picture format that a player could use without the advanced HDR information, derived at probe time from the base layer's signalled transfer and the Dolby Vision claim.
+The standard picture format that a player could use without the advanced HDR information, derived at probe time from the base layer's signaled transfer and the Dolby Vision claim.
 It is SDR, PQ, HLG, none, or unspecified, and it does not promise that a device can play the source bytes unchanged.
 _Avoid_: base layer (a Dolby Vision layer, not a picture format), HDR10 (PQ with static metadata, a narrower fact), fallback, SDR fallback
 
 **Codec profile**:
 The profile and level that a video codec such as H.264, HEVC or AV1 signals for a video stream.
-_Avoid_: profile (unqualified), viewing profile (the household concept in ADR 0024)
+_Avoid_: profile (unqualified), Profile (the portable viewing identity in ADR 0024)
 
 **Codec string**:
 The RFC 6381 value that names one stream's codec with its codec profile, level and other parameters, such as `avc1.640028`.
@@ -56,7 +108,7 @@ _Avoid_: codec (the family name alone), codec tag (the sample-entry four-charact
 
 **Dolby Vision profile**:
 The profile, level and base-layer compatibility that the Dolby Vision configuration record declares for a video stream, kept separate from the codec profile.
-Its values are claims that the probe checks against the picture signalling and the samples.
+Its values are claims that the probe checks against the picture signaling and the samples.
 _Avoid_: profile (unqualified), DV profile
 
 **Output frame rate**:
@@ -106,11 +158,11 @@ An alternate HLS track, such as one audio language or one text subtitle track. T
 _Avoid_: variant, audio variant, alternate stream, track (unqualified)
 
 **Media segment**:
-The unit an HLS playlist advertises, always fragmented MP4, delivered as one `moof` and one `mdat`. The stream session's segment list gives every segment's start, and segment N's interval runs in media time from its start up to the next segment's start. A stream session that only encodes uses the plain 3 s grid, where segment N starts at N × 3 s. A stream session with a copied variant builds its segment list from 3 s slots and merges each slot that holds no source keyframe into the segment before it. Segment N opens at the first video keyframe at or after its start, which must lie inside its interval, even when that keyframe sits inside one of FFmpeg's fragments. Its video is every video sample from that keyframe up to the keyframe that opens a later segment. Its audio is every audio sample that starts inside its interval, whichever fragment carried it, except a sample that arrives after the segment was delivered, which the producer drops.
+The unit an HLS playlist advertises, always fragmented MP4, delivered as one `moof` and one `mdat`. The stream session's segment list gives every segment's start, and segment N's interval runs in media time from its start up to the next segment's start. A stream session that only encodes uses the plain 3 s grid, where segment N starts at N × 3 s. A stream session with a copied variant builds its segment list from 3 s slots and merges each slot that holds no source keyframe into the segment before it. Until merged segment lists ship ([streamarr/streamarr-server#512](https://github.com/streamarr/streamarr-server/issues/512)), ADR 0037's interim rule applies instead. Under the interim rule, a stream session whose every variant is a stream copy keeps 6 s segments on the plain 6 s grid. Every other stream session uses the plain 3 s grid. Segment N opens at the first video keyframe at or after its start, which must lie inside its interval, even when that keyframe sits inside one of FFmpeg's fragments. Its video is every video sample from that keyframe up to the keyframe that opens a later segment. Its audio is every audio sample that starts inside its interval, whichever fragment carried it, except a sample that arrives after the segment was delivered, which the producer drops. Once the server delivers audio renditions (ADR 0043), a variant's media segments carry video alone. Each audio rendition then has its own media segments on the same segment list. A subtitle rendition lists one WebVTT segment per media segment.
 _Avoid_: chunk, segment file, .ts, container format
 
 **Initialization segment**:
-The `ftyp` and `moov` boxes a player needs before any media segment of a variant. There is one per variant, and it is identical across every attempt that the same encoder backend produces.
+The `ftyp` and `moov` boxes a player needs before any media segment of a variant or an audio rendition. There is one per variant. A variant's initialization segment is identical across every attempt that the same encoder backend produces. Once the server delivers audio renditions (ADR 0043), there is also one per audio rendition. An audio rendition's initialization segment is the same whatever job attempt writes it.
 _Avoid_: init file, header, init.mp4
 
 **Media time**:
@@ -118,7 +170,7 @@ Presentation time measured from the source container's start time, on the zero-b
 _Avoid_: PTS, source time, wall-clock time
 
 **Fragmentation target**:
-The configured maximum media duration of a fragment. The muxer honours it at the next packet, so it is a target, never a hard bound.
+The configured maximum media duration of a fragment. The muxer honors it at the next packet, so it is a target, never a hard bound.
 _Avoid_: fragment bound, chunk size
 
 **Preroll**:
@@ -134,7 +186,7 @@ An encoder that passed a worker's test encode and that the worker advertises. It
 _Avoid_: verified encoder (unqualified)
 
 **Keyframe-verified encoder**:
-An encoder is keyframe-verified when recordings under the pinned FFmpeg show that every forced keyframe is a sync sample and starts a closed GOP. The recordings must also show that the encoder restarts its GOP count at each forced keyframe. Whether a particular worker can run the encoder is a separate fact, which the term worker-verified encoder describes.
+An encoder is keyframe-verified when recordings under the pinned FFmpeg show that every forced keyframe is a sync sample and starts a closed GOP. The recordings must also show that the encoder restarts its GOP count at each forced keyframe. When a recording deliberately suppresses one forced keyframe, the keyframe that the encoder's GOP places instead must also start a closed GOP. Whether a particular worker can run the encoder is a separate fact, which the term worker-verified encoder describes.
 _Avoid_: verified encoder (unqualified), GOP-verified encoder
 
 **Source container**:
@@ -206,11 +258,11 @@ A planned restart of the requested variant's job at the media segment that a pla
 _Avoid_: seek (the player's action), restart (unqualified), recovery
 
 **Format attempt**:
-One output format that the server chooses within a playback session. Each format attempt has its own stream session. An HLS format attempt also has its own initialization segment. The initial format is the first attempt. Each Auto recovery after a format error adds one to the playback session's budget. In Original, the HLS format attempt that follows a format error on a direct-played file also adds one (ADR 0045).
+One output format that the server chooses within a playback session. Each format attempt has its own stream session. An HLS format attempt also has its own initialization segment. The initial format is the first attempt. Each Auto recovery after a format error counts as one format attempt against the playback session's format-attempt budget. In Original, the HLS format attempt that follows a format error on a direct-played file also counts against that budget (ADR 0045).
 _Avoid_: fallback stream, replacement (unqualified)
 
 **Encoder backend**:
-The encoder a worker actually runs for a codec family, together with whether it is hardware or software. Every replacement attempt for a variant must use the backend that the variant's first job attempt used.
+An encoder that a worker runs for a codec family, together with whether it is hardware or software. A worker can run a hardware and a software backend for the same codec family, so one codec's variants can come from two backends at once (ADR 0044). Every replacement attempt for a variant must use the backend of the job attempt that produced the variant's initialization segment (ADR 0037).
 _Avoid_: encoder capability, codec
 
 **Completed attempt**:

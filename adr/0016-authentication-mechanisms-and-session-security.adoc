@@ -16,7 +16,8 @@ NOTE: link:0028-credential-attempts-are-journaled-and-throttled-in-postgresql.ad
 
 * ADR 0018's live playback-authority gate is operative; V049 removes the version counters and their notification feed.
 * link:0017-playback-enforcement-lifecycle.adoc[ADR 0017] is superseded; no persisted playback lifecycle is planned.
-* ADR 0018 ratifies an outbound worker-initiated mTLS gRPC session for distributed transcoding.
+* ADR 0018 ratifies an outbound worker-initiated gRPC session for distributed transcoding.
+In distributed deployments, link:0035-worker-uses-spring-boot-and-mesh-transport-security.adoc[ADR 0035] delegates that session's transport security to the service mesh.
 
 == Context
 
@@ -52,7 +53,10 @@ Streamarr adopts mutable password buffers only if the complete input-to-hasher p
 Such a change replaces part of the Spring Security password-encoding boundary and therefore requires revisiting this ADR.
 
 Password login is throttled: failed attempts are rate-limited per account within a sliding window, as NIST SP 800-63B requires for online guessing.
-Per-source pressure is tracked and surfaced for alerting rather than hard-blocked: the normal self-hosted deployment sits behind a reverse proxy where every client shares one source address, so a blocking source budget would let five failed logins lock every account out server-wide; forwarded-header resolution is opt-in configuration for proxied deployments that want real client addresses in the signal.
+Streamarr never hard-blocks a source address.
+The normal self-hosted deployment sits behind a reverse proxy where every client shares one source address, so a blocking source budget would let five failed logins lock every account out server-wide.
+link:0028-credential-attempts-are-journaled-and-throttled-in-postgresql.adoc[ADR 0028] journals each attempt's client address as observational evidence only, and no admission policy reads it.
+Forwarded-header resolution is opt-in configuration for proxied deployments that want real client addresses in the journal.
 Spring Security ships no login rate limiter, so this throttle is Streamarr code invoked inline before any password verification — reserving budget up front, rather than recording failure events afterwards, keeps a concurrent burst from overrunning it; the profile-PIN limiter shares this posture.
 
 Account/device sessions use long-lived, revocable refresh tokens, scoped to the account and device rather than to a household or profile.
@@ -76,7 +80,9 @@ RFC 7519 §4.1.4 makes `exp` optional; Streamarr makes it mandatory with zero le
 A past-expiry failure keeps the machine-readable `EXPIRED_TOKEN` refresh-and-retry signal; a token without `exp` is malformed and maps to `INVALID_TOKEN`.
 The configured access-token TTL validates against a fifteen-minute ceiling (ten-minute default): bounded API staleness is a security property configuration must not silently stretch.
 A selection token is a new JWT whose expiry is capped by its source authorization — `exp = min(now + TTL, source exp)`, with the source expiry read from the validated token, never reparsed — so selection changes context, never authority, and repeated selection cannot extend access.
-Only setup, login, refresh, and successful password reauthentication start a fresh TTL.
+Only setup, login, refresh, password change, invitation acceptance, and the winning device-pairing poll start a fresh TTL.
+A reauthentication token (link:0024-identity-authority-by-relationship.adoc[ADR 0024]) never outlives its source token.
+It expires at the earlier of the reauthentication window and the source token's expiry.
 Playback tokens are not exempt from mandatory expiry: they carry a concrete `exp` at session-retention scale, as described below.
 
 Signing keys are configuration: rotation starts issuing with a new key while old keys remain verification-only until every token they signed has expired, which short access-token TTLs keep brief.
@@ -86,7 +92,7 @@ Symmetric HMAC signing would be simpler and equivalent in a single process; it w
 A public key is never sufficient authorization, though: signature-plus-expiry checking alone cannot see revocation — playback uses link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018]'s live-authority gate, so any future external verifier must check equivalent authority or be handed short-lived signed URLs that encode the check.
 The public verification keys are served at `/.well-known/jwks.json` (revisiting an earlier deferral: shipping ES256 without its discovery surface left the design incomplete, and the endpoint is pure public data).
 It serves only public JWKs — current plus retired, each carrying `kid`, `use: sig`, and `alg: ES256` so verifier key selectors need no out-of-band knowledge; private material never appears in a response, and a test pins that.
-The endpoint is permitAll and cookie-blind like the pre-auth endpoints (a stale `Path=/` access cookie must not 401 a key fetch); `Cache-Control: max-age` paces polling, and refetch-on-unknown-`kid` remains the rotation mechanism — which makes rotation two-phase: the incoming public key is prepublished through `AUTH_TOKEN_VERIFICATION_KEYS` at least one cache window before it starts signing, because a shared cache may answer an unknown-`kid` refetch with the pre-rotation key set (runbook in architecture.adoc).
+The endpoint is permitAll and cookie-blind like the pre-auth endpoints (a stale `Path=/` access cookie must not 401 a key fetch); `Cache-Control: max-age` paces polling, and refetch-on-unknown-`kid` remains the rotation mechanism — which makes rotation two-phase: the incoming public key is prepublished through `AUTH_TOKEN_VERIFICATION_KEYS` at least one cache window before it starts signing, because a shared cache may answer an unknown-`kid` refetch with the pre-rotation key set (runbook in https://github.com/streamarr/streamarr-server/blob/main/docs/architecture.adoc[streamarr-server docs/architecture.adoc]).
 Serving keys grants no authority: revocation is the condition for *using* them, and every playback verifier must enforce ADR 0018's live playback-authority query or equivalent authority.
 
 Revocation runs on two channels, matched to what each surface can tolerate.
@@ -111,7 +117,7 @@ The `__Host-XSRF-TOKEN` cookie closes that gap for returning browsers: the filte
 In secure mode, the browser-enforced prefix binds the double-submit cookie to the exact host: it requires `Secure`, `Path=/`, and no `Domain`, preventing a sibling subdomain from planting the token that Streamarr validates.
 The explicitly insecure development mode cannot satisfy that prefix contract, so it issues and validates only `XSRF-TOKEN`; production never accepts that fallback.
 A first-contact browser has no marker yet, so setup, login, and refresh explicitly accept only JSON and the deployment grants no hostile cross-origin CORS access; both constraints are required to prevent login CSRF.
-Bearer-mode login — and the planned device-pairing flow — stays exempt only because native clients keep no cookie jar at all: the Apple clients build every session with cookie storage, acceptance, and sending disabled, and that client behavior is required for the exemption.
+Bearer-mode login — and the device-pairing flow of link:0021-device-pairing-over-streamarr-transport.adoc[ADR 0021] — stays exempt only because native clients keep no cookie jar at all: the Apple clients build every session with cookie storage, acceptance, and sending disabled, and that client behavior is required for the exemption.
 A cookie-keeping client the server does not know about therefore fails closed with a CSRF `403`, never by silently losing the protection.
 The script-readable CSRF cookie is `SameSite=Lax` and path `/`; it is `Secure` and host-bound except in explicitly insecure development. Its lifetime comes from the same refresh-token property as the auth cookies.
 The repository renews that lifetime whenever the filter realizes a token, including login and refresh, so rotating credentials cannot outlive their guard; removing a token remains a distinct `Max-Age=0` operation.
@@ -142,7 +148,9 @@ Because worker memory is disposable, every intercepted unsafe page request also 
 Browsers kill idle workers and a first visit precedes registration, so correctness never rests on the worker: the grace window and expired-token retry keep a workerless tab correct, and the worker's job is making renewal invisible.
 
 Limited-input clients — Apple TV, Android TV, Nvidia Shield, smart-TV apps — pair rather than type credentials.
-The TV requests a short-lived, single-use device code and shows it to the viewer; the code is only a correlation handle for a pending authorization, not a credential.
+The TV requests a short-lived, single-use pairing grant.
+The TV shows the grant's user code to the viewer and keeps the grant's secret device code for polling (link:0021-device-pairing-over-streamarr-transport.adoc[ADR 0021]).
+The user code only identifies a pending authorization and is not a secret.
 An already-authenticated browser or mobile session approves the device; the server accepts the approval only from a session whose login already satisfied the account's effective MFA policy, so pairing rides the approver's existing factors without a fresh challenge.
 Spring Security makes that check declarative: satisfied factors surface as `FactorGrantedAuthority` authorities, and the approval endpoint requires the ones the account's policy demands.
 This flow authenticates the account/device session and may use Spring Security one-time-token login or an equivalent.

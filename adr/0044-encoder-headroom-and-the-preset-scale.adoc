@@ -159,19 +159,49 @@ Evidence: <<evidence-model>>, <<evidence-presets>>.
 
 The fetched variant is the variant whose media segment the player has just requested.
 ADR 0019 calls the same variant the requested variant.
-An extra variant is any variant of a stream session that ADR 0019's on-demand rules would not start yet.
-The server starts extra variants only while the headroom model predicts that every running variant on the worker, in every stream session, stays at or above the speed floor with the extra variants running.
-One stream session's extra variants therefore never push another stream session's fetched variant below the speed floor.
-When those conditions do not hold, ADR 0019's on-demand rules apply.
+ADR 0019's on-demand rules decide which variants run without encoder headroom.
 Under those rules, creating a stream session starts the variant that the multivariant playlist lists first.
 Once the stream session exists, a variant starts only when the player requests one of that variant's segments.
+ADR 0019's only-fetched stop is the rule that a media-segment request for one video variant stops the producers of the stream session's other video variants.
+An extra variant is a variant that runs only because the headroom model allows it.
+ADR 0019's on-demand rules would not run an extra variant.
+
+The server starts extra variants only while the headroom model predicts that every running variant on the worker, in every stream session, stays at or above the speed floor with the extra variants running.
+One stream session's extra variants therefore never push another stream session's fetched variant below the speed floor.
+The server starts the extra variants nearest the fetched variant first.
+At each distance from the fetched variant, the server starts the variant below the fetched variant before the variant above.
+The server continues in that order up to the whole ladder.
+
+An extra variant that the headroom model started is exempt from ADR 0019's only-fetched stop.
+An extra variant runs while headroom allows.
+The server stops an extra variant when headroom runs out.
+When the player switches to another variant, the variant that the player leaves keeps running as an extra variant while headroom allows.
+When the model predicts no headroom for an extra variant, ADR 0019's on-demand rules apply.
 Until the encoder-headroom issue validates the model's constants, ADR 0019's on-demand rules apply unconditionally.
 
 *Why:* With libx264 at `medium` and 6 s segments, four variants running together pushed 1080p down to 0.94× to 1.06× real time.
 That speed is below the speed floor.
 An extra variant is worth starting only when every running variant keeps the speed floor with the extra variant running.
+Without the exemption, the player's next media-segment request would stop every extra variant.
+A quality switch would then find no segments of the new variant ready.
 ADR 0019 gives the player measurements behind starting variants on demand.
 Evidence: <<evidence-contention>>.
+
+[[decision-capacity-shortfall]]
+=== A capacity shortfall never refuses playback
+
+A capacity shortfall exists when no preset that the preset setting allows keeps a variant at the speed floor.
+A 60 fps source or many concurrent users can cause a capacity shortfall.
+During a capacity shortfall, the server never refuses playback.
+The fetched variant always runs.
+The extra variants on the worker stop.
+A capacity metric shows the shortfall to the ServerAdmin.
+
+No separate rule removes variants from the advertised quality ladder when capacity is short.
+ADR 0019's on-demand start and the headroom model decide which variants run when capacity is short.
+
+*Why:* Stopping extra variants frees encoder headroom for every fetched variant and keeps every viewer playing.
+The capacity metric tells the ServerAdmin that the worker needs more capacity.
 
 [[decision-preset-setting]]
 === The preset is Automatic unless a ServerAdmin fixes one
@@ -278,7 +308,6 @@ This decision fixes the model's form, not the values of `a`, `d` or the tone-map
 The measurements cover libx264 only.
 libx265 and libsvtav1 presets have not been measured on a ladder.
 * The rate-control choices, including any CRF values.
-* Which variants a ladder includes when capacity is short (https://github.com/streamarr/streamarr-server/issues/402[streamarr/streamarr-server#402]).
 
 == Consequences
 
@@ -295,7 +324,9 @@ That lower floor would leave Safari's native player below Safari's own floor.
 The server needs segment arrival times to measure each worker's constants.
 Until the server has measured a new worker's constants, the server uses the constants from the new worker's short benchmark.
 Free job slots still bound how many jobs a worker accepts.
-Headroom decides only whether extra variants start.
+Headroom decides which extra variants run.
+* During a capacity shortfall, a ServerAdmin sees a capacity metric instead of refused playback.
+Viewers keep playing, but a quality switch then waits for an on-demand start under ADR 0019.
 * Encoders, presets and sources become comparable in one unit, pixel rate.
 Metrics can therefore show load against capacity directly.
 * A faster preset costs compression efficiency at a given bitrate.
@@ -326,6 +357,15 @@ The server still needs a speed floor to know how fast each running variant must 
 One floor protects hls.js and both Apple players without that knowledge.
 * AVPlayer's floor of about 1.70× would admit about 19 % more load per worker.
 That lower floor would leave Safari's native player below Safari's own floor of about 2.10×.
+* Letting ADR 0019's only-fetched stop also stop the variants that the headroom model started would stop every extra variant at the player's next media-segment request.
+A quality switch would then never find an extra variant's segments ready.
+* Starting extra variants nearest first, with no preference between the variant below and the variant above, leaves the order of two equally near variants undefined.
+* Starting every lower variant first makes the variant just above the fetched variant wait behind variants further from the fetched variant.
+* Rewriting https://github.com/streamarr/streamarr-server/issues/402[streamarr/streamarr-server#402] for the headroom model would add a separate rule that removes variants from the advertised ladder when capacity is short.
+On-demand start and the headroom model already decide which variants run.
+* Refusing new stream sessions during a capacity shortfall takes playback away from new viewers.
+Stopping extra variants keeps every viewer playing.
+* Starting new stream sessions at a lower quality during a capacity shortfall lowers a new viewer's quality before the server stops any extra variant.
 
 == Evidence
 
@@ -489,4 +529,3 @@ SVT-AV1 names 12 as the highest preset intended for human use.
 * https://github.com/streamarr/streamarr-transcode-worker/issues/23[streamarr/streamarr-transcode-worker#23] — the worker passes the job's preset to every software encoder.
 * https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399] — the playback capabilities epic, under which the encoder-headroom issue is to be filed.
 * https://github.com/streamarr/streamarr-server/issues/398[streamarr/streamarr-server#398] — verified hardware encoders.
-* https://github.com/streamarr/streamarr-server/issues/402[streamarr/streamarr-server#402] — which variants a ladder includes.

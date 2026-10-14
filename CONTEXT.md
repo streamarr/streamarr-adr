@@ -4,6 +4,59 @@ This glossary defines shared Streamarr domain terms.
 
 ## Language
 
+### Identity
+
+**Account**:
+The login and security principal.
+An Account authenticates and makes every request, and a Profile never does.
+Every Account is a member of exactly one Household and has exactly one Personal Profile.
+_Avoid_: user (unqualified), Profile (the viewing identity that an Account selects)
+
+**Household**:
+A private boundary for administration, catalog and local policy.
+Every Account is a member of exactly one Household, and every Profile belongs to exactly one Household.
+An Account may also use another Household while its Personal Profile is shared there.
+_Avoid_: home Household (ADR 0022's wording), family
+
+**Profile**:
+A portable viewing identity with its own name, picture, PIN, Kid or Adult kind, optional Content Ceiling, viewing history, progress and preferences.
+A Profile belongs to exactly one Household and can be shared into others, and its data and policy go with it.
+A Profile cannot sign in or hold administrative authority.
+_Avoid_: viewing profile, user profile, profile (unqualified, where a codec profile could be meant)
+
+**Personal Profile**:
+The one Profile that represents an Account.
+Every Account has exactly one Personal Profile, and a Profile represents at most one Account.
+The Account and its Personal Profile transfer together, and the Account cannot unlink its Personal Profile.
+_Avoid_: account profile, main profile
+
+**HouseholdAdmin**:
+The Household role that edits a Household's settings and manages its Devices.
+Every Household that has Accounts keeps at least one HouseholdAdmin.
+HouseholdAdmins are peers, and every HouseholdAdmin is also a HouseholdMember.
+While a Profile is shared into the Household, its HouseholdAdmins administer that Profile there and supervise it if it is restricted.
+_Avoid_: owner, HouseholdOwner, parent (household roles that ADR 0024 removed)
+
+**ProfileManager**:
+An Account with durable authority to edit a Profile and its policy, manage its PIN, offer it to Households and invite other managers.
+The authority comes from a direct grant, or it derives from the Account's own unrestricted Adult Personal Profile.
+ProfileManager authority survives the end of a share, unlike a HouseholdAdmin's authority over a shared Profile.
+_Avoid_: owner, parent
+
+**ServerAdmin**:
+Global superuser authority that an Account may hold beside its Household role.
+ServerAdmin authority is not Household membership.
+Every ServerAdmin operation checks live authority in PostgreSQL rather than trusting a token claim.
+At least one enabled ServerAdmin must always remain.
+_Avoid_: admin (unqualified), `ADMIN` account role (ADR 0015's superseded role)
+
+**Device registration**:
+The durable record that fixes a shared Device, such as a television, to one Household.
+A Device registration records the Device name, its Electronic Serial Number (ESN), the Household and the Account that linked the Device.
+Only the winning poll of ADR 0021's pairing flow creates a Device registration.
+A Device registration never expires, and only revocation ends it.
+_Avoid_: pairing grant (the short-lived approval record that comes before it), paired device, device credential
+
 ### Probe
 
 **Probe properties**:

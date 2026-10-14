@@ -187,7 +187,7 @@ An encoder that passed a worker's test encode and that the worker advertises. It
 _Avoid_: verified encoder (unqualified)
 
 **Keyframe-verified encoder**:
-An encoder is keyframe-verified when recordings under the pinned FFmpeg show that every forced keyframe is a sync sample and starts a closed GOP. The recordings must also show that the encoder restarts its GOP count at each forced keyframe. Whether a particular worker can run the encoder is a separate fact, which the term worker-verified encoder describes.
+An encoder is keyframe-verified when recordings under the pinned FFmpeg show that every forced keyframe is a sync sample and starts a closed GOP. The recordings must also show that the encoder restarts its GOP count at each forced keyframe. When a recording deliberately suppresses one forced keyframe, the keyframe that the encoder's GOP places instead must also start a closed GOP. Whether a particular worker can run the encoder is a separate fact, which the term worker-verified encoder describes.
 _Avoid_: verified encoder (unqualified), GOP-verified encoder
 
 **Source container**:

@@ -42,6 +42,8 @@ A stream session's extra variants are the variants that ADR 0019's on-demand rul
 Extra variants use up encoder headroom.
 Encoder headroom is the encoding load that a worker can still take on.
 Another user's stream session may need that encoder headroom.
+A seek also needs its first media segment quickly.
+On a busy worker, producers that already run ahead of their viewers compete with that seek for CPU.
 
 An encoder preset is the encoder setting that trades encoding time for compression efficiency.
 The preset also decides how much encoding load each variant costs.
@@ -326,6 +328,24 @@ The initialization segment stayed identical with 3 s, 4 s and 6 s segments and a
 The initialization segment differed between `medium`, `fast`, `faster` and `veryfast` for all 16 combinations of variant and source.
 Evidence: <<evidence-init>>.
 
+[[decision-seek-priority]]
+=== Producers well ahead of their viewers give up CPU to a seek
+
+A producer is the worker module that owns one job attempt's FFmpeg process.
+A producer runs ahead of its viewer when the producer's encode is faster than real time, so the producer's lead over playback keeps growing.
+A seek's first segment is the first media segment that a player needs after a seek.
+While a seek's first segment is pending on a busy worker, producers that run well ahead of their own viewers give up CPU.
+Two mechanisms can make those producers give up CPU.
+The first mechanism lowers those producers' CPU priority.
+The second mechanism pauses those producers until the seek's first segment is complete.
+A proof runs both mechanisms together, with real encodes on one worker and three viewers.
+The proof then picks one mechanism.
+The change that implements the picked mechanism writes the rule into this ADR.
+Streamarr holds back a producer that runs far ahead of its viewer with the same mechanism that the proof picks.
+
+*Why:* AVPlayer abandons a segment request for which the server has sent no bytes after one segment length.
+A producer that runs well ahead of its viewer does not need the CPU while a seek's first segment is pending.
+
 [[decision-hardware-first]]
 === A hardware encoder backend takes new variants first
 
@@ -362,6 +382,9 @@ The headroom-driven Automatic preset is the last step of that issue.
 The same issue also sends new variants to a hardware encoder backend first.
 https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56] adds the NVENC encoders, and https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57] adds the VideoToolbox encoders.
 Each of those issues measures VMAF against libx264 at `faster` and adds the backend's rows to the preset scale.
+https://github.com/streamarr/streamarr-transcode-worker/issues/52[streamarr/streamarr-transcode-worker#52] runs the seek-priority proof and implements the picked mechanism.
+https://github.com/streamarr/streamarr-server/issues/500[streamarr/streamarr-server#500] tells the worker which producers can give up CPU and when a seek's first segment is pending.
+https://github.com/streamarr/streamarr-server/issues/55[streamarr/streamarr-server#55] holds back producers that run far ahead of their viewers with the same mechanism.
 
 [[explicitly-deferred]]
 === Explicitly deferred
@@ -378,6 +401,7 @@ The measurements cover libx264 only.
 libx265 and libsvtav1 presets have not been measured on a ladder.
 * Any headroom-driven move of libx265 away from `veryfast`, until libx265's seek waits are measured.
 * Any libsvtav1 preset slower than `10` under Automatic, until libsvtav1's seek waits are measured.
+* The seek-priority mechanism, until the proof in https://github.com/streamarr/streamarr-transcode-worker/issues/52[streamarr/streamarr-transcode-worker#52] picks lowered CPU priority or paused producers.
 * The rate-control choices, including any CRF values.
 
 == Consequences
@@ -463,6 +487,8 @@ At 6 s segments, `fast` also took 2.58 s to the first 1080p media segment after 
 SVT-AV1's documentation gives preset `10` as its example for fast and real-time encoding.
 * Keeping libsvtav1's headroom range from `10` down to `8` would let libsvtav1 run slower than `10` before libsvtav1's seek waits are measured.
 * A preset setting on the worker would hide each job's preset from the headroom model, which needs that preset.
+* Applying seek priority only when a worker accepts a new job leaves running producers untouched.
+Those running producers hold the CPU that a seek's first segment needs.
 * The same ladder bitrates for every encoder, hardware or software, would give a lower picture quality wherever a hardware encoder backend scores below libx264 at `faster`.
 * Sending only some jobs to a hardware encoder backend leaves the hardware encoder backend's headroom unused while software encodes take the worker's CPU.
 * A ServerAdmin setting on each worker that picks hardware or software asks the ServerAdmin to make a choice that the headroom model can predict.
@@ -639,6 +665,9 @@ SVT-AV1 names 12 as the highest preset intended for human use.
 * https://github.com/streamarr/streamarr-server/issues/497[streamarr/streamarr-server#497] — the preset setting, Automatic's fixed presets and the preset on every job.
 * https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399] — the playback capabilities epic.
 * https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499] — the headroom model, its calibration, the speed floor, extra variants and presets under Automatic.
+* https://github.com/streamarr/streamarr-transcode-worker/issues/52[streamarr/streamarr-transcode-worker#52] — the proof and implementation of seek priority.
+* https://github.com/streamarr/streamarr-server/issues/500[streamarr/streamarr-server#500] — the facts that tell a busy worker which producers can give up CPU to a seek.
+* https://github.com/streamarr/streamarr-server/issues/55[streamarr/streamarr-server#55] — holding back producers that run far ahead of their viewers.
 * https://github.com/streamarr/streamarr-server/issues/398[streamarr/streamarr-server#398] — verified encoder backends and the pinned backend for replacement attempts.
 * https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56] — NVENC encoders.
 * https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57] — VideoToolbox encoders.

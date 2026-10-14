@@ -88,6 +88,7 @@ The worker never tone-maps a stream copy.
 Tone mapping uses the mobius curve with a 1000-nit peak.
 The worker never uses another tone curve.
 The worker tone-maps with the `tonemapx` filter of the pinned FFmpeg build that ADR 0029 describes.
+<<gpu-stages>> decides when a GPU tone mapper replaces `tonemapx`.
 A reference processing unit (RPU) holds the per-frame Dolby Vision picture-adjustment instructions.
 Before tone mapping, the worker reshapes a Dolby Vision profile 5 source with the source's RPUs.
 An encode of a Dolby Vision profile 7 or 8.x source reads only the Dolby Vision base layer and ignores the source's RPUs.
@@ -105,6 +106,18 @@ The tone-mapped Dolby Vision profile 5 output lost its teal cast.
 The tone-mapping filter treats an untagged input as PQ.
 The filter therefore darkened an untagged SDR source to a mean luma of 41 instead of 106.
 Evidence: <<evidence-sdr-output>>, <<evidence-tone-mapping>>.
+
+[[gpu-stages]]
+=== A job attempt that encodes on the GPU also decodes, scales and tone-maps on the GPU
+
+An encoder backend is the encoder that a worker runs for a codec family, together with whether that encoder runs on hardware or in software.
+When a job attempt encodes with a hardware encoder backend, the worker also decodes, scales and tone-maps that job attempt on the GPU.
+Decoding still follows the hardware-decode rule of link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037].
+ADR 0037's hardware-decode rule sends AVI sources to software decode.
+The same rule sends codecs that the hardware decoder lacks or decodes wrongly to software decode.
+A GPU tone mapper replaces the CPU `tonemapx` filter only after a measurement shows that the GPU tone mapper's output matches the `tonemapx` output with the mobius curve at a 1000-nit peak.
+The GPU tone mapper keeps the mobius curve and the 1000-nit peak.
+Until that measurement passes, the worker tone-maps the job attempt on the CPU with `tonemapx`.
 
 === Every encode forces a codec profile, level and tier that the server chooses
 
@@ -148,8 +161,12 @@ The server never delays the playlist to read a codec string from an initializati
 The transcode job carries each variant's codec string to the worker.
 The worker reads every initialization segment that it produces.
 The worker fails the job attempt when an initialization segment's codec string differs from the codec string in the transcode job (https://github.com/streamarr/streamarr-transcode-worker/issues/25[streamarr/streamarr-transcode-worker#25]).
-The measurements verified that libx264 and SVT-AV1 write the forced codec profile and level.
-libx265 and each hardware encoder need the same verification before the server encodes with libx265 or that hardware encoder.
+The forced-value check confirms that an encoder writes exactly the values that the transcode job forces.
+libx264 and SVT-AV1 passed the forced-value check.
+Before the server encodes with libx265 or a hardware encoder, that encoder must pass the same forced-value check.
+The NVENC work (https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56]) runs the forced-value check for NVENC.
+The VideoToolbox work (https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57]) runs the forced-value check for VideoToolbox.
+Issue https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] runs the forced-value check for the remaining hardware encoders.
 An H.265 encode's codec string also names the encode's sample-entry tag.
 The sample-entry tag is the four-character code that names a track's coding format in an MP4 file, such as `hvc1` or `hev1`.
 link:0009-h264-plus-av1-codec-strategy.adoc[ADR 0009] lets the server encode H.265 only after https://github.com/streamarr/streamarr-transcode-worker/issues/18[streamarr/streamarr-transcode-worker#18] makes the worker write `hvc1`.
@@ -348,6 +365,8 @@ The constants also stated level 4.0 for 1080p60 encodes that need level 4.2.
 One failed first job attempt would block the playlist.
 In a four-variant ladder on the pinned worker image, the last initialization segment arrived up to 11.1 s after FFmpeg started.
 WebKit's native player and AVPlayer request the playlist once and give up after 20.2 s.
+* Predicting approximate codec strings without the source's decoder configuration record: a copy's codec string must match the copy's initialization segment exactly.
+The probe can compute the exact codec string.
 * No interim copy rule before clients declare dynamic ranges: HDR copies fail in Apple's players when the playlist declares the copies SDR.
 * A narrower interim rule that stops copying only Dolby Vision profile 5 and 10-bit H.264: the narrower rule would still copy PQ and HLG sources.
 No playlist can describe such copies truthfully to a client that declares nothing.
@@ -362,10 +381,11 @@ AVPlayer without an HDR display refuses a variant declared `VIDEO-RANGE=HLG`.
 WebKit's native player times out on that variant.
 * Leaving tone mapping to the worker's discretion: link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] requires the server to choose every change to the source.
 The worker would also probe the source a second time.
-* The bt2390 tone curve at the same 1000-nit peak: above the peak, the curve folds back and maps brighter input to darker output.
+* The bt2390 tone curve at the same 1000-nit peak, or the bt2390 curve as a fallback if the mobius curve showed a color cast: above the peak, the bt2390 curve folds back and maps brighter input to darker output.
 A highlight brighter than 1000 nits therefore renders darker than a 1000-nit highlight.
 With the pinned build's filter, the bt2390 curve mapped a 983-nit PQ gray to luma 235.
 The same curve mapped a 10,000-nit PQ gray to luma 168.
+Streamarr chose the mobius curve with no condition.
 * The hable tone curve: the hable curve makes pictures darker overall.
 Below the peak, the hable curve gave a mean luma of 76.9 on a PQ source, against 92.9 for the mobius curve on the same source.
 * Copying a Dolby Vision profile 7 source tagged SDR: the source makes contradictory claims.
@@ -386,6 +406,8 @@ The RPU-header method moves to https://github.com/streamarr/streamarr-server/iss
 * `SUPPLEMENTAL-CODECS` on Dolby Vision copies with an SDR compatible base: adding the attribute changed nothing measurable in any headless player.
 The attribute stays open in case a later need appears.
 * Applying the HEVC tag rule in the server as well as in the worker: the tag rule would then live in two places.
+* Keeping tone mapping on the CPU while the GPU decodes, scales and encodes, or using the GPU only to encode: when a job attempt encodes on the GPU, the worker runs every stage that the GPU can run on the GPU.
+Tone mapping moves to the GPU once the GPU tone mapper matches the CPU output.
 
 == Evidence
 
@@ -522,6 +544,7 @@ Without the record, such a copy plays teal.
 
 * https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399] (playback capabilities epic) and its issues https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394], https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395], https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396], https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397], https://github.com/streamarr/streamarr-server/issues/398[streamarr/streamarr-server#398] and https://github.com/streamarr/streamarr-server/issues/58[streamarr/streamarr-server#58].
 * https://github.com/streamarr/streamarr-transcode-worker/issues/22[streamarr/streamarr-transcode-worker#22] (8-bit 4:2:0 encodes), https://github.com/streamarr/streamarr-transcode-worker/issues/24[streamarr/streamarr-transcode-worker#24] (probe version 2), https://github.com/streamarr/streamarr-transcode-worker/issues/25[streamarr/streamarr-transcode-worker#25] (forced codec profile and level, checked codec strings), https://github.com/streamarr/streamarr-transcode-worker/issues/26[streamarr/streamarr-transcode-worker#26] (tone mapping) and https://github.com/streamarr/streamarr-transcode-worker/issues/18[streamarr/streamarr-transcode-worker#18] (sample-entry tags and Dolby Vision retags).
+* https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56] (NVENC), https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57] (VideoToolbox) and https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] (the remaining hardware encoders).
 * https://github.com/streamarr/streamarr-server/issues/501[streamarr/streamarr-server#501], which delivers this amendment.
 * https://github.com/streamarr/streamarr-server/issues/512[streamarr/streamarr-server#512], which adds merged-slot segment lists.
 * link:0009-h264-plus-av1-codec-strategy.adoc[ADR 0009], which decides which codec an encode uses.

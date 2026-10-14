@@ -36,7 +36,7 @@ Each feature is present, absent, or unspecified when the probe could not check, 
 _Avoid_: HDR flag, HDR type, HDR format, HDR boolean
 
 **Compatible base**:
-The standard picture format that a player could use without the advanced HDR information, derived at probe time from the base layer's signalled transfer and the Dolby Vision claim.
+The standard picture format that a player could use without the advanced HDR information, derived at probe time from the base layer's signaled transfer and the Dolby Vision claim.
 It is SDR, PQ, HLG, none, or unspecified, and it does not promise that a device can play the source bytes unchanged.
 _Avoid_: base layer (a Dolby Vision layer, not a picture format), HDR10 (PQ with static metadata, a narrower fact), fallback, SDR fallback
 
@@ -56,7 +56,7 @@ _Avoid_: codec (the family name alone), codec tag (the sample-entry four-charact
 
 **Dolby Vision profile**:
 The profile, level and base-layer compatibility that the Dolby Vision configuration record declares for a video stream, kept separate from the codec profile.
-Its values are claims that the probe checks against the picture signalling and the samples.
+Its values are claims that the probe checks against the picture signaling and the samples.
 _Avoid_: profile (unqualified), DV profile
 
 **Output frame rate**:
@@ -118,7 +118,7 @@ Presentation time measured from the source container's start time, on the zero-b
 _Avoid_: PTS, source time, wall-clock time
 
 **Fragmentation target**:
-The configured maximum media duration of a fragment. The muxer honours it at the next packet, so it is a target, never a hard bound.
+The configured maximum media duration of a fragment. The muxer honors it at the next packet, so it is a target, never a hard bound.
 _Avoid_: fragment bound, chunk size
 
 **Preroll**:

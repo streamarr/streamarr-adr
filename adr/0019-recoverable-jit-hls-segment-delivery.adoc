@@ -30,6 +30,8 @@ The server still lists the highest-quality variant first (https://github.com/str
 The server does not yet use the two-segment relocation gap (https://github.com/streamarr/streamarr-server/issues/502[streamarr/streamarr-server#502]).
 The server still starts every variant together.
 The server still relocates forward when the segment 24 s before the requested segment has not been produced.
+The server still checks every 100 ms whether a held segment request's segment is stored (https://github.com/streamarr/streamarr-server/issues/510[streamarr/streamarr-server#510]).
+The server does not yet publish the preparing-or-ready state (https://github.com/streamarr/streamarr-server/issues/507[streamarr/streamarr-server#507]).
 The server does not yet start extra variants from encoder headroom (https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499]).
 
 == Context
@@ -60,6 +62,33 @@ A fresh producer's cold start (seek plus first-segment encode) receives the conf
 The local store writes every segment completely to a temporary file before moving it into its final name. It requests an atomic replacement, but falls back to a same-filesystem replacement when the filesystem does not support atomic moves. Under the segment-store contract, only the final name is observable as ready; supported deployments must therefore provide rename visibility consistent with that contract. No successor-segment inference is needed or permitted.
 The wait ends when the segment is ready, when no producer can be made to produce it, or on request cancellation — never on a fixed wall-clock timeout.
 A slow or resource-starved transcode must not surface to the client as a missing segment.
+
+A held segment request is a request for an advertised media segment that the server holds open while a producer prepares that segment.
+The server answers a held segment request as soon as the request's segment is stored.
+When the request's producer dies, the server handles the request at once.
+The server then either starts a replacement attempt under this ADR's recovery rules or answers `503 Service Unavailable` when recovery is exhausted.
+The server never waits for a poll to notice that a segment is stored or that a producer died.
+
+A held segment request sends no response headers until its segment is ready.
+A player that receives the headers early starts timing the transfer at the headers.
+That player then counts the time that the server held the request as transfer time.
+The player therefore underestimates the connection's bandwidth.
+In a browser simulation, hls.js with a fetch-based loader in Chromium received early headers and counted the held time as transfer time.
+A reading of the Media3 1.11.1 source shows that Media3's bandwidth meter also starts timing at the response headers.
+Because the server sends no early headers, no tested player counts the held time as transfer time.
+
+[[decision-segment-state]]
+=== The server publishes whether a held segment request is preparing or ready
+
+The server publishes a preparing-or-ready state for each held segment request.
+The state is preparing while the server holds the request.
+The state is ready when the server answers the request with the request's segment.
+The server publishes the state over the GraphQL subscriptions of link:0042-graphql-subscriptions-run-over-websocket-until-token-expiry.adoc[ADR 0042].
+Every client shows its waiting states from the preparing-or-ready state.
+A waiting state tells the viewer whether the server is still preparing the segment or the connection is slow.
+The web player also passes the preparing-or-ready state to its quality selection.
+Every other client uses the preparing-or-ready state for quality selection only where a device test shows a need.
+A held segment request sends no response headers until its segment is ready, so the preparing-or-ready state is the only early signal that the server holds a request.
 
 === Producers are recovered on demand, driven by the request
 
@@ -222,8 +251,9 @@ A deeper platform-specific stream validator remains an optional local check outs
 ** cross-worker session affinity, durable job recovery, and multiple control-plane replicas — deferred by ADR 0018 and unchanged here;
 ** low-latency HLS (partial segments, blocking playlist reload, preload hints, delta playlist updates, rendition reports) — it targets live-edge latency, presumes a growing playlist, and is incompatible with the on-demand static-playlist contract; it would be revisited only if true live streaming is introduced, under its own ADR;
 ** a growing or event-type media playlist for on-demand content;
-** object-store delivery and any worker-to-client segment path; and
-** starting extra variants before the player requests them, until ADR 0044's headroom model is validated.
+** object-store delivery and any worker-to-client segment path;
+** starting extra variants before the player requests them, until ADR 0044's headroom model is validated; and
+** quality selection from the preparing-or-ready state in every client except the web player, until a device test shows a need.
 
 == Consequences
 
@@ -298,6 +328,10 @@ A free slot says nothing about how much CPU is left.
 With four software encodes on four slots, the 1080p variant ran below the speed floor.
 * Keeping the 24 s relocation gap after the decode-only early-start seek ships.
 For 1080p alone, when a request lies at the edge of the 24 s gap, a viewer waits 4.9–5.0 s longer than a restart takes.
+* Building no preparing-or-ready state.
+Without the state, no client can tell a held segment request from a slow connection.
+* Keeping the server's 100 ms poll for a stored segment.
+A 100 ms poll adds up to 100 ms to every start, seek and quality switch.
 * Accepting WebKit's slower native start and first seek as a cost of starting variants on demand.
 Low latency is a product priority.
 Safari avoids the cost by playing through hls.js.

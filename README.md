@@ -32,7 +32,7 @@ None at present.
 - [ADR 0012: Filepath URI Encoding](adr/0012-filepath-uri-encoding.adoc)
 - [ADR 0013: Stream Decision Architecture](adr/0013-stream-decision-architecture.adoc)
 - [ADR 0014: Protocol-Agnostic Pagination](adr/0014-protocol-agnostic-pagination.adoc)
-- [ADR 0015: Authorization, Profiles, and Content Controls](adr/0015-authorization-profiles-and-content-controls.adoc) — proposed
+- [ADR 0015: Authorization, Profiles, and Content Controls](adr/0015-authorization-profiles-and-content-controls.adoc)
 - [ADR 0016: Authentication Mechanisms and Session Security](adr/0016-authentication-mechanisms-and-session-security.adoc)
 - [ADR 0017: Persisted Playback-Enforcement Lifecycle](adr/0017-playback-enforcement-lifecycle.adoc) — superseded by ADR 0018
 - [ADR 0018: Live Playback Authority and Outbound Transcode Workers](adr/0018-live-playback-authority-and-outbound-workers.adoc)
@@ -51,7 +51,7 @@ None at present.
 - [ADR 0031: Artwork Replacement Uses a Bounded Transaction-Scoped Advisory Lock](adr/0031-transaction-scoped-artwork-replacement-locking.adoc)
 - [ADR 0032: Media File Probe Results Are Persisted and Playback Reads Them](adr/0032-media-file-probe-results-are-persisted.adoc)
 - [ADR 0033: The Transcode Worker Is a Separate Service and Repository, and the Server Runs No FFmpeg](adr/0033-transcode-worker-is-a-separate-service.adoc)
-- [ADR 0034: Release Please Owns Maven Release Versions](adr/0034-release-please-owns-maven-release-versions.adoc) — proposed
+- [ADR 0034: Release Please Owns Maven Release Versions](adr/0034-release-please-owns-maven-release-versions.adoc)
 - [ADR 0035: The Worker Uses Spring Boot and Delegates Distributed Transport Security to the Mesh](adr/0035-worker-uses-spring-boot-and-mesh-transport-security.adoc)
 - [ADR 0036: Video Contracts Share One Vocabulary and Preserve Dynamic-Range Facts](adr/0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc)
 - [ADR 0037: The Worker Delivers Fragmented MP4 Segments From FFmpeg's Standard Output, and HLS Media Segments Are fMP4 Only](adr/0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc)
@@ -60,9 +60,9 @@ None at present.
 - [ADR 0040: Media Read Resolvers Return DTOs Mapped by MapStruct](adr/0040-media-read-resolvers-return-dtos-mapped-by-mapstruct.adoc)
 - [ADR 0041: Scans and Refreshes Admit Tasks Through an Adaptive Concurrency Limit](adr/0041-scans-and-refreshes-admit-tasks-through-an-adaptive-limit.adoc)
 - [ADR 0042: GraphQL Subscriptions Keep Queried Screens Current over WebSocket until Token Expiry](adr/0042-graphql-subscriptions-run-over-websocket-until-token-expiry.adoc)
-- [ADR 0043: Audio Tracks and Text Subtitles Are HLS Renditions, so Switching Them Never Restarts the Video](adr/0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc) — proposed
-- [ADR 0044: Encoder Headroom, Measured in Pixel Rate, Decides When Extra Variants Start, and One Preset Scale Serves Every Software Encoder](adr/0044-encoder-headroom-and-the-preset-scale.adoc) — proposed
-- [ADR 0045: In Original Quality, a Client Direct-Plays Each File Its Capability Declaration Covers, and Each Client Uses Its Platform's Own Player](adr/0045-clients-direct-play-covered-files-and-use-platform-players.adoc) — proposed
+- [ADR 0043: Audio Tracks and Text Subtitles Are HLS Renditions, so Switching Them Never Restarts the Video](adr/0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc)
+- [ADR 0044: Encoder Headroom, Measured in Pixel Rate, Decides When Extra Variants Start, and One Preset Scale Serves Every Software Encoder](adr/0044-encoder-headroom-and-the-preset-scale.adoc)
+- [ADR 0045: In Original Quality, a Client Direct-Plays Each File Its Capability Declaration Covers, and Each Client Uses Its Platform's Own Player](adr/0045-clients-direct-play-covered-files-and-use-platform-players.adoc)
 
 ## Domain language
 

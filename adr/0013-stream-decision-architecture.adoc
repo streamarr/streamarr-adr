@@ -159,6 +159,17 @@ Strings computed from the decoder configuration record matched 54 of 59 video co
 The 54 video matches included all 50 H.264 and HEVC copies.
 Evidence: <<evidence-levels-and-codec-strings>>.
 
+=== The worker alone chooses a copy's sample-entry tag
+
+The tag rule is the rule that picks the sample-entry tag of a copy.
+The tag rule lives only in the worker.
+Until https://github.com/streamarr/streamarr-transcode-worker/issues/18[streamarr/streamarr-transcode-worker#18] changes the tag rule, a copy of an MP4 or MOV source keeps the source's sample-entry tag.
+A copy of HEVC from Matroska, MPEG-TS or a raw stream carries `hev1`.
+The copy's codec string names the tag that the copy carries.
+Any change to the tag rule, such as the change in streamarr/streamarr-transcode-worker#18, increments the probe version.
+A rescan then updates every stored codec string under link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]'s rules for probe versions.
+If the tag rule of streamarr/streamarr-transcode-worker#18 is ready before probe version 2 is released, probe version 2 includes that tag rule.
+
 === A stream copy carries no planned output range yet
 
 At first, only an encode's planned output holds a dynamic range.
@@ -173,14 +184,14 @@ This rule holds until clients declare the dynamic ranges they accept (https://gi
 
 * Copy the video only when all four conditions hold.
 ** The source's compatible base is SDR or unspecified.
-** The source carries no Dolby Vision compatibility identifier that disagrees with the source's signalled transfer.
+** The source carries no Dolby Vision compatibility identifier that disagrees with the source's signaled transfer.
 The Dolby Vision compatibility identifier is the value in the Dolby Vision configuration record that names the base format that the stream claims.
 ** The source is not H.264, or the source is 8-bit 4:2:0 H.264.
 ** The client names the source's codec, as the server already requires.
 * Encode every other source to 8-bit SDR.
 The worker tone-maps the encode when the source's compatible base is PQ, HLG or none.
 
-The interim copy rule takes effect only after the 8-bit encodes (https://github.com/streamarr/streamarr-transcode-worker/issues/22[streamarr/streamarr-transcode-worker#22]) and tone mapping (streamarr/streamarr-transcode-worker#26) ship.
+The interim copy rule takes effect only after the 8-bit encodes (https://github.com/streamarr/streamarr-transcode-worker/issues/22[streamarr/streamarr-transcode-worker#22]) and tone mapping (streamarr/streamarr-transcode-worker#26) are in the pinned worker image.
 
 Issue streamarr/streamarr-server#395 sets a default for a client that declares nothing.
 That default is H.264 High profile at 8 bits in SDR.
@@ -191,8 +202,8 @@ A Dolby Vision or HDR10+ source permits only an SDR encode when its compatible b
 PQ and HLG sources without Dolby Vision or HDR10+ also permit only an SDR encode.
 Dolby Vision profiles 8.2 and 9 have a valid SDR compatible base.
 The rule still copies a Dolby Vision profile 8.2 or 9 source.
-A player check must prove that such a copy plays before the interim copy rule ships.
-The rule encodes a Dolby Vision source whose compatibility identifier disagrees with its signalled transfer, such as Dolby Vision profile 7 tagged as SDR.
+A player check must prove that such a copy plays before the interim copy rule takes effect.
+The rule encodes a Dolby Vision source whose compatibility identifier disagrees with its signaled transfer, such as Dolby Vision profile 7 tagged as SDR.
 The rule keeps encoding such a source until https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] decides which playback paths that source permits.
 An SDR encode of such a source trusts neither of the source's contradicting claims.
 The Apple TV app receives no HDR copies until streamarr/streamarr-server#395.
@@ -226,12 +237,6 @@ Reading RPUs from the frames closes the Dolby Vision profile 5 gap in MPEG-TS.
 * The playlist attributes that announce a produced range and supplemental codecs.
 link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] already defers these attributes to the epic.
 * Choosing the HEVC sample-entry tag of a copy (https://github.com/streamarr/streamarr-transcode-worker/issues/18[streamarr/streamarr-transcode-worker#18]).
-Until then, a copy of an MP4 or MOV source keeps the source's sample-entry tag.
-A copy of HEVC from Matroska, MPEG-TS or a raw stream carries `hev1`.
-The copy's codec string names the tag that the copy carries.
-The tag rule lives only in the worker.
-Issue streamarr/streamarr-transcode-worker#18 bumps the probe version, so a rescan updates every stored codec string under ADR 0032's rules for probe versions.
-If streamarr/streamarr-transcode-worker#18 is ready before probe version 2 ships, probe version 2 includes that tag rule.
 
 == Consequences
 
@@ -252,18 +257,23 @@ The initialization segment then stays identical across job attempts, as link:003
 The playlist therefore never advertises a false codec string for an encode.
 * A libx265 encode whose forced level is too low fails the job attempt, because libx265 refuses to start.
 * A full-length Dolby Vision profile 5 encode grows each FFmpeg process's memory until the job attempt ends.
-* A source whose compatible base is PQ, HLG or none plays as SDR on every client until the deferred HDR output choice lands.
+* A source whose compatible base is PQ, HLG or none plays as SDR on every client until the deferred HDR output choice is built.
 
 == Rejected Alternatives
 
 * 10-bit H.264 output (High 10): Firefox refuses High 10.
-Before this amendment, the worker produced High 10 from every 10-bit source.
-* Constant codec strings: the constant strings matched 6 of 59 video copies.
+In headless Firefox on macOS, `MediaSource.isTypeSupported` returned false for High 10 in 21 of 21 runs.
+Before this amendment, the pinned worker image encoded every 10-bit HEVC source to High 10, in 13 of 13 encodes.
+* Constant codec strings: the constant strings matched the copy's initialization segment in 6 of 59 video copies from the pinned worker image.
+Strings computed from the decoder configuration record matched 54 of the same 59 video copies.
 The constants also stated level 4.0 for 1080p60 encodes that need level 4.2.
 * Reading every codec string from the produced initialization segments: the playlist would wait for the slowest variant.
 One failed first job attempt would block the playlist.
-* Declaring `VIDEO-RANGE=PQ` or `VIDEO-RANGE=HLG` on copies today: AVPlayer without an HDR display refuses the variant.
-WebKit's native player times out on the variant.
+In a four-variant ladder on the pinned worker image, the last initialization segment arrived up to 11.1 s after FFmpeg started.
+WebKit's native player and AVPlayer request the playlist once and give up after 20.2 s.
+* Declaring `VIDEO-RANGE=PQ` or `VIDEO-RANGE=HLG` on copies today: on macOS 26.6.2 with no HDR display, AVPlayer refused 4 of 4 such variants.
+WebKit's native player timed out on 4 of 4 such variants.
+The same variants played when the playlist declared them SDR.
 * Copying HLG sources to clients that name the codec: the HLG copies played.
 The playlist could not state the copies' HLG range.
 AVPlayer without an HDR display refuses a variant declared `VIDEO-RANGE=HLG`.
@@ -272,7 +282,10 @@ WebKit's native player times out on that variant.
 The worker would also probe the source a second time.
 * The bt2390 tone curve at the same 1000-nit peak: above the peak, the curve folds back and maps brighter input to darker output.
 A highlight brighter than 1000 nits therefore renders darker than a 1000-nit highlight.
+With the pinned build's filter, the bt2390 curve mapped a 983-nit PQ gray to luma 235.
+The same curve mapped a 10,000-nit PQ gray to luma 168.
 * The hable tone curve: the hable curve makes pictures darker overall.
+Below the peak, the hable curve gave a mean luma of 76.9 on a PQ source, against 92.9 for the mobius curve on the same source.
 
 == Evidence
 
@@ -323,8 +336,8 @@ On a 10-bit SDR source with an untagged transfer characteristic, the filter gave
 * With tone mapping, one 1080p variant that libx264 encoded at its default preset, `medium`, ran at 1.20–1.43× real time from 1080p60 HDR sources.
 The same variant ran at 0.90–1.01× real time from 2160p60 sources.
 A four-variant ladder from 60 fps HDR sources ran at 0.35–0.56× real time, with or without tone mapping.
-* The bt2390 curve at 1000 nits mapped a 983-nit PQ grey to luma 235.
-The bt2390 curve mapped a 10,000-nit grey to luma 168.
+* The bt2390 curve at 1000 nits mapped a 983-nit PQ gray to luma 235.
+The bt2390 curve mapped a 10,000-nit gray to luma 168.
 The mobius curve clips at 235 instead of folding.
 * Below the peak, mobius and bt2390 gave the same brightness (mean luma 92.9 and 92.1).
 The hable curve gave a mean luma of 76.9.

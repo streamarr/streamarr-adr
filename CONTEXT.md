@@ -203,6 +203,26 @@ _Avoid_: encoder capability, codec
 A job attempt whose FFmpeg exited cleanly after the producer read all of its output and the server acknowledged every delivered segment, while the attempt was still active. A completed attempt does not mean the run covered the advertised timeline; the server owns coverage.
 _Avoid_: finished, done, success
 
+### Encoding load
+
+**Pixel rate**:
+Width × height × frames per second. Streamarr models, compares and reports encoding load in pixel rate.
+_Avoid_: resolution or preset name as a measure of load, pixel count
+
+**Speed floor**:
+The production speed, in media seconds per second of wall-clock time, that every running variant must keep. It is the larger of 1.35× real time, below which hls.js switches down, and the neediest Apple player's floor at the stream session's segment length. At 3 s segments, the speed floor is about 2.10× real time, the floor of Safari's native player. A stream session with merged-slot segments uses its 3 s slot length.
+_Avoid_: hold threshold, real time (as the speed to keep)
+
+**Encoder headroom**:
+The encoding load that a worker can still take on. After the worker takes on that load, every running variant in every session that the worker serves must stay at or above the speed floor.
+_Avoid_: free slots, spare capacity (unqualified)
+
+**Encoder preset**:
+The encoder setting that trades encoding time for compression efficiency. Streamarr names each preset on one preset scale. The preset scale maps each name to every software encoder's own preset.
+The preset setting is a server setting. Every job carries its variant's preset to the worker.
+A variant keeps one preset for its whole life.
+_Avoid_: speed, quality setting, profile (a codec profile is a different fact)
+
 ### Catalog
 
 **Library**:

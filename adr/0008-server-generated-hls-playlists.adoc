@@ -9,10 +9,36 @@ Accepted
 FFmpeg can generate `.m3u8` playlist files alongside segments.
 However, reading these files introduces race conditions (file may not be flushed when the client requests it) and couples playlist generation to the local filesystem.
 
+A stream session offers its video at several quality levels.
+A variant is one quality level that the stream session offers.
+RFC 8216 calls a variant a Variant Stream.
+The ladder is the stream session's set of variants.
+The multivariant playlist lists every variant.
+Each variant has its own media playlist.
+Creating a stream session starts the variant that the multivariant playlist lists first (link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]).
+The order of the variants therefore decides which encode starts first.
+The order also decides which quality a viewer sees first.
+
 == Decision
 
 Generate M3U8 playlists server-side from `MediaProbe` metadata and `SegmentStore` state rather than reading FFmpeg-written playlist files.
 The `HlsPlaylistService` computes segment count from duration and target segment length, then builds the playlist string in memory.
+
+=== The multivariant playlist lists the variant nearest 2000 kb/s first
+
+The multivariant playlist lists first the variant whose average bitrate is nearest 2000 kb/s.
+On the default ladder of 1080p, 720p, 480p and 360p, that variant is 480p.
+The other variants follow from highest to lowest quality.
+On the default ladder, the multivariant playlist therefore lists 480p, 1080p, 720p and 360p, in that order.
+
+*Why:* Creating a stream session starts the first-listed variant (ADR 0019).
+The first-listed variant should therefore start quickly.
+The first-listed variant should also be good enough to watch until the player switches up to a higher quality.
+Streamarr treats 480p as the lowest quality worth watching, and only for a short time.
+That quality floor argues against listing 360p first.
+The same quality floor argues for a quick switch to a higher quality after startup.
+Listing the other variants from highest to lowest supports that quick switch.
+Apple's HLS Authoring Specification also recommends a first-listed variant whose average bitrate is about 2000 kb/s (item 1.32).
 
 == Consequences
 
@@ -21,3 +47,25 @@ The `HlsPlaylistService` computes segment count from duration and target segment
 * Full control over playlist content, version tags, and RFC 8216 compliance
 * FFmpeg still writes segments to disk via `-hls_segment_filename`, but we ignore its `.m3u8` output
 * Playlist correctness depends on `MediaProbe` accuracy (duration, framerate) -- validated at session creation
+* Creating a stream session on the default ladder starts a 480p encode, not a 1080p encode.
+A 480p encode uses less CPU than a 1080p encode.
+A 480p encode also delivers its first segment sooner.
+* A viewer sees less than the highest quality for the first seconds of playback, until the player switches up.
+
+== Rejected Alternatives
+
+* Listing the highest-quality variant first, which the server did before this decision.
+Creating a stream session then starts the most expensive encode.
+Playback also starts later than with 480p listed first.
+* Listing 360p first.
+360p is below the lowest quality that Streamarr treats as worth watching.
+* Listing 720p first.
+In a simulation at 6 s segments, AVPlayer, WebKit's native player and hls.js in Chromium each started playback later with 720p listed first than with 480p listed first.
+* Choosing the first-listed variant by the client's network.
+The server does not know which network the client uses.
+
+== References
+
+* https://www.rfc-editor.org/rfc/rfc8216[RFC 8216 — HTTP Live Streaming]
+* https://developer.apple.com/documentation/http-live-streaming/hls-authoring-specification-for-apple-devices[HLS Authoring Specification for Apple Devices] — item 1.32, the variant that a multivariant playlist lists first
+* link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019: Recoverable Just-In-Time HLS Segment Delivery] — creating a stream session starts the first-listed variant

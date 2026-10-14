@@ -530,6 +530,7 @@ Within the interleave bound, the muxer writes each audio sample beside the video
 The 1 s margin covers that interleaving lag and one fragmentation target.
 Once the audio stops, the muxer holds the video for up to the 10 s interleave bound while it waits for audio.
 The worker's 1 s margin follows that wait.
+The 1 s margin is a safety net, because every stream that the probe shows ending early is padded (<<decision-early-ends>>).
 The fragmentation target measurably shortens the lag before the closing keyframe arrives, but it is a target, not a guarantee.
 
 *Why:* Placing audio by the fragment that carried it made a stream-copy replacement attempt from an MPEG-TS source repeat ten AAC frames (213 ms) that the previous segment already held.
@@ -632,11 +633,57 @@ An attempt completes only when four facts hold, in whatever order they arrive:
 The producer fails the attempt when FFmpeg exits with a non-zero status, or when the server has not acknowledged every closed segment.
 It also fails the attempt when the <<decision-waits,exit wait>> expires.
 If FFmpeg exits with status 0 but produces no media segment, the attempt also fails, as it did with the previous worker.
-A completed attempt means that FFmpeg finished cleanly and the server accepted everything FFmpeg produced, not that the attempt covered the advertised timeline.
-The worker uses the media segment count only to refuse a job that asks for no advertised segment and to end its list of forced keyframes.
-The worker does not check whether an attempt produced the last advertised segment, and it does not fail an attempt merely because the output ended earlier.
+A completed attempt means that FFmpeg finished cleanly and the server accepted everything FFmpeg produced.
+The worker uses the media segment count to refuse a job that asks for no advertised segment, to end its list of forced keyframes, and to check whether the source ended before the last advertised segment.
+When an encoded variant's source ends early, the worker pads the remaining advertised segments and reports the early end (<<decision-early-ends>>).
+The worker still does not fail the attempt.
 If a client requests an advertised segment that no attempt produced, the server's delivery coordinator starts recovery under ADR 0019.
-The coordinator follows the same rule if rounding the probed duration caused the playlist to advertise a final segment that FFmpeg did not produce.
+The same rules apply when rounding the probed duration caused the playlist to advertise a final segment past the source's end.
+
+[[decision-early-ends]]
+=== Encoded output plays to the advertised end when a stream or the source ends early
+
+These rules apply to a stream that the probe shows ending at least one segment before another stream of the same source.
+
+* When an audio track ends at least one segment before the video, that audio track is encoded and padded with silence to the video's end.
+The track is encoded even when the stream session copies the video.
+An attempt that starts after the audio track's end encodes generated silence for that track.
+Every attempt therefore carries the same tracks, and no playlist needs `EXT-X-GAP`.
+An attempt that carries only generated silence writes the same initialization segment as the variant's other attempts, because the server's comparison stays strict.
+* When the video ends at least one segment before the audio, the video is encoded and holds its last frame until the audio ends.
+The video is encoded even when the stream session would otherwise copy it.
+
+Padding every encoded attempt's audio stays rejected under Rejected Alternatives.
+
+A source can also end before the media segments that the playlist advertises, for example when the file is shorter than its probe says.
+When that happens, the worker fills an encoded variant's advertised segments past the real end with the last frame and silence.
+Every advertised segment is served, and the player ends at the advertised end.
+For an encoded variant, "source ended early" is a typed report, not a failure.
+The attempt delivers every advertised segment, padded past the real end, and the report names the last segment that holds source frames.
+The server never starts an attempt past that segment.
+A padded segment answers a request past the real end.
+When no padded segment is stored yet, the server starts an attempt at the last segment that holds source frames, and that attempt pads forward.
+
+Padding past a source's real end applies to encoded variants only.
+A stream copy cannot be padded in its own codec.
+An encoded tail cannot join a stream copy either, because the server refuses an attempt whose initialization segment differs.
+A copied variant that runs short is therefore a format error.
+In Auto, the format recovery of https://github.com/streamarr/streamarr-server/issues/401[streamarr/streamarr-server#401] moves playback to an encoded stream session, which pads.
+In Original, playback ends at the real end with an error.
+ADR 0032 trusts a container index only when the probe can read the last keyframe that the index lists.
+That check keeps a copy playlist from advertising past the real end, so this rule is a backstop.
+
+*Why:* A count of each file's last packets covered a 300-file library sample.
+In 10 of those files an audio track ended at least 3 s before the video, and in 5 it ended at least 6 s before the video.
+Those thresholds are one segment at 3 s and at 6 s segments, and the gaps ran from 3.5 s to 24.9 s.
+In 6 files of the same sample, the video ended at least 3 s before the audio, with gaps from 3.1 s to 237 s.
+Without padding, AVPlayer ended playback where the multiplexed audio ended in 12 of 12 runs, and WebKit's native player did so in 8 of 8 runs.
+That source was an 84 s video whose audio ends at 20 s, in 6 s segments.
+In a 64 s video with 84 s of audio, no keyframe opened the segments after the video's end.
+Answering 404 for those segments broke hls.js, AVPlayer and WebKit's native player.
+With a padded source standing in for the worker, a held last frame played to 84 s in hls.js in four browsers, in WebKit's native player and in AVPlayer, with two runs each.
+With audio renditions, AVPlayer played to the end with silence padding and with `EXT-X-GAP`, in 3 runs each, but `EXT-X-GAP` left hls.js stuck on the iPhone.
+Evidence: https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511].
 
 === A stop ends the attempt for good
 
@@ -840,9 +887,6 @@ It keeps an encoded-audio step under one AAC frame only while both attempts' aud
 The producer does not measure or correct that step, and the worker change's real-player check measured −16 ms at both stream-copy junctions with encoded audio.
 A source, sample rate or encoder that left a longer gap could again stall Chromium.
 fMP4 reaches Media Source Extensions without the MPEG-TS remux that hid those gaps.
-* Play a source whose audio ends long before its video in every player.
-The producer delivered every segment of such attempts, but the real-player check finished only 1 of its 24 planned runs of them.
-No player has played an attempt that copies the video and encodes that audio, where the producer drops up to about 0.6 s of late audio.
 * Encode with the VAAPI, QSV, AMF and RKMPP hardware encoders, and decode in hardware on Intel and AMD GPUs through QSV and VAAPI (https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14]).
 These backends wait until hardware exists to verify them.
 * Adopt a runtime whose SVT-AV1 fixes upstream bug https://gitlab.com/AOMediaCodec/SVT-AV1/-/work_items/2385[#2385] (worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/42[#42]).
@@ -898,6 +942,9 @@ With FFmpeg's fragments, 40 of 42 such runs from 0 failed fatally before playing
 * A stream-copy replacement attempt whose first fragment holds the boundary keyframe inside it now delivers its first segment whole.
 With the previous producer, that segment lost 2 s of video, and Chromium, WebKit and AVPlayer each lost 24 to 26 frames at the junction.
 With rebuilt segments, none of them lost a frame there.
+* A source whose audio or video ends at least one segment early plays to its end in every player, because the early-ending stream is encoded and padded.
+A stream session that copies such a source's video still encodes an early-ending audio track, and it encodes early-ending video.
+* An encoded variant delivers every advertised segment, even past a source's real end, and a copied variant that runs short becomes a format error.
 * A source whose audio ends before its video delivers every segment at the pace of its video.
 When the attempt encodes that audio, the producer drops the frames FFmpeg flushes after their segment was delivered.
 That is the last 2 AAC frames when the video is encoded, and up to about 0.6 s of audio, varying between runs, when the video is copied.
@@ -1017,6 +1064,16 @@ Those held segments then outgrow the producer's budget, and a replacement attemp
 Each replacement attempt meets the same flush at the end of its input, so none could complete.
 * Padding the audio to the video's length and stopping at the shortest stream would change every encoded attempt's audio.
 It cannot apply to copied audio, and FFmpeg still gives no signal that a stream has ended.
+This rejection covers padding every attempt's audio.
+An audio track that the probe shows ending at least one segment early is still encoded and padded (<<decision-early-ends>>).
+* Marking the segments after an audio track's end with `EXT-X-GAP` left hls.js stuck on the iPhone.
+* Padding a copied audio track with silence in its own codec, without encoding the track, would join encoder-made silence to copied frames.
+An attempt that starts after the track's end would carry only that silence, and its initialization segment would differ from the copied one, which the server refuses.
+* Ending the stream at the video's end would drop the remaining audio, up to 237 s of it in the library sample.
+* Closing segments without a keyframe, as audio-only segments, when the source ends early breaks the rule that every segment's video opens at a keyframe.
+* Leaving an early end unreported lets the server start replacement attempts past the source's end, and those attempts can never deliver the missing segments.
+* Answering 404 for the advertised segments past a source's real end broke hls.js, AVPlayer and WebKit's native player.
+* Carrying each audio track's end time to the worker, so that a segment never waits for audio, adds a contract field for a wait that padding already removes for every track the probe shows ending early.
 * Closing a segment on a fragment's computed end, its start plus its sample durations, closed a segment before its last fragment arrived on a variable-frame-rate stream copy.
 * A worker margin of 10 s would add a second 10 s wait after the muxer's own wait.
 The longer margin would save no audio, because no margin short of the whole output covers the audio that arrives late.
@@ -1555,6 +1612,7 @@ The Node recorder that made them (`src/test/fmp4-recorder`) runs in CI without F
 * Issue https://github.com/streamarr/streamarr-server/issues/502[streamarr/streamarr-server#502], which records a variable-frame-rate source whose gap between frames outlasts the period and proposes a seek that keeps the frame the gap repeats.
 * Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56], which adds the NVENC encoders after the three checks.
 * Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57], which adds the VideoToolbox encoders after the three checks, the timing check and the second Mac's parameter-set comparison.
+* Issue https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511], which pads streams and sources that end early and reports an early end.
 * Issue https://github.com/streamarr/streamarr-server/issues/504[streamarr/streamarr-server#504], which moves encoded variants to 3 s segments behind the Apple TV merge gate.
 * Issue https://github.com/streamarr/streamarr-server/issues/512[streamarr/streamarr-server#512], which builds each stream session's segment list from 3 s slots and merges slots without a source keyframe.
 * Issue https://github.com/streamarr/streamarr-server/issues/446[streamarr/streamarr-server#446], which has the server refuse a stream session that would encode video without a usable frame rate.

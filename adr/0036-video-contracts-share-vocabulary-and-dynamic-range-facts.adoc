@@ -8,6 +8,7 @@ This ADR records the accepted dynamic-range structure and the rules to preserve 
 An amendment adds the facts that probe version 2 reports under this vocabulary (<<decision-probe-version-2>>).
 The amendment also decides which playback paths an HDR source permits for a client that declares no dynamic range (<<decision-undeclared-client>>).
 That decision holds until clients can declare a dynamic range.
+The amendment also decides how a stream copy writes and describes a Dolby Vision source with an SDR compatible base.
 The server, worker, and client contracts still need answers to the other open questions listed below.
 A later amendment to this ADR answers the remaining architectural questions.
 The implementation issues resolve the contract questions.
@@ -214,7 +215,8 @@ This section decides how those facts use this ADR's vocabulary.
 * Each video stream reports `dynamicRange` as a `VideoDynamicRange`.
 The `compatibleBase` of that `VideoDynamicRange` follows the signaled transfer under the `compatibleBase` rules above.
 * `dolbyVision` is `PRESENT` when the probe finds a Dolby Vision configuration record (`dvcC` or `dvvC`) or a Dolby Vision sample entry.
-`declared` then holds the whole configuration record.
+A sample entry is the four-character code in the initialization segment that names a video stream's coding format, such as `dvh1` or `hvc1`.
+When `dolbyVision` is `PRESENT`, `declared` holds the whole configuration record.
 `declared` is null when the probe found only the sample entry.
 `observedRpu` is `UNSPECIFIED`, because the RPUs travel in the samples and probe version 2 does not inspect them.
 * When the probe finds neither a configuration record nor a Dolby Vision sample entry, `dolbyVision` is `UNSPECIFIED`.
@@ -263,7 +265,16 @@ Only Auto can automatically change format after an explicit playback error that 
 Manual and Original choices remain fixed, even when a platform selects Original by default.
 When the rules permit a format attempt, the server explicitly chooses the new output and leaves the source description unchanged.
 The probe recognizes Dolby Vision and HDR10+ in a source.
-A stream copy passes both through unchanged, so a copied Dolby Vision source is Dolby Vision produced output, and the playlist must describe it.
+A stream copy passes HDR10+ information through unchanged.
+A stream copy also passes the Dolby Vision RPUs through unchanged.
+An SDR-base Dolby Vision copy is a stream copy of a Dolby Vision source whose `compatibleBase` is `SDR`.
+The worker writes the sample entry of an SDR-base Dolby Vision copy as `hvc1` or `avc1`.
+A stream copy keeps the Dolby Vision configuration record only where the pinned FFmpeg build allows the record, as link:0013-stream-decision-architecture.adoc[ADR 0013] decides.
+The playlist describes an SDR-base Dolby Vision copy by the copy's base layer.
+The playlist entry of an SDR-base Dolby Vision copy takes its `CODECS` attribute from the base sample entry, `hvc1` or `avc1`.
+The same playlist entry declares `VIDEO-RANGE=SDR`.
+The same playlist entry carries no `SUPPLEMENTAL-CODECS` attribute.
+Only the playlist attributes that would announce Dolby Vision on a PQ or HLG base stay deferred.
 This ADR defers encoding Dolby Vision or HDR10+ output; it does not defer passing them through.
 <<decision-undeclared-client>> decides which playback paths a Dolby Vision source permits for a client that declares no dynamic range.
 The server never copies a source with no compatible base to a client that declares no Dolby Vision support.
@@ -289,7 +300,8 @@ A Dolby Vision stream whose compatibility identifier disagrees with its signaled
 That limit holds until https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] decides which playback paths such a stream permits.
 link:0013-stream-decision-architecture.adoc[ADR 0013] records the copy rule, the SDR encode and its tone mapping, a copy's planned output, and the known gaps.
 From the probe version that stores keyframe positions, link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032] also lets the server offer a stream copy only after the server knows the source's keyframe positions.
-ADR 0013 also requires a player check to prove that a copy of a Dolby Vision profile 8.2 or 9 source plays before this answer ships.
+Under this answer, the server copies Dolby Vision profile 8.2 and 9 sources, whose `compatibleBase` is `SDR`.
+ADR 0013 records the player evidence for those copies.
 
 *Why:* No playlist can yet describe an HDR copy truthfully to a player that declared nothing.
 ADR 0013 gives the measurements behind this decision.
@@ -405,7 +417,8 @@ When adding stored probe properties, follow ADR 0032's `probe_version` rules.
 Explicitly deferred:
 
 * Defer encoding Dolby Vision or HDR10+ output.
-Stream copy passes both through unchanged, and recognizing both in source files stays in scope.
+A stream copy still passes HDR10+ information and Dolby Vision RPUs through unchanged.
+Recognizing Dolby Vision and HDR10+ in source files stays in scope.
 * Defer reading HDR10+ information and Dolby Vision RPUs from frames.
 Issue https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] does that work, including the worker's part of it.
 ADR 0013 records the gap that this deferral leaves for a Dolby Vision profile 5 stream in MPEG-TS without the Dolby Vision descriptor.
@@ -413,7 +426,12 @@ ADR 0013 records the gap that this deferral leaves for a Dolby Vision profile 5 
 * Defer distinguishing a full enhancement layer from a minimal one.
 The configuration record has no flag for it, detection needs the RPUs parsed from frames, and adding the field later is an additive change.
 * Defer pairing a base-layer track with a separate enhancement-layer track; the dynamic-range description covers one track.
-* Defer the HLS playlist attributes that announce the produced video range and supplemental codecs to the epic's playlist work; this ADR fixes the facts they read.
+* Defer the playlist attributes that announce a PQ or HLG video range.
+Also defer the playlist attributes that announce Dolby Vision on a PQ or HLG base.
+https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] decides when a copy carries those attributes.
+https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396] builds those attributes.
+This ADR fixes the facts that those attributes read.
+This ADR already decides the playlist entry of an SDR-base Dolby Vision copy.
 * Leave codec preferences to the epic's planned work on verified encoders and codec choice.
 That work will amend only the codec-preference clause of link:0009-h264-plus-av1-codec-strategy.adoc[ADR 0009].
 ADR 0037 supersedes ADR 0009's container clause, so that work must not reintroduce a container that follows the codec.
@@ -434,10 +452,11 @@ Record the problem separately from the source facts.
 The open questions include how to record each problem and how each problem affects which playback paths the server can choose.
 * When the server chooses SDR output, the source description keeps the HDR facts that the probe found.
 The server cannot silently change a manual choice, and the playlist must describe the actual output that the server selected.
-* A stream copy of a Dolby Vision or HDR10+ source delivers those features unchanged, so the playlist describes them and the client's declaration decides whether the copy is eligible.
+* A stream copy of a Dolby Vision or HDR10+ source delivers the HDR10+ information and the Dolby Vision RPUs unchanged.
+The client's declaration decides whether such a copy is eligible.
 Until clients declare dynamic ranges, <<decision-undeclared-client>> decides whether the copy is eligible.
-When the server copies a Dolby Vision source with an SDR compatible base, the produced output is Dolby Vision.
-The playlist attributes that would announce Dolby Vision in that output stay deferred to the epic's playlist work.
+An SDR-base Dolby Vision copy still carries the Dolby Vision RPUs.
+The playlist entry of an SDR-base Dolby Vision copy describes only the copy's SDR base layer.
 * This ADR records the accepted terms and structure and lists the questions that remain open.
 It does not claim that the contracts or application behavior already exist.
 * Amend ADR 0013's video-decision section when implementing https://github.com/streamarr/streamarr-server/issues/396[#396].
@@ -459,6 +478,8 @@ Continue to follow the existing ADR definitions and the order of work recorded i
 * A generic setting that allows invalid streams hides which problem the stream has and which playback paths the problem rules out; the design records each problem instead.
 * If a stream-level probe reports HDR10+ or Dolby Vision as `ABSENT` when it finds no sign of them, the probe breaks the rule that an unchecked feature is not absent.
 A Dolby Vision stream can carry its RPUs only in the samples.
+* Announcing Dolby Vision with `SUPPLEMENTAL-CODECS` in an SDR-base Dolby Vision copy's playlist entry changed nothing measurable in any headless player.
+The playlist leaves that attribute out unless a later need appears.
 
 == References
 

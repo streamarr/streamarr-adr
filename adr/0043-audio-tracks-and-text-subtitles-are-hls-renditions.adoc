@@ -12,7 +12,7 @@ Every running variant's job attempts write the audio renditions.
 The server keeps the first delivery of each audio segment.
 Audio before media time zero is dropped in audio renditions (for AAC, the priming frame).
 Multiplexed variant segments keep that audio.
-Audio renditions follow the stream session's segment list from ADR 0037.
+Audio renditions and WebVTT segments follow the stream session's segment list from ADR 0037.
 This decision extends link:0013-stream-decision-architecture.adoc[ADR 0013].
 The stream decision selects every audio track and chooses the subtitle tracks.
 Each audio track keeps its own copy-or-encode decision inside one audio codec per stream session.
@@ -34,6 +34,8 @@ The server ignores both languages.
 The persisted probe (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]) records each stream's index, codec, language, channel count, and default and forced flags.
 The probe records no stream title.
 Besides the default and forced flags, the probe records no disposition flag, such as commentary or hearing impaired.
+The probe records neither each stream's end time nor whether the video carries captions.
+This decision depends on those missing facts, so the tickets that use the facts add them to the probe (<<decision-probe-facts>>).
 
 Every variant multiplexes the one audio track.
 So a switch to another language would need new job attempts for every variant.
@@ -53,8 +55,7 @@ Every variant of the stream session shares that list.
 In a stream session that copies the video, one media segment can span several of the list's 3 s slots.
 Under link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037], the server serves each variant as multiplexed fMP4.
 Each variant has one initialization segment, or init.
-Issue https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60] asks for text subtitles as WebVTT.
-Issue https://github.com/streamarr/streamarr-transcode-worker/issues/15[streamarr/streamarr-transcode-worker#15] covers the worker's part of the WebVTT subtitles.
+Issue https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60] asks for text subtitles as WebVTT, in the server and in the worker.
 Issue https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60] left open whether a variant's job or a separate job produces the WebVTT subtitles.
 Issue https://github.com/streamarr/streamarr-apple/issues/4[streamarr/streamarr-apple#4] asks for audio and subtitle menus in the Apple client.
 
@@ -77,6 +78,7 @@ The video keeps playing.
 The switch starts no job attempt.
 
 The stream decision (link:0013-stream-decision-architecture.adoc[ADR 0013]) also chooses which rendition is the default.
+An audio rendition's `NAME` follows the naming rules of <<decision-names>>, applied among the file's audio tracks.
 Each `EXT-X-STREAM-INF` tag's `CODECS` attribute lists the stream session's one audio codec (<<decision-audio-codec>>).
 Each `EXT-X-STREAM-INF` tag's `BANDWIDTH` attribute counts the largest audio rendition.
 RFC 8216 requires both rules.
@@ -282,15 +284,16 @@ The job survives a server restart, like the probe of link:0032-media-file-probe-
 A worker extracts the tracks, because the server runs no FFmpeg (link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033]).
 Under link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033], the server dispatches the extraction job only to a worker that advertises support for subtitle extraction.
 Extracted cue times are in media time, the timeline that every job attempt shares.
+A source container can start far from zero, so the extraction job shifts each cue from the container's timeline onto media time.
 
-A subtitle rendition's media playlist lists one WebVTT segment per grid segment.
+A subtitle rendition's media playlist lists one WebVTT segment per media segment of the stream session's segment list.
+The segment list is the one from link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] that every variant of the stream session shares.
+Where the segment list merges several 3 s slots of the grid into one media segment, the WebVTT segment spans the same slots.
 Each WebVTT segment holds every cue that overlaps the segment's interval.
 Each cue keeps its own media time.
 A cue that spans a segment boundary appears in both segments, as RFC 8216 requires.
 Every WebVTT segment carries the header `X-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000`.
 That header maps media time zero to cue time zero, so this ADR calls it the identity map.
-Every subtitle rendition carries `AUTOSELECT=NO`, except a forced track.
-A forced track carries `FORCED=YES` and `AUTOSELECT=YES`.
 Turning subtitles on or off starts no job attempt and never restarts the video.
 A switch of subtitle language also starts no job attempt and never restarts the video.
 
@@ -299,11 +302,130 @@ Each player placed the cue on the timeline that the player uses for the picture.
 An `X-TIMESTAMP-MAP` header with a constant `MPEGTS` offset of 900000 ticks put every cue 10 s late in every player.
 When a viewer switched subtitle language while a line was due, every player except AVPlayer showed the new line within 43 ms.
 AVPlayer's worst case was 131 ms.
-In one test, every subtitle rendition carried `AUTOSELECT=YES`.
-The page turned subtitles off, and then the audio changed language.
-WebKit's native HLS then turned the subtitles back on.
 Extracting subtitles reads a whole Matroska file, whether the job extracts one track or all of them.
-Evidence: <<evidence-subtitles>>, <<evidence-extraction>>.
+On a test source whose container started at 601.4 s, an extraction that kept the container's timestamps put every cue 601.4 s late.
+Evidence: <<evidence-subtitles>>, <<evidence-extraction>>, <<evidence-subtitle-cases>>.
+
+[[decision-subtitle-selection]]
+=== Players select only forced subtitle tracks by themselves
+
+A forced track holds only the lines that every viewer needs, such as dialogue in a foreign language.
+An SDH track, or subtitles for the deaf and hard of hearing, also describes sounds and names the speakers.
+Every subtitle rendition carries `AUTOSELECT=NO`, except a forced track.
+A forced track carries `FORCED=YES` and `AUTOSELECT=YES`.
+An SDH track also carries `AUTOSELECT=NO`, although Apple's authoring guide asks for `AUTOSELECT=YES` on SDH tracks.
+The Apple and Android clients read the system captions setting and select an SDH track themselves.
+hls.js ignores `FORCED`.
+So the web client selects a forced track itself when subtitles are off and the forced track's language matches the audio language.
+
+*Why:* In one test, every subtitle rendition carried `AUTOSELECT=YES`.
+The page turned subtitles off, and then the audio changed language.
+WebKit's native HLS then turned the subtitles back on, in 3 of 3 runs.
+In a test that followed Apple's authoring guide, with `AUTOSELECT=YES` on the regular and SDH tracks, WebKit's native HLS also turned on subtitles by itself, in 3 of 3 runs.
+AVPlayer with automatic media selection showed a forced track's lines by itself.
+No browser engine showed a forced track by itself.
+WebKit's native HLS listed the forced track and never showed the forced track's lines.
+Evidence: <<evidence-subtitles>>, <<evidence-subtitle-cases>>.
+
+[[decision-names]]
+=== Each rendition's name is unique within its group and includes the language
+
+A subtitle rendition's `NAME` is the stream's title when that title is unique among the file's subtitle tracks.
+Otherwise the server builds the name from the language and the flags, for example "English Forced".
+Every name includes the language.
+A track is SDH when the track's hearing-impaired flag is set, or when the track's title marks the track as SDH.
+The SDH characteristics are the HLS `CHARACTERISTICS` values that mark a track as transcribing dialogue and describing music and sound.
+When an SDH rendition carries the SDH characteristics, the rendition's name leaves out the SDH token.
+The name keeps the SDH token only when leaving the token out would duplicate another name.
+A stream's title is Matroska's `title` tag, MP4's `name` tag, or an MP4 `handler_name` that is not a generic one.
+Names that still collide get a trailing number in file order, such as "English" and "English 2".
+RFC 8216 section 4.3.4.1.1 says "All EXT-X-MEDIA tags in the same Group MUST have different NAME attributes."
+An audio rendition's `NAME` follows the same rules, applied among the file's audio tracks.
+
+*Why:* AVPlayer appends " SDH" to the name of a rendition that carries the SDH characteristics.
+So a rendition named "English SDH" showed as "English SDH SDH".
+In a test where two renditions were both named "English", AVPlayer and WebKit's native HLS exposed only one of the two, in 3 of 3 plays.
+In a sample of 300 library files, the title told apart 165 of the 244 text tracks that share a language with another text track of the same file.
+Evidence: <<evidence-subtitle-cases>>, <<evidence-library>>.
+
+[[decision-cue-text]]
+=== Extraction repairs SubRip that is not UTF-8 and judges each track on its own output
+
+A SubRip cue that is not valid UTF-8 is converted to UTF-8 before FFmpeg reads the cue.
+The worker chooses the cue's source code page by the track's language.
+Bytes that the chosen code page leaves undefined become U+FFFD, the Unicode replacement character.
+
+Each extracted track is judged on the track's own output.
+The server lists a damaged track like any other track.
+A damaged track gets no label for viewers, and neither the UI nor the API changes for a damaged track.
+The worker reports a track's loss only in a log line and in a worker metric that counts lost lines, labeled by reason.
+
+This ADR records two limits of the sources and does not fix them.
+A forced line can be missing from the full track of the same language.
+The full track is the track that holds every line, not only the forced lines.
+FFmpeg's SubRip decoder drops text between a `<` and a later `>`.
+
+*Why:* FFmpeg's text decoders reject every cue that is not valid UTF-8.
+When a track loses more than two thirds of its cues, FFmpeg exits with an error.
+In a job that extracts every track in one pass, that error would fail every track.
+In a sample of 300 library files, 1 of 682 SubRip tracks was not UTF-8, and FFmpeg rejected 594 of that track's 596 cues.
+The per-cue conversion gave 100 of 100 correct cues on each of 8 synthetic tracks in six code pages.
+One of those tracks was a UTF-8 track with 5 windows-1252 cues, and a conversion of that whole track gave 35 of 100 correct cues.
+In the same library sample, 274 of 277 forced cues were also in the matching full track.
+In the same library sample, 0 of 910,377 SubRip lines hold text that the decoder would drop between a `<` and a later `>`.
+Evidence: <<evidence-subrip>>, <<evidence-library>>.
+
+[[decision-captions]]
+=== Captions carried in the video become WebVTT subtitle renditions
+
+CEA-608 and CEA-708 captions are broadcast captions that a video stream carries inside its frames.
+Captions carried in the video become WebVTT subtitle renditions.
+The extraction job extracts those captions from the source.
+The probe detects caption data by decoding the video's keyframes.
+The server lists a caption rendition only when the extraction finds at least one cue.
+
+*Why:* FFmpeg's header probe marked captions on 0 of 300 library files.
+Decoding the first 30 s of each file found caption data in 24 of the 254 files that decoded.
+Decoding only keyframes found caption data in 0.11 to 0.14 s for the first 10 s of a 1080p H.264 file.
+A full decode of the same 10 s took 0.71 to 0.77 s.
+Caption data proves only that a caption channel exists, and a broadcast can send padding with no text.
+The extracted WebVTT rendition showed in all six tested players.
+With the captions left in the video and signaled by the playlist, WebKit's native HLS and AVPlayer listed the caption track but showed no cues.
+SVT-AV1 encodes kept caption data on 0 of 2,038 frames, so the captions come from the source rather than from an encoded variant.
+Evidence: <<evidence-captions>>.
+
+[[decision-late-extraction]]
+=== A stream session never waits for subtitle extraction
+
+A playback session is one viewing of a media title.
+A playback session survives the replacement of its stream sessions and holds the format-attempt budget.
+The format-attempt budget limits how many output formats the server chooses in one playback session.
+A stream session that starts before its file's extraction finishes plays at once without subtitle renditions.
+The stream session never waits for the extraction.
+When the extraction finishes, the server announces the finished extraction over the subscription of link:0042-graphql-subscriptions-run-over-websocket-until-token-expiry.adoc[ADR 0042].
+The client then offers the new subtitle tracks.
+When the viewer's preference asks for subtitles, the client switches to the subtitles by itself.
+To switch, the client replaces the stream session inside the playback session at the viewer's position.
+The automatic switch uses none of the format-attempt budget.
+Issue https://github.com/streamarr/streamarr-server/issues/508[streamarr/streamarr-server#508] adds the notice and the automatic switch.
+
+*Why:* Viewers want video to start fast.
+The extraction job reads the whole of a Matroska file.
+On network storage at 8 MB/s, a 20 GB Matroska file would take about 40 minutes, a figure derived from the read rate.
+A subtitle choice is the viewer's choice, not a format error, so the switch spends none of the format-attempt budget.
+
+[[decision-probe-facts]]
+=== Each ticket adds the probe facts that the ticket uses
+
+Renditions need four facts that the probe does not record yet.
+The facts are each subtitle and audio stream's title, the hearing-impaired flag, whether the video carries captions, and each stream's end time.
+Each ticket that uses one of these facts adds the fact to the probe.
+Each such ticket increases the probe version of link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032] when the ticket merges.
+The server then probes existing media files again by itself.
+Issue https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60] adds the subtitle titles and the hearing-impaired flag.
+Issue https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503] adds the audio titles.
+Issue https://github.com/streamarr/streamarr-server/issues/505[streamarr/streamarr-server#505] adds caption detection.
+Issue https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511] adds each stream's end time.
 
 [[decision-image-subtitles]]
 === Image subtitles stay burned into the video
@@ -345,6 +467,9 @@ In 20 runs of a model of the server's relocation rule, no second relocation occu
 === Explicitly deferred
 
 * Deliver image subtitles as renditions.
+* Deliver teletext subtitles.
+The library sample holds no teletext among its 1,162 subtitle streams.
+* Deliver external subtitle files that sit beside the source, in a follow-on to https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60].
 * Copy Opus with more than two channels.
 Copies of multichannel Opus wait until typed declarations carry a channel limit for each codec (https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395]).
 * Declare audio from the browser's own report of what the browser decodes, with channel counts (https://github.com/streamarr/streamarr-web/issues/29[streamarr/streamarr-web#29]).
@@ -410,7 +535,16 @@ The freeze happened when a switch of subtitle language, the seek's start and the
 The measurements so far have not found the cause of the freeze.
 * With `AUTOSELECT=NO`, Safari no longer turns on subtitles by itself when the audio language differs from the viewer's language.
 The client chooses subtitles.
-A forced track still selects itself.
+A forced track still selects itself in AVFoundation players.
+The web client selects a forced track itself, because hls.js ignores `FORCED`.
+The Apple and Android clients select an SDH track themselves when the system captions setting is on.
+* A damaged subtitle track appears in the menu with lines missing.
+Only the worker's log line and metric show the loss.
+* Extracting captions decodes the video of the whole file once.
+No measurement covers that cost on a full-length file.
+* A viewer who starts a file before its extraction finishes watches without subtitles until the extraction finishes.
+After the extraction, a viewer who wants subtitles gets a new stream session at the same position.
+* Each ticket that adds a probe fact makes the server probe every media file again.
 * The extraction job reads a whole Matroska file once per media file.
 From an MP4 file, the extraction job reads only the subtitle samples.
 On network storage, subtitle extraction from a large Matroska file takes minutes.
@@ -472,6 +606,34 @@ No measurement assessed the engine's accuracy.
 * A constant `X-TIMESTAMP-MAP` offset of 900000 ticks suits MPEG-TS output whose timestamps start at 10 s.
 On Streamarr's zero-based fMP4 timeline, that offset put every cue 10 s late in every player.
 * `AUTOSELECT=YES` on every subtitle rendition lets Safari override the viewer's choice to turn subtitles off.
+* `AUTOSELECT=YES` on SDH renditions, as Apple's authoring guide says, let WebKit turn on subtitles by itself in 3 of 3 runs.
+* Leaving forced tracks to hls.js on the web never shows forced lines, because hls.js ignores `FORCED`.
+* Names from the language and the flags alone ignore the stream's title, which told apart 165 of 244 same-language text tracks in the library sample.
+* Names without the SDH token can duplicate the name of the regular track in the same language.
+* Numbered names as the naming scheme tell the viewer nothing about the track.
+The server numbers only names that still collide.
+* Always keeping the SDH token doubles the token in AVPlayer, which appends " SDH" itself.
+* Leaving duplicate names breaks RFC 8216.
+AVPlayer and WebKit's native HLS then exposed only one of two renditions named "English".
+* Telling colliding names apart by the stream index shows the viewer a number that means nothing outside the file.
+* Converting a whole SubRip track with FFmpeg's `-sub_charenc` damages the track's UTF-8 cues.
+On a UTF-8 track with 5 windows-1252 cues, that conversion gave 35 of 100 correct cues.
+* Skipping a SubRip track with invalid cues drops tracks that are mostly readable, such as a track with 80 of 100 valid cues.
+* Replacing invalid bytes with U+FFFD alone loses every letter of a Hebrew or Russian track.
+* Labeling a damaged subtitle track "(incomplete)", or hiding the track from viewers, adds states that viewers see.
+The track's remaining lines still help the viewer, and the log line and the worker metric expose the loss.
+* Failing the whole extraction job for one damaged track loses every other track of the file.
+* Showing the loss to a ServerAdmin in the UI or the API adds a surface that the log line and the worker metric make unnecessary.
+* Merging forced cues into the full track changes the source's text to fix a gap that only 3 of 277 forced cues showed in the library sample.
+* A SubRip parser of the worker's own replaces FFmpeg's decoder to save text that 0 of 910,377 sample lines would lose.
+* Keeping captions deferred leaves the caption data in 24 of 254 decodable sample files unused.
+* Keeping CEA-608 captions in the video and signaling them with the `CLOSED-CAPTIONS` attribute shows no cues in WebKit's native HLS and AVPlayer.
+SVT-AV1 encodes also drop that caption data.
+* Delivering captions both as a rendition and in the video lists the captions twice in players.
+* Showing subtitles only from the next playback, when extraction finishes during playback, leaves the viewer without subtitles until the viewer starts again.
+* Waiting for extraction when the viewer's preference asks for subtitles delays the start by as long as the extraction takes.
+For a 20 GB Matroska file on 8 MB/s storage, that wait is about 40 minutes.
+* Folding the new probe facts into probe version 2 would hold probe version 2 behind four unrelated changes.
 
 == Evidence
 
@@ -696,11 +858,92 @@ The extraction took 0.22 to 0.27 s with the file in the page cache, and 0.84 to 
 The windowed extraction missed the line already on screen when the window started.
 It missed that line because a cue that began before the window is not sent again.
 * Cue times follow the source container's timeline.
-With `-copyts`, cue times equalled the media time that the job attempts use.
+With `-copyts`, cue times equaled the media time that the job attempts use, because this source's container started at zero.
+On a source whose container started at 601.4 s, the same recipe put every cue 601.4 s late.
+So the extraction job shifts each cue onto media time.
+
+[[evidence-subtitle-cases]]
+=== Subtitle cases
+
+A later set of measurements covered forced and SDH tracks, right-to-left text, MPEG-TS sources and the picture freeze after a change of track.
+The source was a 150 s excerpt of the same Creative Commons film with seven text tracks.
+The tracks were English, English forced, English SDH, Arabic, Hebrew, a styled ASS track and a styled SubRip track.
+The players were hls.js 1.7.0 in Chromium 151, Firefox 153 and WebKit 26.5, WebKit's native HLS, and AVPlayer on macOS 26.6.2.
+Each case ran 3 times unless a count is given.
+
+* AVPlayer with automatic media selection selected the forced track and showed the forced lines.
+No browser engine showed the forced track by itself.
+hls.js ignores `FORCED`.
+WebKit's native HLS listed the forced track as a track of kind `forced` and never showed the forced track's lines.
+* With Apple's authoring rule, `AUTOSELECT=YES` on the regular and SDH tracks, WebKit's native HLS turned on regular English subtitles while the audio had no dialogue, in 3 of 3 runs.
+* AVPlayer showed a rendition named "English SDH" with the SDH characteristics as "English SDH SDH".
+With the name "English" and the SDH characteristics, AVPlayer showed "English SDH".
+* In a test where two renditions were both named "English", AVPlayer and WebKit's native HLS exposed only one of the two, in 3 of 3 plays.
+* WebKit laid out every Arabic and Hebrew cue left to right, in WebKit's native HLS and with hls.js.
+With each line wrapped in the Unicode characters U+202B and U+202C, all four tested engines rendered those cues correctly.
+* No text codec on this ADR's list can exist in an MPEG-TS source.
+FFmpeg writes SubRip, ASS, WebVTT and mov_text into MPEG-TS as data streams.
+Text subtitles in real MPEG-TS sources are teletext or CEA-608 captions.
+
+[[evidence-captions]]
+=== Captions
+
+The tests used FFmpeg's public SCTE-20 caption sample, a 6.7 s MPEG-2 clip with 3 cues, and a 68 s loop of that clip with 30 cues.
+FFmpeg 8.1.2 from the pinned worker image ran every step, and each player ran 2 plays.
+
+* Caption data survived a stream copy to fMP4 and libx264 and libx265 encodes, on every frame.
+SVT-AV1 encodes kept caption data on 0 of 2,038 frames.
+* The extraction found as many cues as the source held: 3 in the clip and 30 in the loop.
+* The extracted WebVTT rendition showed in all six players: hls.js 1.7.0 in Chromium, Chrome, Firefox and WebKit, WebKit's native HLS, and AVPlayer.
+Every cue started within 1 ms of the cue's frame.
+* With the captions left in the video and signaled by the playlist, only hls.js showed the captions, 67 ms (2 frames) late.
+WebKit's native HLS and AVPlayer listed the caption track but produced no cues, in fMP4 and in MPEG-TS alike.
+* Detecting caption data by decoding only keyframes took 0.11 to 0.14 s for the first 10 s of a 1080p H.264 file.
+A full decode of the same 10 s took 0.71 to 0.77 s.
+The host's load average was 10.6 to 13.2, and each case ran 3 times.
+* The tests covered CEA-608 on the first caption channel only.
+
+[[evidence-subrip]]
+=== SubRip that is not UTF-8
+
+The tests used synthetic SubRip tracks of 100 cues each, extracted with FFmpeg 8.1.2 from the pinned worker image.
+
+* FFmpeg's text decoders rejected every cue that was not valid UTF-8.
+Cues in pure ASCII survived.
+* When a track lost more than two thirds of its cues, FFmpeg exited with status 69 after writing every output.
+In a five-track file, the UTF-8 track came out complete, but the process still exited with status 69.
+* Below two thirds, FFmpeg exited with status 0, and only FFmpeg's error output reported the loss.
+German in ISO-8859-1 kept 45 of 100 cues, and English with windows-1252 quotation marks kept 80 of 100.
+* ffprobe returned the same stream description for a UTF-8 track and a windows-1255 track.
+* Converting each invalid cue before FFmpeg, from a code page chosen by the track's language, gave 100 of 100 correct cues on all 8 tracks.
+The tracks used windows-1250, windows-1251, windows-1252, windows-1255, ISO-8859-1 and CP932.
+* Converting a whole track with FFmpeg's `-sub_charenc` gave 35 of 100 correct cues on a UTF-8 track with 5 windows-1252 cues.
+* U+FFFD alone kept every cue but replaced every letter of the Hebrew and Russian tracks.
+
+[[evidence-library]]
+=== Library sample
+
+The library sample holds 300 files: 109 movie files and 191 TV files.
+The sample gave Matroska files double weight, so the sample is not proportional to the library.
+
+* 53 of the 133 files with text subtitles have two or more text tracks in one language.
+In those groups, the title tells apart 165 of 244 tracks (68 %).
+Another 59 tracks need the flags, and 20 tracks in 10 groups need a trailing number.
+* The hearing-impaired flag marks only 25 of the 78 text tracks that are SDH by flag or by title.
+* Of the 305 titled text tracks, 67 store their title in MP4's `name` or `handler_name`, never in `title`.
+* 1 of 682 SubRip tracks is not UTF-8.
+* 274 of 277 forced cues, from 23 forced text tracks in 8 files, are also in the matching full track.
+* In 682 SubRip tracks, 0 of 910,377 lines hold text that FFmpeg's SubRip decoder would drop between a `<` and a later `>`.
+* The container header states a duration for 349 of 416 audio streams (84 %).
+* FFmpeg's header probe marks captions on 0 files.
+Decoding the first 30 s of each file finds caption data in 24 of the 254 files that decode.
+* The sample holds no teletext among its 1,162 subtitle streams.
 
 == References
 
-* Issue https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60] (subtitle extraction and WebVTT) and issue https://github.com/streamarr/streamarr-transcode-worker/issues/15[streamarr/streamarr-transcode-worker#15] (the worker's extraction).
+* Issue https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60] (subtitle extraction and WebVTT, in the server and the worker).
+* Issue https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503] (audio renditions), issue https://github.com/streamarr/streamarr-server/issues/505[streamarr/streamarr-server#505] (captions), issue https://github.com/streamarr/streamarr-server/issues/508[streamarr/streamarr-server#508] (subtitles that extraction finishes during playback) and issue https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511] (streams that end early).
+* Issue https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] (typed capability declarations) and issue https://github.com/streamarr/streamarr-web/issues/29[streamarr/streamarr-web#29] (the web client's declarations).
 * Issue https://github.com/streamarr/streamarr-apple/issues/4[streamarr/streamarr-apple#4] (audio and subtitle selection in the Apple client).
 * Pull request https://github.com/streamarr/streamarr-transcode-worker/pull/50[streamarr/streamarr-transcode-worker#50], which declares copied audio's bitrate unknown.
 * link:0013-stream-decision-architecture.adoc[ADR 0013], link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018], link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019], link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032], link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033], link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] and link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037].

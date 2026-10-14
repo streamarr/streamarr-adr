@@ -284,6 +284,8 @@ A CRA picture never qualifies, even when no RASL picture follows it.
 The encoder may place RASL pictures after any CRA picture.
 The mp4 muxer marks the CRA picture as a sync sample in both cases.
 libx264 and SVT-AV1 are keyframe-verified.
+`h264_videotoolbox` and `hevc_videotoolbox` are keyframe-verified with B-frames off.
+With B-frames on, neither encoder is keyframe-verified.
 SVT-AV1 stays keyframe-verified despite upstream bug https://gitlab.com/AOMediaCodec/SVT-AV1/-/work_items/2385[#2385] in the pinned runtime (worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/42[#42]), because that bug stalls or reorders output rather than dropping a forced keyframe.
 The stall watchdog of the <<decision-waits,four waits>> and the short-sample rule for <<decision-untrusted-output,untrusted output>> fail each affected attempt so that the server can replace it under ADR 0019.
 Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/42[#42] will update the selected runtime to a version that includes the fix.
@@ -291,8 +293,7 @@ libx265 is not keyframe-verified.
 Under its default open GOP, its forced keyframes are CRA pictures.
 When a recording suppressed a forced keyframe, libx265's GOP placed a CRA picture that was followed by a RASL picture.
 libx265 qualifies only after its GOPs are closed under issue https://github.com/streamarr/streamarr-server/issues/497[streamarr/streamarr-server#497] and a new recording shows that both its forced keyframes and its GOP's backstop keyframe are IDR pictures.
-Each hardware encoder must pass the same recording checks before it is keyframe-verified.
-Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/14[#14] tracks those checks.
+Every other hardware encoder must pass the same recording checks before it is keyframe-verified (<<decision-hardware-encoders>>).
 
 The worker sets each encoder's frame-count GOP by whether that encoder is keyframe-verified.
 For a keyframe-verified encoder, the worker multiplies the period by the output frame rate, rounds the result up, and adds one frame to obtain the extended GOP.
@@ -311,7 +312,57 @@ The server dispatches a replacement attempt from the skipped segment under ADR 0
 *Why:* The floored GOP added a second keyframe beside the forced one at 13 of 15 boundaries.
 The extended GOP produced only forced keyframes in all twelve runs.
 libx265's backstop was a CRA picture followed by RASL pictures in three of four recordings.
-Evidence: <<evidence-gop>>, <<evidence-svt-av1>>.
+The VideoToolbox encoders were recorded on an Apple M1 Max with macOS 26.6.2 and FFmpeg 8.1.2 for macOS on arm64, from the start and after a seek, at 23.976 and 29.97 fps.
+With B-frames off, every forced keyframe in 176 recordings was a sync sample: 4,155 of 4,155 for H.264 and 4,345 of 4,345 for HEVC.
+Each of those keyframes was an IDR picture with no leading pictures, and each encoder restarted its GOP count there.
+With `-bf 2`, HEVC's forced keyframes became CRA pictures followed by RASL pictures.
+VideoToolbox also placed IDR keyframes of its own at frames that differed between attempts, and none of them displaced a forced keyframe.
+Evidence: <<evidence-gop>>, <<evidence-svt-av1>>, https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57].
+
+[[decision-hardware-encoders]]
+=== Hardware encoder backends join one at a time, after three checks
+
+Streamarr adds hardware encoder backends one at a time.
+NVENC (https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56]) and VideoToolbox (https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57]) are added now.
+The VAAPI, QSV, AMF and RKMPP encoders stay deferred to https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] until hardware exists to verify them.
+A worker encodes with a hardware encoder backend only after that backend passes three checks:
+
+. The backend's recordings pass the keyframe recording checks (<<decision-gop>>), so the backend joins the keyframe-verified list.
+. Every job attempt on the backend with the same encoder settings writes a byte-identical initialization segment.
+. The backend's initialization segments pass the worker's output check (https://github.com/streamarr/streamarr-transcode-worker/issues/25[streamarr/streamarr-transcode-worker#25]).
+Each initialization segment carries the codec string, codec profile, level and tier that the job decided.
+
+No worker encodes with VideoToolbox before two more checks pass.
+A timing check measures how long each VideoToolbox encoder takes to complete a seek's first media segment at the chosen segment length.
+A second Mac must write the same parameter sets (SPS and PPS) as the first Mac for the same encoder settings.
+
+*Why:* The server serves a variant's stored initialization segment with every later attempt's segments, so a backend whose initialization segment changes between attempts breaks replacement attempts.
+The output check stops a backend from writing a codec string, profile, level or tier that differs from what the playlist advertises.
+VideoToolbox's recordings made no timed runs, and only one Mac was measured.
+The parameter sets depend on the encoder's settings, and `-realtime 1` alone changed the H.264 SPS and the HEVC VPS, SPS and PPS.
+Evidence: https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56], https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57].
+
+[[decision-independent-segments]]
+=== Keyframe-verified variants carry `EXT-X-INDEPENDENT-SEGMENTS`
+
+The `EXT-X-INDEPENDENT-SEGMENTS` tag tells a player that it can decode each media segment without the segments before it.
+The tag is true only when every media segment starts with a keyframe that opens a closed GOP, as a keyframe-verified encoder's segments do.
+The server writes the tag in the multivariant playlist when every video variant of the stream session comes from a keyframe-verified encoder.
+Otherwise the server writes the tag only in the media playlists of the variants that come from a keyframe-verified encoder.
+A stream copy never carries the tag, because a source keyframe can open a GOP whose pictures reference earlier pictures.
+A variant from libx265 does not carry the tag while libx265 is off the keyframe-verified list.
+
+*Why:* Without the tag, Safari's native player also requested the two segments before a seek target.
+With the tag, it requested only the segment that holds the target.
+A test server released each segment when the measured libx264 encode speed would have produced that segment.
+The test used a 10-core arm64 host, a four-variant ladder and a 25 Mb/s link, and each figure is the median of 3 sessions.
+With the tag, Safari's native seek fell from 11.0 s to 6.9 s at 6 s segments, and from 5.8 s to 3.9 s at 3 s segments.
+AVPlayer's seeks did not change, and neither did hls.js at 6 s segments.
+At 3 s segments, the tag moved hls.js's share of time at 1080p in both directions, and no one found a cause.
+Apple's HLS authoring specification asks for the tag in the multivariant playlist (item 9.11).
+When the multivariant playlist lacks the tag, item 9.12 requires it in each media playlist whose segments are independent.
+A tag on a variant whose segments are not independent would let a player start decoding in the middle of a GOP.
+Evidence: https://github.com/streamarr/streamarr-server/issues/398[streamarr/streamarr-server#398].
 
 [[decision-seek]]
 === Encoded replacement attempts use the decode-only early-start seek
@@ -731,6 +782,7 @@ Include segments whose inner fragments begin with non-sync samples, which the `-
 Use the previous worker's MPEG-TS output as the control.
 For every combination of stream and player that passes with the MPEG-TS control, fMP4 delivery must also pass.
 Use MPEG-TS for the control because the previous worker serves H.264 in MPEG-TS, and that delivery path hid a junction audio gap that fMP4 exposes.
+Every real-player check that this decision requires also runs on the Apple TV 4K and on the SHIELD TV Pro, because both are primary clients.
 
 *Why:* The encoded runs produced byte-identical inits across start 0 and seeks to 30 s and 60 s.
 The stream-copy runs also produced byte-identical inits across those start points, but their init differed from the encoded runs' init.
@@ -791,8 +843,8 @@ fMP4 reaches Media Source Extensions without the MPEG-TS remux that hid those ga
 * Play a source whose audio ends long before its video in every player.
 The producer delivered every segment of such attempts, but the real-player check finished only 1 of its 24 planned runs of them.
 No player has played an attempt that copies the video and encodes that audio, where the producer drops up to about 0.6 s of late audio.
-* Test playback on tvOS devices and test output from hardware encoders.
-The player checks ran on one macOS host and one iPhone, with software encoders only.
+* Encode with the VAAPI, QSV, AMF and RKMPP hardware encoders, and decode in hardware on Intel and AMD GPUs through QSV and VAAPI (https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14]).
+These backends wait until hardware exists to verify them.
 * Adopt a runtime whose SVT-AV1 fixes upstream bug https://gitlab.com/AOMediaCodec/SVT-AV1/-/work_items/2385[#2385] (worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/42[#42]).
 The worker takes FFmpeg as a pinned prebuilt release under ADR 0029, and no SVT-AV1 release contains commit `ae2658e5` yet.
 * Check whether different FFmpeg builds produce byte-identical inits.
@@ -870,7 +922,9 @@ Once merged segment lists arrive, every stream session uses 3 s slots, and a str
 * A keyframe-verified encoder's segments hold one keyframe instead of the two that most segments hold under the floored GOP.
 Other encoders keep the extra keyframe until they are verified.
 libx265 can qualify after the changes tracked by issue https://github.com/streamarr/streamarr-server/issues/497[streamarr/streamarr-server#497].
-Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/14[#14] tracks the checks for each hardware encoder.
+NVENC and VideoToolbox qualify through their own checks (https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56], https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57]), and https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] keeps VAAPI, QSV, AMF and RKMPP.
+* A worker encodes with a hardware encoder backend only after the backend passes the keyframe recording checks, the initialization-segment check and the output check.
+* Safari's native player fetches only the target segment when it seeks in a variant from a keyframe-verified encoder.
 * The extended GOP alone no longer guarantees a keyframe in every interval.
 If an encoder stopped honouring forced keyframes altogether, its GOP would drift away from the segment starts until an interval held no keyframe, as it does past the end of the list.
 The producer would then fail that attempt with `SKIPPED_SEGMENT_NUMBER` instead of misnumbering segments.
@@ -997,6 +1051,12 @@ WebKit kept 1080p in only 4 of 15 sessions, and hls.js in Chromium held 1080p fo
 At equal VMAF, 2 s segments needed 6.0 to 16.4 % more bitrate than 6 s segments, against 2.9 to 7.7 % more for 3 s segments.
 * Measuring the library's keyframe spacing before choosing a stream copy's segment length would delay a choice that the spacing no longer decides.
 Merged segment lists let every stream session use 3 s slots without encoding more sources, whatever the spacing is.
+* Writing `EXT-X-INDEPENDENT-SEGMENTS` for every variant would claim independence for stream copies and libx265, whose segments can start with an open GOP.
+* Never writing `EXT-X-INDEPENDENT-SEGMENTS` would keep Safari's native player fetching two extra segments before every seek target.
+* Recording the VideoToolbox encoders only in https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] would keep them off the keyframe-verified list that the worker reads.
+* Deferring the VideoToolbox encoders would leave a Mac worker's hardware encoder unused, although both encoders already pass the recording checks.
+* Adding VAAPI, QSV, AMF and RKMPP now, each on its own or all in one change, would add backends that no available hardware can verify.
+* Waiting for the encoded-seek work before adding NVENC and VideoToolbox would delay both backends, although their three checks do not depend on that work.
 * Keeping the rounded-up frame-count GOP as the only source of keyframes, as the previous worker does for SVT-AV1 and hardware encoders, lets keyframes drift until an interval holds none.
 Waiting for a replacement attempt to produce the missing segment would stall playback each time.
 The extended GOP is safe only because forced keyframes, not the GOP, place every boundary.
@@ -1493,6 +1553,8 @@ The fixtures README states which behaviour each recording verifies and explains 
 The Node recorder that made them (`src/test/fmp4-recorder`) runs in CI without FFmpeg to re-derive every recording's expectations.
 * Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/55[streamarr/streamarr-transcode-worker#55], which decodes seek attempts on VideoToolbox and NVDEC.
 * Issue https://github.com/streamarr/streamarr-server/issues/502[streamarr/streamarr-server#502], which records a variable-frame-rate source whose gap between frames outlasts the period and proposes a seek that keeps the frame the gap repeats.
+* Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56], which adds the NVENC encoders after the three checks.
+* Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57], which adds the VideoToolbox encoders after the three checks, the timing check and the second Mac's parameter-set comparison.
 * Issue https://github.com/streamarr/streamarr-server/issues/504[streamarr/streamarr-server#504], which moves encoded variants to 3 s segments behind the Apple TV merge gate.
 * Issue https://github.com/streamarr/streamarr-server/issues/512[streamarr/streamarr-server#512], which builds each stream session's segment list from 3 s slots and merges slots without a source keyframe.
 * Issue https://github.com/streamarr/streamarr-server/issues/446[streamarr/streamarr-server#446], which has the server refuse a stream session that would encode video without a usable frame rate.

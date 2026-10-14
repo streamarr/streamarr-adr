@@ -9,7 +9,7 @@ This ADR narrows the "RFC 8216 compliance" consequence of link:0008-server-gener
 The playback capabilities epic, https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399], describes starting every variant eagerly.
 This ADR replaces that eager start.
 For now, variants start on demand.
-<<decision-requested-variant>> gives the rules for when each variant starts.
+<<decision-requested-variant>> gives the rules for when each variant starts and stops.
 The headroom model of link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] decides when extra variants may start early.
 Extra variants are variants that the player has not requested.
 This ADR sets the relocation gap to two media segments.
@@ -24,10 +24,13 @@ Implemented.
 `SegmentDeliveryCoordinator` owns the liveness-and-progress-bounded wait and the bounded replacement budget; `ProducerLifecycleService` owns every producer mutation under the per-session mutex, with the attempt fence at the replacement write (https://github.com/streamarr/streamarr-server/issues/252[issue #252]).
 Worker-side upload back-pressure retry and the worker's stall-bounded segment wait are tracked in https://github.com/streamarr/streamarr-transcode-worker/issues/1[worker issue #1, transferred from streamarr-server issue #253].
 The recovery rules are implemented.
-The server does not yet start variants on demand.
+The server does not yet start variants on demand (https://github.com/streamarr/streamarr-server/issues/498[streamarr/streamarr-server#498]).
+The server does not yet stop the producers of variants that the player has left (https://github.com/streamarr/streamarr-server/issues/498[streamarr/streamarr-server#498]).
+The server still lists the highest-quality variant first (https://github.com/streamarr/streamarr-server/issues/498[streamarr/streamarr-server#498]).
 The server does not yet use the two-segment relocation gap (https://github.com/streamarr/streamarr-server/issues/502[streamarr/streamarr-server#502]).
 The server still starts every variant together.
 The server still relocates forward when the segment 24 s before the requested segment has not been produced.
+The server does not yet start extra variants from encoder headroom (https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499]).
 
 == Context
 
@@ -72,25 +75,32 @@ A relocation revives even a variant whose recovery has been exhausted.
 <<decision-relocation-gap>> defines when the server relocates.
 
 [[decision-requested-variant]]
-=== Variants start on demand
+=== Variants start and stop on demand
 
 A variant is one quality level that the stream session offers.
 A variant is what RFC 8216 calls a Variant Stream, as ADR 0018 records.
 The ladder is the stream session's set of variants.
 The requested variant is the variant whose media segment the player has just requested.
 The first-listed variant is the variant that the multivariant playlist lists first.
+link:0008-server-generated-hls-playlists.adoc[ADR 0008] lists first the variant whose average bitrate is nearest 2000 kb/s.
+On the default ladder of 1080p, 720p, 480p and 360p, the first-listed variant is therefore 480p.
 The current segment is the first media segment of the stream session's most recently started job attempt.
 Before any job attempt starts, the current segment is the media segment at which the stream session starts.
 
-The server starts and restarts variants by these rules:
+The server starts, restarts and stops variants by these rules:
 
 * Creating a stream session starts the first-listed variant.
 * A request for the initialization segment of a variant that has no producer starts that variant at the current segment.
+* A request for an initialization segment stops no producer.
 * A request for a media segment of a variant that has no producer starts that variant at the requested segment.
+* A request for a media segment of one video variant stops the producers of the stream session's other video variants.
 * A relocation restarts only the requested variant at the requested segment.
 * After a relocation, a variant that is not running starts when the player next requests one of that variant's segments.
 * Apart from the first-listed variant, no variant starts before the player requests one of that variant's segments, unless the headroom model of link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] allows that variant to start early.
 * Until the headroom model is validated, the headroom model allows no variant to start early.
+* Once the headroom model is validated, a variant that the headroom model started early is exempt from the rule that a media-segment request stops the other video variants.
+A variant that the headroom model started early runs while encoder headroom allows.
+That variant stops when encoder headroom runs out.
 
 These rules hold for now.
 The long-term goal is a rule based on capacity.
@@ -105,6 +115,15 @@ A variant that starts at creation begins encoding before the player has fetched 
 
 *Why an initialization request starts a variant:* A player requests a variant's initialization segment before any of that variant's media segments.
 Starting the variant at the initialization request saves the time until the player's first media-segment request.
+
+*Why a media-segment request stops the other video variants:* A producer that runs beside the requested variant takes CPU from the requested variant.
+The rejected alternative is a gap-based stop.
+The gap-based stop keeps the other variants' producers running while those producers lie within the relocation gap of the requested segment.
+A simulation tested the gap-based stop at 3 s segments, with 1080p listed first and a gap of 4 segments.
+In that simulation, the link dropped and then recovered.
+AVPlayer and WebKit's native player each failed every attempt to switch up after the link recovered, over 2 sessions for each player.
+Later simulations compared variant orders and segment lengths under the stop rule that this ADR adopts.
+No AVPlayer session in those later simulations timed out or failed, over 3 sessions for each tested combination.
 
 *Why other variants wait for a request:* Starting the four variants of the measured ladder together made every variant about 3× slower than starting that variant alone.
 With all four variants running, the 1080p variant produced 0.94–1.08 media seconds per wall second.
@@ -222,8 +241,13 @@ The alternatives include:
 The measured sessions started no variant when the stream session was created.
 Starting the first-listed variant at creation was not measured.
 Starting a variant at its initialization request was not measured either.
-The server currently lists the highest-quality variant first.
-Creating a stream session therefore starts the most expensive encode.
+On the default ladder, ADR 0008 lists 480p first.
+Creating a stream session therefore starts a 480p encode instead of the most expensive encode.
+
+The stop rule stops the variant that the player leaves, so a switch back to that variant starts a new job attempt.
+A player that alternates between two variants therefore starts a job attempt at each switch.
+In simulated 80 s sessions with two seeks and 3 s segments, hls.js in Chromium switched 33 times and started 31 job attempts with libx264 at the `medium` preset.
+With the `faster` preset, which ADR 0044 makes the default for libx264, hls.js switched 4 times and started 5 job attempts.
 
 == Rejected Alternatives
 
@@ -234,7 +258,7 @@ Creating a stream session therefore starts the most expensive encode.
 * Per-segment isolated transcoding on demand — independent single-segment encodes glitch at audio and video boundaries; a contiguous run per producer is required.
 * A per-window snapshot of eligible execution targets — the snapshot is a retained copy of live fleet state that must be defended against every concurrent mutation (supersession fences, exhausted-window retention, new-target set-difference); review found two high-severity staleness-of-the-copy defects in exactly that machinery, while live consultation admits newly eligible targets without retaining a second copy of fleet membership.
 * Producer lifetime driven by subscription-style demand handles (a producer runs only while a delivery holds a handle) — stateless HLS clients hold no standing connection to hang a handle on; last-request-time reaping is the honest demand signal for HTTP delivery.
-* Starting every variant of the ladder together at session start and on every relocation.
+* Starting every variant of the ladder together at session start and on every relocation, and keeping every variant running, as the server did before this amendment.
 Each variant ran about 3× slower.
 hls.js cycled between 1080p and 360p.
 AVPlayer took about 19 s to become ready to play.
@@ -243,6 +267,21 @@ The ladder neighbours are the variants next to the requested variant in the ladd
 The neighbours took CPU from the requested variant.
 720p fell from 5.45× to 2.04× real time.
 hls.js rarely switched up to 1080p.
+* Keeping the producers of the other variants running while those producers lie within the relocation gap of the requested segment.
+The measured sessions used this gap-based stop.
+In a simulation at 3 s segments, AVPlayer and WebKit's native player failed every attempt to switch up after the link recovered under the gap-based stop.
+* Stopping a producer only after the player has left that producer's variant for an idle grace period.
+During the grace period, the idle producer keeps taking CPU from the requested variant.
+* Letting a media-segment request also stop the variants that the headroom model started early.
+The headroom model starts a variant early so that the variant is ready when the player switches to it.
+Stopping that variant at the next media-segment request would waste the early start.
+* Staggering the starts of the variants.
+Staggered starts still end with every variant running together.
+* Decoding the source once for every variant.
+Encoding takes most of a job attempt's CPU, so a shared decode does not remove the slowdown of running every variant together.
+* Creating a stream session that starts no variant.
+The first media segment then waits for the player's first media-segment request.
+Low latency is a product priority.
 * Starting extra variants whenever a worker has a free slot.
 A free slot says nothing about how much CPU is left.
 With four software encodes on four slots, the 1080p variant ran below the hold threshold.
@@ -296,7 +335,8 @@ In the independent re-run, AVPlayer became ready to play after 5.2 s.
 A variant started only when the player requested one of that variant's media segments.
 The simulated server served every variant's initialization segment at once.
 Starting a variant at its initialization request was therefore not measured.
-* In the measured sessions, when the server started or relocated the requested variant, the server stopped only the other variants' job attempts that lay more than the relocation gap from the requested segment.
+* The measured sessions used the gap-based stop, which this ADR rejects in favor of the stop rule in <<decision-requested-variant>>.
+In the measured sessions, when the server started or relocated the requested variant, the server stopped only the other variants' job attempts that lay more than the relocation gap from the requested segment.
 After a seek, the server stopped every other job attempt.
 After a switch between variants, the server stopped no job attempt.
 * With only the requested variant running, WebKit's native player started in 3.5 s.

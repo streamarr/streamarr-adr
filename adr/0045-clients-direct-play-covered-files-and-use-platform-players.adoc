@@ -1,0 +1,304 @@
+= ADR 0045: In Original Quality, a Client Direct-Plays Each File Its Capability Declaration Covers, and Each Client Uses Its Platform's Own Player
+
+== Status
+
+Proposed
+
+This decision takes up the direct play that link:0007-transcode-first-with-smart-remux.adoc[ADR 0007] deferred.
+ADR 0007 listed direct play as a future optimization for clients that open the source container natively.
+This decision overturns none of ADR 0007's decisions.
+ADR 0007 stays Accepted.
+ADR 0007's rule that routes all streams through FFmpeg still holds for every stream that is not direct-played.
+This decision relies on link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019] for held segment requests and for the server's preparing-or-ready events.
+
+== Context
+
+Before this decision, every stream plays over HLS (HTTP Live Streaming).
+HLS delivers media as short media segments that a playlist lists.
+An HLS stream offers one or more variants.
+A variant is one quality level of the media.
+The playlist lists each variant in an `EXT-X-STREAM-INF` tag.
+For each variant, the server dispatches a job to a worker.
+Each dispatch is a job attempt.
+Each job attempt runs its own FFmpeg process.
+A producer is the worker module that reads one job attempt's FFmpeg output and delivers that attempt's media segments.
+The worker runs FFmpeg even for a file whose codecs the client already plays.
+For such a file, FFmpeg runs a stream copy.
+A stream copy passes the source video through unchanged.
+The player still waits for the producer at start and after every seek.
+
+Direct play means that the server sends the source file itself.
+The client's player reads the source file with HTTP byte-range requests.
+A byte-range request asks the server for one span of a file's bytes.
+The source container is the container of a media file as the probe found it, such as Matroska, MP4 or MPEG-TS.
+
+Each client sends the server a client capability declaration (https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395]).
+A client capability declaration records the combinations of formats that the client's player and delivery path can accept.
+The server chooses each output from the client capability declaration.
+Playback can still fail after that choice.
+
+The viewer picks a playback choice.
+Original is the playback choice that plays the source at its own quality.
+Auto is the playback choice in which the player adapts quality to bandwidth across the variants.
+A format error is a player error that concerns the media format itself, not the network or the server.
+A playback session is the logical span of one viewing of a media title.
+A format attempt is one output format that the server chooses within a playback session.
+Each playback session has a format-attempt budget that limits how many format attempts the playback session uses (https://github.com/streamarr/streamarr-server/issues/401[streamarr/streamarr-server#401]).
+The initial format is the first format attempt.
+Before this decision, only an Auto recovery after a format error adds another format attempt to the budget.
+
+Streamarr has three clients.
+The Apple client runs on tvOS and iOS.
+The Android TV client runs on Android TV devices.
+The web client runs in browsers.
+Each client needs a player.
+Streamarr checks TV playback on an Apple TV 4K and on an NVIDIA SHIELD TV Pro, which is an Android TV device.
+
+Each player handles a held segment request in its own way.
+A held segment request is a media segment request that the server holds open until the producer delivers the segment (ADR 0019).
+For each held segment request, the server publishes whether the server is still preparing the segment or the segment is ready (ADR 0019).
+These messages are the preparing-or-ready events.
+
+== Decision
+
+[[decision-direct-play]]
+=== In Original, a client gets the source file when its capability declaration covers the file
+
+When the viewer picks Original and the client capability declaration covers a media file, the server serves the source file itself over HTTP byte-range requests.
+Direct play starts no job attempt and no FFmpeg process.
+The server stores no media segments for a direct-played file.
+HLS stays the fallback for direct play.
+HLS also delivers every stream that the server does not direct-play.
+
+The server never chooses direct play for a playback choice other than Original.
+Original is the default playback choice on tvOS.
+A direct-played file therefore always plays at original quality.
+In Auto, the server always delivers adaptive HLS.
+The iOS client gets direct play from the same Apple code as the tvOS client when the viewer picks Original.
+The final round of iPhone checks verifies direct play on iOS.
+
+[[decision-coverage]]
+=== The declaration must cover the container, the video, the audio and any subtitle
+
+The stream decision of link:0013-stream-decision-architecture.adoc[ADR 0013] chooses direct play only when the client capability declaration covers all of the following parts of the file:
+
+* the source container
+* the video stream
+* the selected audio
+* any selected subtitle
+
+An image subtitle track stores each cue as a picture.
+PGS and VobSub are image subtitle formats.
+A selected image subtitle must be burned into the video.
+A file with a selected image subtitle therefore always plays over HLS.
+A forced track is a subtitle track that the file marks for display even when subtitles are off.
+In some cases, the server burns in a forced image track automatically (link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043]).
+A forced image track that the server burns in automatically counts as a selected subtitle.
+A file therefore plays over HLS whenever the server burns in the file's forced image track.
+
+[[decision-authority]]
+=== Every direct-play request passes the live playback-authority check
+
+Every direct-play request passes the same live playback-authority check as playlist and segment requests (link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018]).
+The server only reads the source file.
+
+[[decision-format-error]]
+=== A format error during direct play falls back to HLS at original quality
+
+When the player cannot play a direct-played file, the client reports a format error.
+The server then falls back to HLS at original quality.
+The HLS stream that the server delivers after a direct-play format error counts as one format attempt against the playback session's format-attempt budget (https://github.com/streamarr/streamarr-server/issues/401[streamarr/streamarr-server#401]).
+The glossary's *Format attempt* entry counts that HLS format attempt as well as each Auto recovery.
+
+[[decision-complete-files]]
+=== Direct play serves only complete files, and HLS stays the delivery format
+
+Direct play serves a complete file that already exists.
+HLS stays the delivery format for everything else.
+Streamarr does not adopt MoQ (Media over QUIC) transport.
+Streamarr does not deliver media while an encoder is still producing that media.
+
+[[decision-tv-measurements]]
+=== Each TV client gets direct play only after measurements on that TV
+
+Streamarr adds direct play to one TV client at a time.
+Streamarr releases direct play on a TV client only after measuring direct play on that TV.
+The measurements play a sample of the library in Original.
+The measurements count how many files of the sample the server offers that TV for direct play.
+The measurements count how many of those offered files play.
+The measurements record direct-play start and seek times on that TV.
+
+[[decision-tv-first]]
+=== The TV clients come first
+
+The TV clients are Streamarr's primary consumers.
+Streamarr therefore judges each player or delivery choice first by the choice's effect on the Apple TV and on Android TV.
+
+[[decision-players]]
+=== Each client uses its platform's own player
+
+Each client uses its platform's own player.
+The Apple client uses AVPlayer.
+The Android TV client uses Media3 ExoPlayer.
+ExoPlayer uses OkHttp as its HTTP stack.
+The web client uses hls.js with the hold-aware controller.
+The hold-aware controller is the web client's quality controller for hls.js.
+The hold-aware controller accounts for held segment requests.
+
+The web client pins hls.js to an exact version.
+The Android TV client pins Media3 and OkHttp to exact versions.
+Every hls.js upgrade runs the hold-aware controller's tests before the upgrade merges.
+
+No client uses libmpv as its main playback engine.
+libmpv may return only as an opt-in second engine for direct play.
+
+[[decision-safari]]
+=== Safari keeps hls.js and offers AirPlay
+
+In Safari, the web client keeps hls.js.
+The web client uses Safari's native HLS player only where hls.js cannot run.
+ManagedMediaSource is the media-source API that hls.js uses in Safari.
+The web player offers AirPlay by giving ManagedMediaSource the HLS URL as an alternate source.
+The web player offers AirPlay only after a check in real Safari passes.
+
+[[decision-hold-aware]]
+=== The hold-aware controller keeps quality during held segment requests
+
+The hold-aware controller never abandons a held segment request.
+The hold-aware controller never switches down because of a held segment request.
+The hold-aware controller uses the server's preparing-or-ready events (ADR 0019) to select quality.
+When no preparing-or-ready events arrive, the hold-aware controller falls back to its own detection of held segment requests.
+
+[[explicitly-deferred]]
+=== Explicitly deferred
+
+* Remux-to-play, which repackages a file into a source container that the player opens, so that more files direct-play.
+* Direct play on the web client.
+* libmpv as an opt-in second engine for direct play.
+* Quality selection from the preparing-or-ready events on the TV clients, until a device test shows a need.
+ADR 0019 records this deferral.
+
+== Consequences
+
+* A direct-played file runs no FFmpeg process, uses no worker time and stores no media segments.
+A direct-played start or seek waits on the network and the player, not on a producer.
+* Direct play has no adaptive quality.
+A direct-played file plays at the file's own bitrate.
+A link slower than that bitrate stalls direct play instead of lowering quality.
+Original already plays at the source's own quality and never adapts.
+Auto needs adaptive quality, so Auto stays on HLS.
+* A direct-played seek depends on the source's keyframe spacing.
+* During direct play, the client manages its own buffer.
+The server sees only byte-range requests.
+* The server now has two delivery paths, HLS and direct play.
+ADR 0007's consequence of "no separate direct-play infrastructure" holds only for streams that are not direct-played.
+* Direct play helps a minority of files on the Apple TV.
+In the 300-file library sample, at most 73 files can direct-play on the Apple TV as they are.
+Another 114 files carry codecs that AVPlayer plays, but those files sit in a source container that AVPlayer does not open.
+Those 114 files keep playing over HLS as stream copies.
+* In Original, a format error on a direct-played file spends one format attempt from the playback session's budget.
+Before this decision, only Auto spent that budget after a format error.
+* The Apple TV and Android TV can get direct play at different times, because each TV client waits for the measurements on its own TV.
+* A pinned player library changes only through a deliberate upgrade.
+
+== Rejected Alternatives
+
+* Keeping every stream on FFmpeg with no direct play makes every seek wait for a producer, even for a file that the player opens as it is.
+* Measuring first and deciding on direct play later is unnecessary, because each TV client's release already waits for measurements on that TV.
+* Direct play in Auto as well as in Original would give up Auto's adaptive quality, because a direct-played file plays only at the file's own bitrate.
+* Direct play on the Apple TV only, without iOS, would leave out a client that runs the same Apple code.
+* libmpv as the main engine on every client has no adaptive quality against Streamarr's HLS.
+libmpv also loses HDR and audio features on both TVs (<<evidence-libmpv>>).
+* Native players on the TVs with a tuned Shaka Player 5.2.12 on the web did worse than hls.js in the simulation.
+Tuned Shaka Player rebuffered in 18 of 18 sessions in which the link dropped at a seek, against 0 of 18 for hls.js.
+With Shaka Player, Firefox froze on 8 of 23 audio switches.
+* Switching Safari to its native HLS player wherever Safari can play the stream would slow start and seek.
+The simulation ran on a Mac with 3 s segments and 480p listed first, and reports medians of 3 runs.
+Safari's native player started in 1.25 s and sought in 3.9 s.
+hls.js in WebKit started in 1.00 s and sought in 2.5 s.
+The only feature found that the native player has and hls.js lacks is AirPlay.
+The ManagedMediaSource alternate source restores AirPlay with hls.js.
+* hls.js in Safari without AirPlay would take AirPlay away from Safari viewers.
+* MoQ transport would replace HLS.
+Streamarr instead keeps HLS and combines what works in MoQ with HLS, to offset the problems that testing found.
+* Delivering media while an encoder is still producing that media is not worth exploring.
+
+== Evidence
+
+Streamarr has not yet measured direct play on either TV.
+The release measurements that <<decision-tv-measurements>> requires measure direct play on each TV.
+
+[[evidence-start-and-seek]]
+=== Start and seek
+
+* libmpv direct-played an MP4 file from a server that supports byte-range requests.
+The file held H.264 High 1080p30 video at about 3.0 Mb/s and stereo AAC audio.
+The link was shaped to 25 Mb/s with 20 ms of latency.
+The test ran 5 times on an M1 Max Mac.
+libmpv started in 0.46 s and completed a far seek in 0.43 s.
+* For comparison, the same libmpv played Streamarr's HLS with three settings tuned for Streamarr's HLS.
+The comparison ran 3 times.
+libmpv started in 0.96 s and completed a far seek in 2.44 s.
+That comparison ran against a simulated server.
+The simulated server released each media segment when a measured encode at libx264's `faster` preset would produce the segment.
+The simulated server used 3 s segments and listed 480p first.
+* Against the same simulated server, hls.js in Chromium started in 1.00 s and completed a far seek in 2.03 s.
+AVPlayer started in 1.18 s and completed a far seek in 2.15 s.
+* These numbers matter because a direct-played seek waits for no producer.
+
+[[evidence-coverage]]
+=== Coverage on the Apple TV
+
+* The library sample holds 300 files.
+At most 73 of the 300 files could direct-play on AVPlayer as they are.
+Those 73 files are MP4 or MOV, carry H.264 or HEVC video, and carry an audio track that AVPlayer plays.
+The count did not apply codec-profile limits, such as AVPlayer's lack of support for 10-bit H.264, so the real count is lower.
+* 187 of the 300 files carry codecs that AVPlayer plays in some container.
+114 of those 187 files sit in a source container that AVPlayer does not open.
+The 114 is derived as 187 minus 73.
+Those 114 files keep playing over HLS as stream copies.
+* These numbers matter because direct play helps only a minority of files on the Apple TV.
+Remux-to-play, which this decision defers, would reach the remaining files.
+
+[[evidence-forced-tracks]]
+=== Forced image tracks
+
+* In the 300-file library sample, 4 files carry forced image tracks, 7 tracks in all.
+* This number matters because the forced-track rule takes at most 4 of the 300 files off direct play.
+The forced-track rule takes a file off direct play only while the server burns in the file's forced image track.
+
+[[evidence-libmpv]]
+=== libmpv
+
+* Against Streamarr's HLS, stock libmpv has no adaptive quality.
+* When libmpv opened the stream, libmpv probed all four variants.
+The probing cost 7 producer restarts and a 3.27 s start.
+hls.js started in 1.00 s, and AVPlayer started in 1.18 s.
+These measurements ran 5 times against the simulated server at `faster`.
+* libmpv placed the playhead up to one segment past the target of each seek.
+* libmpv skipped a media segment when the server answered `503`.
+* libmpv never recovered from a connection reset in the middle of a segment.
+* On tvOS, libmpv has no HDR or Dolby Vision output, no Atmos and no picture in picture without a large private patch set.
+* On the SHIELD TV Pro, stock libmpv loses HDR and the SHIELD's upscaling.
+On the SHIELD TV Pro, stock libmpv also cannot pass E-AC-3 and TrueHD audio through to an audio receiver.
+
+== References
+
+* https://github.com/streamarr/streamarr-server/issues/495[streamarr/streamarr-server#495] tracks platform players, waiting states and direct play.
+* https://github.com/streamarr/streamarr-server/issues/59[streamarr/streamarr-server#59] adds direct play to the server and to the Apple client on the Apple TV and iOS.
+* https://github.com/streamarr/streamarr-android/issues/2[streamarr/streamarr-android#2] adds direct play to the Android TV client.
+* https://github.com/streamarr/streamarr-android/issues/1[streamarr/streamarr-android#1] builds the Android TV client on Media3 ExoPlayer and OkHttp.
+* https://github.com/streamarr/streamarr-web/issues/85[streamarr/streamarr-web#85] adds the hold-aware controller and AirPlay to the web client.
+* https://github.com/streamarr/streamarr-apple/issues/60[streamarr/streamarr-apple#60] starts tvOS in Original.
+* https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] adds typed client capability declarations.
+* https://github.com/streamarr/streamarr-server/issues/401[streamarr/streamarr-server#401] adds the playback session's format-attempt budget.
+* https://github.com/streamarr/streamarr-server/issues/507[streamarr/streamarr-server#507] adds the preparing-or-ready events.
+* link:0007-transcode-first-with-smart-remux.adoc[ADR 0007: Transcode-First With Smart Remux]
+* link:0013-stream-decision-architecture.adoc[ADR 0013: Stream Decision Architecture]
+* link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018: Live Playback Authority and Outbound Transcode Workers]
+* link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019: Recoverable Just-In-Time HLS Segment Delivery]
+* link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043: Audio Tracks and Text Subtitles Are HLS Renditions, so Switching Them Never Restarts the Video]
+* https://www.rfc-editor.org/rfc/rfc9110#name-range-requests[RFC 9110, section 14: Range Requests]
+* https://www.rfc-editor.org/rfc/rfc8216[RFC 8216: HTTP Live Streaming]
+* https://developer.mozilla.org/en-US/docs/Web/API/ManagedMediaSource[MDN: ManagedMediaSource]
+* https://datatracker.ietf.org/wg/moq/about/[IETF Media over QUIC working group]

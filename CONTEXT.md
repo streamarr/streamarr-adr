@@ -103,6 +103,10 @@ _Avoid_: overlap, lead-in
 Any transcode mode that passes the source video through unchanged (REMUX and AUDIO_TRANSCODE). Its segment boundaries depend on the source's own keyframes.
 _Avoid_: passthrough, remux (when only the video is copied)
 
+**Worker-verified encoder**:
+An encoder that passed a worker's test encode and that the worker advertises. It can be a hardware or a software encoder. A worker-verified encoder is not necessarily keyframe-verified.
+_Avoid_: verified encoder (unqualified)
+
 **Source container**:
 The container of a media file as the probe found it, such as Matroska, MP4 or MPEG-TS. It is a source fact that decides direct-play eligibility, and it never describes HLS delivery, which is always fragmented MP4.
 _Avoid_: container format, ContainerFormat, output container

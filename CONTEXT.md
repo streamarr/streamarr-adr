@@ -44,6 +44,16 @@ _Avoid_: base layer (a Dolby Vision layer, not a picture format), HDR10 (PQ with
 The profile and level that a video codec such as H.264, HEVC or AV1 signals for a video stream.
 _Avoid_: profile (unqualified), viewing profile (the household concept in ADR 0024)
 
+**Codec string**:
+The RFC 6381 value that names one stream's codec with its codec profile, level and other parameters, such as `avc1.640028`.
+A variant's `CODECS` attribute lists the codec strings of the variant's streams.
+An encode's codec string follows from its forced codec, codec profile, level, tier and bit depth.
+The probe computes the codec string of every video and audio stream.
+A stream copy uses the source stream's codec string, with the sample-entry tag that ADR 0013's tag rule picks for the copy.
+For example, a Dolby Vision copy carries its base layer's tag, so a `dvh1` source stream's copy is described as `hvc1`.
+Each codec string must match the produced initialization segment.
+_Avoid_: codec (the family name alone), codec tag (the sample-entry four-character code), CODECS string (the attribute can list several)
+
 **Dolby Vision profile**:
 The profile, level and base-layer compatibility that the Dolby Vision configuration record declares for a video stream, kept separate from the codec profile.
 Its values are claims that the probe checks against the picture signalling and the samples.

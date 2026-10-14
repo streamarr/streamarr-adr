@@ -49,7 +49,8 @@ The RFC 6381 value that names one stream's codec with its codec profile, level a
 A variant's `CODECS` attribute lists the codec strings of the variant's streams.
 An encode's codec string follows from its forced codec, codec profile, level, tier and bit depth.
 The probe computes the codec string of every video and audio stream.
-A stream copy uses the source stream's codec string.
+A stream copy uses the source stream's codec string, with the sample-entry tag that ADR 0013's tag rule picks for the copy.
+For example, a Dolby Vision copy carries its base layer's tag, so a `dvh1` source stream's copy is described as `hvc1`.
 Each codec string must match the produced initialization segment.
 _Avoid_: codec (the family name alone), codec tag (the sample-entry four-character code), CODECS string (the attribute can list several)
 

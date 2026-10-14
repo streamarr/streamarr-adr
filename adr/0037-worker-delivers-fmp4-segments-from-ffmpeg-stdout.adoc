@@ -215,31 +215,79 @@ The extended GOP produced only forced keyframes in all twelve runs.
 libx265's backstop was a CRA picture followed by RASL pictures in three of four recordings.
 Evidence: <<evidence-gop>>, <<evidence-svt-av1>>.
 
-=== Encoded replacement attempts seek one period early
+[[decision-seek]]
+=== Encoded replacement attempts use the decode-only early-start seek
 
 Preroll is media that an attempt's seek emits before the attempt's first media segment.
 The producer discards preroll because this media belongs to earlier segments.
 A stream-copy seek emits preroll because it lands on the keyframe at or before its target.
+A stream-copy attempt targets its first segment's own first source keyframe, which the stored keyframe positions give (issue https://github.com/streamarr/streamarr-server/issues/66[streamarr/streamarr-server#66]).
 A junction is a boundary where one attempt's segment follows another attempt's segment.
 A replacement attempt's first junction is where its first segment follows the start-0 attempt's segment before it.
-An attempt that encodes video with a start sequence number above zero seeks one period early, to `(start_sequence_number − 1) × period`.
-The producer discards that period as preroll.
-The worker computes this seek from the start sequence number and the period, so the contract does not need to change.
-The server still sends the requested segment's boundary as the seek position.
-For an MPEG-TS source, the period before the attempt's first boundary must contain a source keyframe.
-For other sources, that period must contain a source frame.
-When the applicable condition holds, the replacement attempt produces the same frames as the start-0 attempt from the requested boundary onward.
-Otherwise the attempt's first segment starts late inside its interval.
-The producer cannot distinguish this late start from a correct start.
-The <<explicitly-deferred,deferred list>> describes the follow-up work.
-Under the extended GOP the preroll holds only the keyframe that starts the attempt's output, because the list starts at the start sequence number and that GOP exceeds one period.
-The floored GOP may add one more keyframe, which the producer discards with the rest of the preroll.
+
+An attempt that encodes video with a start sequence number above zero uses the decode-only early-start seek.
+The server chooses the source keyframe that the attempt reads from.
+That keyframe is the last source keyframe at or before the first segment's start minus 0.5 s.
+The server finds that keyframe in the stored keyframe positions.
+The server sends that keyframe's decode time as the job's seek position, or a position a margin before that decode time.
+The server sends the decode time rather than the presentation time, because a keyframe's presentation time can lie after its decode time.
+The demuxer then starts reading at that keyframe in every container.
+The job's seek position has sub-second precision.
+The worker reads from the seek position with `-noaccurate_seek`.
+The worker treats an MPEG-TS source like every other source.
+The worker decodes the media from that keyframe up to the first segment's start, but the worker does not encode that media.
+The attempt thus feeds its encoder the same source frames as the start-0 attempt from its first segment's start onward.
+The server no longer sends the requested segment's boundary as the seek position.
+The worker no longer computes a seek position of its own.
+
+A file without a usable container index has no stored keyframe positions until its keyframe scan finishes (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]).
+Until that scan finishes, the server sends a fixed, generous read-back instead of a keyframe.
+The read-back is a seek position a fixed distance before the first segment's start.
+The worker decodes the media from that seek position up to the first segment's start, and the worker does not encode that media either.
 
 *Why:* A seek to the boundary itself can lose the frame that the start-0 attempt repeats there, and can land late on an MPEG-TS source.
 Such a seek put 20 of 36 recorded replacement attempts one or two frames off and left an audio gap that stalled Chromium with hls.js.
-Seeking one period early aligned all 36 replacement attempts and ran each replacement attempt's AAC encoder through the discarded period.
-At every encoded junction measured in the player check, the next audio sample started between 16.0 ms before and 5.3 ms after the preceding audio sample ended.
-Evidence: <<evidence-early-seek>>, <<evidence-players>>.
+A recorded variable-frame-rate MP4 has no frame between 23 s and 31 s.
+An accurate seek to 24 s discarded the frame at 23 s and started segment 5 at 31.031 s.
+A `-noaccurate_seek` read from the source keyframe at 22.022 s passed the frame at 23 s to the encoder and forced segment 5's keyframe at 30.030 s, as the start-0 attempt did.
+The earlier seek one period early also aligned every recorded junction, but that seek encoded a whole period that the producer then discarded.
+With 1080p libx264 at the `medium` preset and 6 s segments, the decode-only early-start seek completed its first segment about 3.0 s after FFmpeg started.
+The seek one period early took about 5.0 s.
+The paired difference was −2.00 s over 18 seeks, on two open-license films with three seek points each and 1 s fragments, timing the encoder alone.
+That time matters because macOS AVPlayer, against a fixture server, abandoned a segment request when no byte had arrived after one target duration.
+Evidence: <<evidence-early-seek>>, https://github.com/streamarr/streamarr-server/issues/502[streamarr/streamarr-server#502].
+
+[[decision-hardware-decode]]
+=== Seek attempts decode in hardware behind a leading-picture filter
+
+A seek attempt is a job attempt whose start sequence number is above zero.
+A seek attempt that encodes video decodes the source in hardware: on VideoToolbox on macOS, and on NVDEC on Linux.
+A keyframe's leading pictures follow the keyframe in decode order but precede the keyframe in presentation order, and leading pictures can reference pictures before the keyframe.
+A leading-picture filter runs on the compressed packets before the hardware decoder.
+The filter drops the leading pictures of the keyframe where the seek lands.
+The filter takes the first keyframe that the demuxer delivers as that landing keyframe.
+The filter keeps every packet that carries no presentation timestamp.
+An attempt that starts at zero runs without the filter.
+The worker decodes AVI sources in software.
+The worker also decodes in software any codec that the hardware decoder lacks or decodes wrongly.
+MPEG-4 Part 2 is such a codec on both platforms.
+A worker without VideoToolbox or NVDEC decodes in software.
+Hardware decode on Intel and AMD GPUs (QSV and VAAPI) stays deferred to https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14].
+
+*Why:* After a seek onto an H.264 open-GOP keyframe, FFmpeg submits that keyframe's leading pictures, which reference the GOP before the keyframe.
+VideoToolbox rejected one such picture and then every non-I picture until a keyframe without leading pictures arrived, so up to 240 frames went missing.
+With the filter, VideoToolbox decoded 146 of 146 junctions frame-exact with no decoder error, and 696 of 696 open-GOP seeks.
+A DVD VOB file, and an MPEG-TS file that stamps a presentation time only on keyframes, carry packets without a presentation timestamp.
+On those sources, a filter that dropped such packets kept 11 of 1,742 frames.
+At the start of one of FFmpeg's test samples, the filter dropped 2 leading B pictures that the decoder could decode, so an attempt that starts at zero runs without the filter.
+NVDEC's H.264 and HEVC output was bit-identical to software decoding, with 0 of 32,633 frames different, so attempts decoded either way join exactly.
+PSNR, the peak signal-to-noise ratio, measures how close one picture is to another, and a higher PSNR means a closer match.
+NVDEC decoded MPEG-4 Part 2 without an error, but its B pictures averaged 31.9 dB PSNR against software decoding over 479 B pictures, and the worst B picture scored 15.4 dB.
+VideoToolbox cannot decode MPEG-4 Part 2.
+The filter never drops a packet in an AVI file, so open-GOP H.264 in AVI still failed on VideoToolbox in 5 of 8 seeks.
+On an Apple M1 Max with FFmpeg 8.1.2 for macOS, one 1080p replacement attempt that encoded with `h264_videotoolbox` used 0.84 to 0.97 s of CPU with hardware decoding and the filter, against 4.26 to 4.28 s with software decoding.
+On an RTX 5090 with the pinned worker image's FFmpeg 8.1.2, hardware decoding cut one 1080p libx264 attempt's CPU time from 19.26 s to 16.47 s, as the median of 5 runs.
+Evidence: https://github.com/streamarr/streamarr-transcode-worker/issues/55[streamarr/streamarr-transcode-worker#55].
 
 [[decision-grouping]]
 === A segment's video opens at the first keyframe at or after its boundary
@@ -657,15 +705,6 @@ No player has played an attempt that copies the video and encodes that audio, wh
 The player checks ran on one macOS host and one iPhone, with software encoders only.
 * Adopt a runtime whose SVT-AV1 fixes upstream bug https://gitlab.com/AOMediaCodec/SVT-AV1/-/work_items/2385[#2385] (worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/42[#42]).
 The worker takes FFmpeg as a pinned prebuilt release under ADR 0029, and no SVT-AV1 release contains commit `ae2658e5` yet.
-* Make each replacement attempt reach the frame that the start-0 attempt used at the requested boundary, whatever the source's frame spacing.
-An encoded replacement attempt's first segment starts late when the preceding period holds no source frame.
-The late start leaves a video gap at the first junction.
-A variable-frame-rate source can have a gap between frames that lasts longer than the period.
-On an MPEG-TS source it also starts late when that period holds no source keyframe, because FFmpeg's MPEG-TS demuxer lands on the next keyframe after the target.
-The producer accepts either start because it lies inside the segment's interval.
-A stream-copy replacement attempt of an MPEG-TS source still starts its video up to one keyframe interval late while its audio starts on time, as it did with the previous worker.
-The follow-up in issue https://github.com/streamarr/streamarr-server/issues/502[streamarr/streamarr-server#502] is a seek that keeps the source frames before its target and discards them as preroll, such as `-noaccurate_seek` on MP4 or a two-stage seek on MPEG-TS.
-That follow-up comes with a recorded fixture that holds a gap between frames longer than the period.
 * Check whether different FFmpeg builds produce byte-identical inits.
 The init carries the muxer's version string, so a stream session that outlives a worker image upgrade could receive a replacement attempt whose init differs from the one the server serves.
 The measurements did not cover a stream session that spans a worker image upgrade.
@@ -692,10 +731,18 @@ Tests verify this rule against recorded fixtures so that an FFmpeg upgrade under
 Its audio starts with the first sample at or after the boundary, so it no longer repeats audio that the previous segment holds.
 From an MPEG-TS source that repeat had been ten AAC frames, and Chromium dropped 7 video frames at the junction.
 The previous worker starts the replacement attempt's first segment one keyframe early, which the server never noticed because it reads no segment timing.
-* An encoded replacement attempt starts its first segment on the start-0 attempt's frame whenever the period before that segment holds a source frame.
-In the recordings and player checks, the audio gap at the replacement attempt's first junction was shorter than one AAC frame, so Chromium no longer buffered a hole at that junction.
-The worker encodes one extra period, which the producer discards.
-The measurements did not establish how much this extra work delays the first segment on real content.
+* An encoded replacement attempt feeds its encoder the start-0 attempt's source frames from its first segment's start onward, whatever the source's frame spacing and container.
+The worker no longer encodes media that the producer discards, so a seek's first segment completes sooner.
+* The encoder starts at the first segment without having encoded any earlier frame, which costs picture quality at the start of that segment.
+VMAF is a perceptual video quality score.
+Over libx264 at 1080p and 720p, on three sources with three boundaries each and 6 s segments, the first second of that segment scored on average 1.8 VMAF below an uninterrupted encode.
+The whole segment scored 0.7 below, and the difference was gone by the third second.
+The worker before this decision had the same cost.
+SVT-AV1 showed no difference while it stayed under its bitrate cap.
+* The attempt encodes no audio before its first segment either.
+The player checks in the Evidence measured junction audio under the seek one period early and under the seek to the boundary, not under the decode-only early-start seek.
+The merge gate of issue https://github.com/streamarr/streamarr-server/issues/502[streamarr/streamarr-server#502] requires every junction to play in real players without a stall, a hole or a repeated picture.
+* A seek attempt on a worker with VideoToolbox or NVDEC decodes in hardware, which leaves more of the worker's CPU for encoding.
 * A segment closes about one fragmentation target after its boundary in media time.
 With the previous worker, FFmpeg renames the segment file at the boundary itself.
 Wall-clock delivery further depends on encoder speed and on back-pressure from the server.
@@ -786,7 +833,17 @@ A 144-frame period is 6.006 s, and the first audio `tfdt` wraps negative.
 * Seeking an encoded replacement attempt exactly to its first boundary leaves no preroll to discard.
 That seek drops frames at the first junction on variable-frame-rate and MPEG-TS sources.
 It also left an audio gap that stalled Chromium with hls.js.
-A 1 s margin still dropped frames on MPEG-TS sources whose keyframes are 2 s apart, and one period is the unit the producer already discards as preroll.
+A 1 s margin still dropped frames on MPEG-TS sources whose keyframes are 2 s apart.
+* Seeking an encoded replacement attempt one period early, and encoding that period for the producer to discard, aligned every recorded junction.
+A 1080p seek's first segment then took about 5.0 s to complete instead of about 3.0 s.
+* Having the worker compute its own read-back for an encoded seek ignores where the source's keyframes are, and FFmpeg's MPEG-TS demuxer lands on the next keyframe after its target.
+* A fixed, generous read-back for every file decodes more media before the first segment than a known keyframe needs.
+The read-back therefore serves only until an index-less file's keyframe scan finishes.
+* Handling stream sessions whose attempts run on different worker versions, by adding the worker version to the affinity key or a recipe version to the worker's capabilities, handles a case that cannot occur while Streamarr has no production instances.
+* Decoding every seek in software, or only the seeks of open-GOP sources, keeps the CPU cost of software decoding.
+That cost was 4.26 to 4.28 s against 0.84 to 0.97 s for one 1080p replacement attempt on the M1 Max.
+* Keeping software decode on Linux until https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] would delay a decoder whose H.264 and HEVC output already matched software decoding bit for bit.
+* Running NVDEC without the leading-picture filter would give the two platforms different recipes, while the filter changed no NVDEC output frame in 77 pairs of runs.
 * Failing the attempt before closing the open segment when a fragment skips a number discards a complete, correctly numbered segment.
 In a stream copy every replacement attempt would fail at the same fragment, so none could deliver it, and in an encode a replacement attempt would encode it again.
 * Requiring recorded fixtures to match the HLS muxer's cuts would make the tests enforce that muxer's first-packet origin, which misaligns a stream-copy replacement attempt.
@@ -1320,6 +1377,7 @@ That run, the previous producer's copy in Chromium with hls.js, played to the en
 * Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/39[#39] and, in the worker repository, its recorded fixtures (`src/test/resources/fmp4`).
 The fixtures README states which behaviour each recording verifies and explains every disagreement with the HLS muxer's cuts.
 The Node recorder that made them (`src/test/fmp4-recorder`) runs in CI without FFmpeg to re-derive every recording's expectations.
+* Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/55[streamarr/streamarr-transcode-worker#55], which decodes seek attempts on VideoToolbox and NVDEC.
 * Issue https://github.com/streamarr/streamarr-server/issues/502[streamarr/streamarr-server#502], which records a variable-frame-rate source whose gap between frames outlasts the period and proposes a seek that keeps the frame the gap repeats.
 * streamarr-server issue https://github.com/streamarr/streamarr-server/issues/446[#446], which has the server refuse a stream session that would encode video without a usable probed frame rate.
 * The write-ups of the proofs of concept behind this decision were not committed.

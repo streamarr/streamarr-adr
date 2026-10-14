@@ -96,7 +96,7 @@ The configured maximum media duration of a fragment. The muxer honours it at the
 _Avoid_: fragment bound, chunk size
 
 **Preroll**:
-Preroll is media that a job attempt's seek emits before the attempt's first media segment. A stream-copy seek starts at the keyframe at or before the target. An attempt that encodes video and starts after segment 0 seeks one period early. The producer discards preroll because this media belongs to earlier segments.
+Preroll is media that a job attempt's seek emits before the attempt's first media segment. A stream-copy seek starts at the keyframe at or before the target. An attempt that encodes video and starts after segment 0 decodes the media before its first segment without encoding that media, so that media never reaches the producer. The producer discards preroll because this media belongs to earlier segments.
 _Avoid_: overlap, lead-in
 
 **Stream copy**:

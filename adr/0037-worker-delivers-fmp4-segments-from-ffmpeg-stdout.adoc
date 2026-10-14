@@ -106,8 +106,9 @@ Each `moof` and the `mdat` that follows it form one fragment.
 The worker change removes the HLS muxer, the output directory, the predicted file names, the directory poll and the liveness poll.
 The server keeps generating every playlist (ADR 0008).
 The worker sets no `min_frag_duration`, so a keyframe normally starts a fragment.
-The worker sets `-frag_duration`, the fragmentation target, to a configured value well below the segment period.
-The measurements used a fragmentation target of 1 s.
+The worker sets `-frag_duration`, the fragmentation target, from its configuration.
+The fragmentation target defaults to 250 ms.
+The measurements in the Evidence appendix used a fragmentation target of 1 s unless they state another value.
 The worker, not the muxer, decides where a segment ends.
 The worker passes `-max_interleave_delta 10000000`, FFmpeg's default of 10 s, rather than inheriting it.
 This interleave bound is how long the muxer holds one stream's packets while it waits for another stream's.
@@ -116,7 +117,8 @@ The worker passes `-copyts -avoid_negative_ts disabled` and adds `-start_at_zero
 These flags place media time zero at the source container's start time.
 That start time is the earliest stream's first timestamp.
 Every attempt uses this origin, whether it starts from zero or seeks into the source.
-The producer never shifts an attempt's timestamps on its own.
+The producer keeps the timestamps that FFmpeg writes, with one exception.
+The producer snaps copied audio with fixed-length frames to its codec's encoder frame grid (<<decision-audio,audio rule>>).
 When it copies AAC audio, the worker adds `-bsf:a aac_adtstoasc`, because `delay_moov` stops the mp4 muxer from inserting that filter on its own.
 When an attempt encodes video, the worker passes `-r:v:0` with the probed frame rate and sets no `-fps_mode`.
 It computes its frame-count GOP, the keyframe interval it gives the encoder in frames, from the same rate (<<decision-gop,GOP sizing>>).
@@ -132,7 +134,12 @@ Otherwise the server would spend ADR 0019's recovery budget dispatching jobs tha
 
 *Why:* `-copyts` alone put a source that begins at 12 s into segment 2 for a job asking for segment 0.
 Explicit `cfr` padded 720 duplicate frames after a seek to 30 s.
-Evidence: <<evidence-channel>>, <<evidence-timeline>>, <<evidence-frame-rate>>.
+A 250 ms fragmentation target completed a seek's first segment 0.16 s sooner than a 1 s target.
+That figure is the median of 18 paired runs, with a range of 0.09 to 0.27 s.
+The runs timed the encoder alone for a 1080p libx264 seek at the `faster` preset, with 3 s segments and the pinned FFmpeg 8.1.2.
+A 100 ms target saved only 0.03 s more than a 250 ms target.
+Parsing four fragments per media second instead of one cost under 0.1 % of FFmpeg's CPU time.
+Evidence: <<evidence-channel>>, <<evidence-timeline>>, <<evidence-frame-rate>>, https://github.com/streamarr/streamarr-transcode-worker/issues/53[streamarr/streamarr-transcode-worker#53].
 
 === Every encoder forces the boundary keyframes from a list
 
@@ -298,7 +305,9 @@ FFmpeg's fragments do not respect the grid for audio.
 libx264 output carries the audio just before a boundary in the fragment that opens the next segment.
 SVT-AV1 output without B-frames carries the audio just after a boundary in the last fragment of the segment before it.
 The producer therefore holds an audio sample for a later segment until it closes that segment.
-In an attempt whose start sequence number is 0, the AAC priming frame starts before zero and stays in segment 0.
+Audio before media time zero is dropped in audio renditions (for AAC, the priming frame), and multiplexed variant segments keep that audio.
+In a multiplexed variant, an attempt whose start sequence number is 0 therefore keeps the AAC priming frame in segment 0.
+link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043] states both rules in the same words.
 In every other attempt, an audio sample below the start sequence number is preroll, and the producer discards it.
 When the output ends, the last segment also takes every audio sample after its interval.
 A late audio sample is one that arrives after the producer has closed its segment.
@@ -306,10 +315,15 @@ The producer drops a late audio sample, counts it and continues the attempt.
 It never moves a late sample into a later segment.
 The producer fails the attempt with the named reason `PRESENTATION_TIME_REGRESSED` when an audio sample starts before the audio sample that arrived before it.
 
+The producer snaps copied audio with fixed-length frames to its codec's encoder frame grid.
+The encoder frame grid holds the frame start times that FFmpeg's own encoder for the same codec writes on media time.
+The snap moves the whole track by one constant amount.
+The producer does not snap copied audio whose frames vary in length, such as FLAC with variable block sizes.
+
 Open segment `N` closes once a keyframe at or after `(N + 1) × period` has arrived and either of two facts holds:
 
 * An audio sample has arrived whose presentation time is at or after `(N + 1) × period`.
-* The decode end of the latest video sample has run a fixed margin past `(N + 1) × period`.
+* The decode end of the latest video sample has run 1 s past `(N + 1) × period`.
 
 When the initialization segment declares no sound track, the keyframe alone closes the segment.
 End of file closes every segment still open or waiting for its audio.
@@ -318,7 +332,9 @@ A fragment without audio past a boundary does not show that the audio before tha
 FFmpeg writes no sign that one stream has ended before the whole input ends.
 Once the audio ends, only the video shows how far the audio has arrived.
 Within the interleave bound, the muxer writes each audio sample beside the video around it.
-The margin covers that interleaving lag and one fragmentation target, and its value stays in the worker's code.
+The 1 s margin covers that interleaving lag and one fragmentation target.
+Once the audio stops, the muxer holds the video for up to the 10 s interleave bound while it waits for audio.
+The worker's 1 s margin follows that wait.
 The fragmentation target measurably shortens the lag before the closing keyframe arrives, but it is a target, not a guarantee.
 
 *Why:* Placing audio by the fragment that carried it made a stream-copy replacement attempt from an MPEG-TS source repeat ten AAC frames (213 ms) that the previous segment already held.
@@ -332,7 +348,13 @@ In a 180 s encode whose audio ended at 20 s, those two frames arrived at 168 s, 
 With the video copied, the muxer stops holding the video 10 s after the audio's last packet.
 Between 8 and 29 more AAC frames, about 0.2 to 0.6 s, then arrived late, and the count varied from run to run.
 No margin short of the whole output covers either case.
-Evidence: <<evidence-one-fragment>>, <<evidence-early-audio>>.
+In a measurement of switches between AAC audio renditions, copied AAC from a Matroska file started 16 samples off the encoder's grid.
+Without the snap, those switches moved the audio offset by −46 to +60 ms.
+With the snap, the offset stayed within −12 to +9 ms, about the measurement's own ±10 ms jitter.
+For typical sources the snap moves a track by under 0.7 ms.
+For audio that starts in the middle of a codec frame, the snap moves the track by at most half a frame: 10.7 ms for AAC, and 16 ms for AC-3 and E-AC-3.
+Both amounts lie inside the ITU-R BT.1359 and EBU R37 tolerances for the timing of sound against picture.
+Evidence: <<evidence-one-fragment>>, <<evidence-early-audio>>, https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503].
 
 [[decision-one-fragment]]
 === Each media segment is delivered as one `moof` and one `mdat`
@@ -347,7 +369,8 @@ Each `traf` holds a `tfhd` with `default-base-is-moof`, a version 1 `tfdt`, and 
 The `trun` gives every sample its own duration, size, flags and composition offset.
 The `mdat` holds the samples in that order, each track's samples in decode order.
 The priming frame's negative `tfdt` is written as FFmpeg writes it, as the 64-bit two's complement.
-The rebuilt samples keep FFmpeg's bytes, decode times, durations, composition offsets and sync flags.
+The rebuilt samples keep FFmpeg's bytes, composition offsets and sync flags.
+The rebuilt samples also keep FFmpeg's decode times and durations, except for copied audio with fixed-length frames, which the producer snaps to its codec's encoder frame grid.
 The initialization segment passes through unchanged.
 The segment cap applies to the rebuilt segment.
 
@@ -550,6 +573,9 @@ A test checks that recorded fixtures contain byte-identical inits across a start
 That identity holds only within one encoder backend, so a replacement attempt must run on the backend of the attempt that produced the init.
 If a replacement attempt uploads an init that differs from the stored init, the server rejects the attempt with a named failure.
 The server adds this comparison as part of this decision.
+Every attempt that copies audio writes a byte-identical init.
+The server's byte-for-byte comparison stays strict.
+The comparison never ignores a field that FFmpeg treats as advisory, such as a bitrate field.
 The worker contract does not need to change.
 The server will restrict replacement attempts to the same backend when workers advertise their encoders (issue https://github.com/streamarr/streamarr-server/issues/398[streamarr/streamarr-server#398]).
 The <<explicitly-deferred,deferred list>> records that work separately.
@@ -566,6 +592,9 @@ Use MPEG-TS for the control because the previous worker serves H.264 in MPEG-TS,
 The stream-copy runs also produced byte-identical inits across those start points, but their init differed from the encoded runs' init.
 In the server's player check the fMP4 stack and the MPEG-TS control each passed 210 of 234 runs, with matching results for every combination of stream and player.
 The remaining failures are AV1 in WebKit and AVPlayer, which the test host's native decoders reject on both stacks.
+With an earlier worker image, the server refused a seek in a stream session that copied AAC from an MPEG-TS source.
+FFmpeg's advisory bitrate fields differed between the two attempts' inits.
+Worker pull request https://github.com/streamarr/streamarr-transcode-worker/pull/50[streamarr/streamarr-transcode-worker#50] made those fields identical, and https://github.com/streamarr/streamarr-server/issues/502[streamarr/streamarr-server#502] adds the server's end-to-end test of that fix.
 Evidence: <<evidence-init>>, <<evidence-players>>.
 
 === The producer delivers fragments to a protocol adapter
@@ -646,6 +675,8 @@ This approach would avoid the repeated period that Consequences describes, but i
 Reading the list from a file stays rejected under Rejected Alternatives.
 * Measure whether each producer and the worker stay within their memory budgets under production conditions.
 The proofs of concept measured pacing and one retention budget, but did not measure whether each producer and the worker as a whole stay within the budgets this decision requires.
+* Use a fragmentation target shorter than 250 ms.
+A later experiment may still adopt a shorter target, and this decision does not rule one out.
 
 == Consequences
 
@@ -668,7 +699,7 @@ The measurements did not establish how much this extra work delays the first seg
 * A segment closes about one fragmentation target after its boundary in media time.
 With the previous worker, FFmpeg renames the segment file at the boundary itself.
 Wall-clock delivery further depends on encoder speed and on back-pressure from the server.
-A segment also waits for the first audio sample past its end, or for its video to run the margin past its end, which delayed no measured segment.
+A segment also waits for the first audio sample past its end, or for its video to run 1 s past its end, which delayed no measured segment.
 The worker's configuration sets the fragmentation target, which no longer shapes the delivered segment.
 Every media segment carries one `moof`, as the HLS muxer's segments did.
 * The producer rewrites every `moof`, so its segments match FFmpeg's samples, not FFmpeg's bytes.
@@ -681,6 +712,8 @@ With rebuilt segments, none of them lost a frame there.
 * A source whose audio ends before its video delivers every segment at the pace of its video.
 When the attempt encodes that audio, the producer drops the frames FFmpeg flushes after their segment was delivered.
 That is the last 2 AAC frames when the video is encoded, and up to about 0.6 s of audio, varying between runs, when the video is copied.
+* Snapping copied audio with fixed-length frames moves each such track by one constant amount.
+That amount is under 0.7 ms for typical sources and at most half a codec frame for audio that starts in the middle of a frame.
 * Rebuilding each segment made a stream copy's first segment arrive 33 to 40 ms after the init, against 17 ms, in a newly started process.
 The measurements did not isolate the cause, and the delay did not grow at the audio's end.
 * Each producer holds up to two segment caps in memory.
@@ -762,9 +795,11 @@ The tests would also enforce behaviour that reads the reference timestamp in the
 Firefox treats each `moof` as its own media segment, so an audio discontinuity after the first `moof` drops the rest of the segment's video until the next keyframe.
 Concatenation also leaves each audio sample in whatever segment its fragment joins, which repeated ten AAC frames at a stream-copy junction from an MPEG-TS source.
 A 250 ms fragmentation target without rebuilding still lost the rest of the replacement attempt's first segment at every junction in Firefox's raw Media Source Extensions.
-* Dropping or shortening the AAC priming frame fixes only segment 0 in Firefox.
+* Dropping or shortening the AAC priming frame in multiplexed variant segments fixes only segment 0 in Firefox.
 Any audio jump beside continuous video in a segment of several `moof` boxes still drops the rest of that segment's video.
-It would also shift timestamps that FFmpeg wrote, which the producer never does.
+It would also shift timestamps that FFmpeg wrote.
+This rejection covers multiplexed variant segments only.
+ADR 0043 drops audio before media time zero in audio renditions.
 * Closing a segment when the first fragment past its boundary arrives, with or without audio, closed a segment before its last audio sample arrived.
 That happened where AAC frames outlast video frames and FFmpeg cut a keyframe fragment without audio.
 * Closing a segment only once an audio sample past its end arrives holds every segment after the audio's end until the output ends.
@@ -776,6 +811,14 @@ Each replacement attempt meets the same flush at the end of its input, so none c
 * Padding the audio to the video's length and stopping at the shortest stream would change every encoded attempt's audio.
 It cannot apply to copied audio, and FFmpeg still gives no signal that a stream has ended.
 * Closing a segment on a fragment's computed end, its start plus its sample durations, closed a segment before its last fragment arrived on a variable-frame-rate stream copy.
+* A worker margin of 10 s would add a second 10 s wait after the muxer's own wait.
+The longer margin would save no audio, because no margin short of the whole output covers the audio that arrives late.
+* Adopting 100 ms fragments now, or testing Firefox at 100 ms first, would gain only 0.03 s per seek beyond what 250 ms fragments save.
+* Measuring the parsing cost of 125 ms fragments inside the 250 ms change would study a target that can save at most 0.125 s per segment, so that measurement waits for a later experiment on shorter fragments.
+* Anchoring the audio snap at the track's probed start keeps a copied track on its own grid, not on the grid that encoded tracks use.
+* Encoding every selected audio track gives up every audio copy to remove an offset that a constant shift of under 0.7 ms removes for typical sources.
+* Leaving copied audio unsnapped let switches between AAC renditions move the audio offset by −46 to +60 ms.
+* Ignoring FFmpeg's advisory bitrate fields when the server compares inits would weaken a strict check to hide a difference that the worker can remove.
 * Cutting a fragment at every frame, so that the closing signal arrives within one frame, multiplies the `moof` count by the frame rate for a gain that the `-frag_duration` target already delivers.
 * Passing `-fps_mode:v:0 cfr` to keep the HLS muxer's constant-rate behaviour padded duplicate frames from time zero after a seek.
 The HLS muxer's behaviour is an internal variant that `-copyts` selects and that the command line cannot request.
@@ -1271,6 +1314,9 @@ That run, the previous producer's copy in Chromium with hls.js, played to the en
 * Worker issues https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14], https://github.com/streamarr/streamarr-transcode-worker/issues/18[streamarr/streamarr-transcode-worker#18] and https://github.com/streamarr/streamarr-transcode-worker/issues/25[streamarr/streamarr-transcode-worker#25].
 * Issue https://github.com/streamarr/streamarr-server/issues/497[streamarr/streamarr-server#497], which closes libx265's GOPs.
 * ADR 0036 (streamarr-adr PR https://github.com/streamarr/streamarr-adr/pull/16[#16]), whose vocabulary this decision follows.
+* Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/53[streamarr/streamarr-transcode-worker#53], which delivers each media segment as one fragment and lowers the default fragmentation target to 250 ms.
+* Issue https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503], which serves each audio track as its own rendition and snaps copied audio to its codec's encoder frame grid.
+* Worker pull request https://github.com/streamarr/streamarr-transcode-worker/pull/50[streamarr/streamarr-transcode-worker#50], which makes every attempt that copies audio write the same init.
 * Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/39[#39] and, in the worker repository, its recorded fixtures (`src/test/resources/fmp4`).
 The fixtures README states which behaviour each recording verifies and explains every disagreement with the HLS muxer's cuts.
 The Node recorder that made them (`src/test/fmp4-recorder`) runs in CI without FFmpeg to re-derive every recording's expectations.

@@ -60,6 +60,7 @@ None at present.
 - [ADR 0040: Media Read Resolvers Return DTOs Mapped by MapStruct](adr/0040-media-read-resolvers-return-dtos-mapped-by-mapstruct.adoc)
 - [ADR 0041: Scans and Refreshes Admit Tasks Through an Adaptive Concurrency Limit](adr/0041-scans-and-refreshes-admit-tasks-through-an-adaptive-limit.adoc)
 - [ADR 0042: GraphQL Subscriptions Keep Queried Screens Current over WebSocket until Token Expiry](adr/0042-graphql-subscriptions-run-over-websocket-until-token-expiry.adoc)
+- [ADR 0043: Audio Tracks and Text Subtitles Are HLS Renditions, so Switching Them Never Restarts the Video](adr/0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc) — proposed
 
 ## Domain language
 

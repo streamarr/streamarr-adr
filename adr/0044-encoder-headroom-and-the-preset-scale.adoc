@@ -122,7 +122,7 @@ The first speed is 1.35× real time.
 Below 1.35× real time, hls.js switches down.
 The second speed is the floor of the neediest Apple player at the stream session's segment length.
 An Apple player's floor is the lowest production speed at which the first media segment after a seek still arrives within that player's limit.
-AVPlayer abandons a segment request that has received no bytes after one segment length.
+AVPlayer abandons a segment request for which the server has sent no bytes after one segment length.
 Safari's native player switches down when a held segment request waits longer than the player allows.
 The neediest Apple player is the Apple player with the higher floor.
 At 3 s segments, the neediest Apple player is Safari's native player.
@@ -131,7 +131,8 @@ The 2.10× floor also covers AVPlayer's lower floor of about 1.70×.
 
 A stream session can have merged-slot segments under link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037].
 In such a stream session, a slot is one 3 s interval of the zero-based media timeline.
-A merged-slot segment spans several slots, so the segments of such a stream session differ in length.
+A merged-slot segment spans several slots.
+The segments of such a stream session therefore differ in length.
 In a stream session with merged-slot segments, the server computes the speed floor at the session's slot length, 3 s.
 
 Every rule in this ADR that protects a running variant's speed protects the speed floor.
@@ -142,11 +143,13 @@ A variant produced at speed s downloads at about s × its bitrate.
 The server advertises `BANDWIDTH` as 1.2 × `AVERAGE-BANDWIDTH`.
 Those three facts give 1.33× to 1.37× across the ladder.
 The Apple floors are derived, not measured.
-On a 10-core arm64 host, two or three users each started a seek at the same time, at 3 s and 4 s segments, 3 runs for each combination.
+On a 10-core arm64 host, two or three users each started a seek at the same time.
+The runs used 3 s and 4 s segments, with 3 runs for each combination.
 Each seek started a 1080p libx264 job attempt at `faster`.
 A fit of the measured waits against each stream's measured production speed gives each Apple player's floor.
 At 3 s segments, the fit gives 1.64× for AVPlayer and 2.01× for Safari's native player.
 Over 20 seeks of a 1080p variant at 3 s segments, a real server and worker added about 0.1 s on top of the worker's own production time.
+Other work shared the host, so 0.1 s is an upper bound.
 That overhead raises the floors to about 1.70× and 2.10×.
 1.35× alone protects hls.js but not the Apple players.
 Evidence: <<evidence-floor>>, <<evidence-contention>>.
@@ -166,7 +169,7 @@ The server takes that worker's first constants from the benchmark.
 
 A measurement validates the constants before any early start of an extra variant or any preset choice depends on the constants.
 Until that measurement passes, ADR 0019's on-demand rules apply unconditionally.
-Until that measurement passes, Automatic also keeps the fixed meaning that <<decision-preset-setting>> gives it.
+Until that measurement passes, Automatic also keeps the fixed meaning that <<decision-preset-setting>> gives Automatic.
 https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499] builds the headroom model and runs that measurement.
 
 *Why:* The same preset cost different amounts on different content.
@@ -181,7 +184,7 @@ Evidence: <<evidence-model>>, <<evidence-presets>>.
 
 The fetched variant is the variant whose media segment the player has just requested.
 ADR 0019 calls the same variant the requested variant.
-ADR 0019's on-demand rules decide which variants run without encoder headroom.
+ADR 0019's on-demand rules decide which variants run when the headroom model allows no extra variant.
 Under those rules, creating a stream session starts the variant that the multivariant playlist lists first.
 Once the stream session exists, a variant starts only when the player requests one of that variant's segments.
 ADR 0019's only-fetched stop is the rule that a media-segment request for one video variant stops the producers of the stream session's other video variants.
@@ -216,7 +219,7 @@ A capacity shortfall exists when no preset that the preset setting allows keeps 
 A 60 fps source or many concurrent users can cause a capacity shortfall.
 During a capacity shortfall, the server never refuses playback.
 The fetched variant always runs.
-The extra variants on the worker stop.
+The server stops the extra variants on that worker.
 A capacity metric shows the shortfall to the ServerAdmin.
 
 No separate rule removes variants from the advertised quality ladder when capacity is short.
@@ -332,13 +335,14 @@ Evidence: <<evidence-init>>.
 === Producers well ahead of their viewers give up CPU to a seek
 
 A producer is the worker module that owns one job attempt's FFmpeg process.
-A producer runs ahead of its viewer when the producer's encode is faster than real time, so the producer's lead over playback keeps growing.
+A producer runs ahead of its viewer when the producer has delivered media segments that the viewer's player has not requested yet.
+A producer whose encode is faster than real time keeps adding to that lead.
 A seek's first segment is the first media segment that a player needs after a seek.
 While a seek's first segment is pending on a busy worker, producers that run well ahead of their own viewers give up CPU.
 Two mechanisms can make those producers give up CPU.
 The first mechanism lowers those producers' CPU priority.
 The second mechanism pauses those producers until the seek's first segment is complete.
-A proof runs both mechanisms together, with real encodes on one worker and three viewers.
+One proof compares both mechanisms, with real encodes on one worker and three viewers.
 The proof then picks one mechanism.
 The change that implements the picked mechanism writes the rule into this ADR.
 Streamarr holds back a producer that runs far ahead of its viewer with the same mechanism that the proof picks.
@@ -357,7 +361,7 @@ When the headroom model predicts that the hardware encoder backend has no headro
 libx264 takes those H.264 variants.
 libx265 takes those HEVC variants.
 libsvtav1 takes those AV1 variants.
-A variant keeps its first job attempt's encoder backend for every replacement attempt, as link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] requires.
+A variant keeps its first job attempt's encoder backend for every replacement attempt, as link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] and https://github.com/streamarr/streamarr-server/issues/398[streamarr/streamarr-server#398] require.
 
 VMAF is a perceptual video quality score from 0 to 100.
 Streamarr measures each hardware encoder backend's VMAF against libx264 at `faster`, at the ladder's bitrates.
@@ -371,16 +375,18 @@ The VMAF comparison therefore shows whether a hardware encoder backend matches t
 
 === Implementation
 
-https://github.com/streamarr/streamarr-server/issues/497[streamarr/streamarr-server#497] adds the preset setting, with Automatic as its default and Automatic's fixed presets.
+https://github.com/streamarr/streamarr-server/issues/497[streamarr/streamarr-server#497] adds the preset setting, with Automatic as its default.
+That issue gives Automatic its fixed presets.
 That issue puts the resolved preset on every job.
 That issue also makes the worker pass the job's preset to every software encoder.
 The web client shows the preset setting on its ServerAdmin settings page.
 https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499] adds pixel rate, the headroom model, the continuous measurement of each worker's constants, the kept calibrations and the benchmark.
 The same issue adds the speed floor, the extra variants and the capacity metric.
+The same issue also sends new variants to a hardware encoder backend first.
 That issue validates the constants by measurement before anything depends on them.
 The headroom-driven Automatic preset is the last step of that issue.
-The same issue also sends new variants to a hardware encoder backend first.
-https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56] adds the NVENC encoders, and https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57] adds the VideoToolbox encoders.
+https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56] adds the NVENC encoders.
+https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57] adds the VideoToolbox encoders.
 Each of those issues measures VMAF against libx264 at `faster` and adds the backend's rows to the preset scale.
 https://github.com/streamarr/streamarr-transcode-worker/issues/52[streamarr/streamarr-transcode-worker#52] runs the seek-priority proof and implements the picked mechanism.
 https://github.com/streamarr/streamarr-server/issues/500[streamarr/streamarr-server#500] tells the worker which producers can give up CPU and when a seek's first segment is pending.
@@ -623,8 +629,9 @@ At the same cost per frame, a 24 fps film would encode about 2.5 times faster re
 * These runs used an RTX 5090 in the pinned worker image.
 * One 1080p libx264 replacement attempt at `faster` covered 421 frames.
 Each figure is the median of 5 runs.
-* The attempt used 16.47 CPU seconds with NVDEC decode and 19.26 s with software decode, 14 % less with NVDEC.
-* Decoding alone fell from 2.57 CPU seconds to 0.14 s.
+* The attempt used 16.47 CPU seconds with NVDEC decode and 19.26 s with software decode.
+NVDEC decode therefore cut the attempt's CPU by 14 %.
+* With NVDEC, decoding alone fell from 2.57 CPU seconds to 0.14 s.
 
 [[evidence-init]]
 === Initialization segments and presets

@@ -8,6 +8,7 @@ NOTE: Since link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033], the
 The server image ships no FFmpeg.
 
 An amendment to this ADR pins a second FFmpeg build for native macOS workers (<<decision-macos-pin>>).
+The amendment brings hardware decode of seek attempts and the NVENC and VideoToolbox encoders into scope (<<decision-hardware>>).
 The amendment also records how tests guard each upgrade of a pinned FFmpeg build (<<decision-upgrade-guard>>).
 
 == Context
@@ -24,6 +25,8 @@ VideoToolbox is Apple's hardware video framework.
 Only a process that runs natively on macOS can reach VideoToolbox.
 A container on a Mac runs in a Linux virtual machine.
 The FFmpeg build in the Linux worker image therefore cannot reach VideoToolbox on a Mac.
+NVDEC is the hardware video decoder of NVIDIA GPUs.
+NVENC is the hardware video encoder of NVIDIA GPUs.
 
 == Decision
 
@@ -61,6 +64,19 @@ The macOS pin covers Apple silicon (arm64) only.
 A native macOS worker is supported only with a server that runs natively on the same Mac.
 The native macOS worker reaches the server over loopback.
 
+[[decision-hardware]]
+=== Hardware decode of seek attempts and the NVENC and VideoToolbox encoders are in scope
+
+A seek attempt is a job attempt that starts FFmpeg at a point after the start of the source.
+A seek attempt can decode in hardware.
+On a native macOS worker, the hardware decoder is VideoToolbox.
+On a Linux worker with an NVIDIA GPU, the hardware decoder is NVDEC.
+link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] decides which seek attempts decode in hardware.
+https://github.com/streamarr/streamarr-transcode-worker/issues/55[streamarr/streamarr-transcode-worker#55] adds hardware decode of seek attempts.
+https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56] adds the NVENC encoders.
+https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57] adds the VideoToolbox encoders.
+ADR 0037 lists the checks that each hardware encoder backend must pass before a worker encodes with that backend.
+
 [[decision-upgrade-guard]]
 === Committed fixtures guard each upgrade of the pinned FFmpeg build
 
@@ -85,7 +101,7 @@ x265 is an HEVC encoder.
 x265 and `dovi_tool` generate the Dolby Vision fixture once.
 The worker repository commits the generated Dolby Vision fixture.
 The worker's CI makes a stream copy of the Dolby Vision fixture.
-The CI tests check four facts about that copy.
+The CI tests check four facts about the copy.
 
 * The tests check the sample entry that the copy carries after the retag.
 The retag writes the sample entry of a Dolby Vision copy whose compatible base is SDR as `hvc1` or `avc1` (link:0013-stream-decision-architecture.adoc[ADR 0013]).
@@ -104,10 +120,22 @@ Tests of PGS subtitles therefore run only locally, against real PGS samples.
 Image-subtitle burn-in draws a bitmap subtitle, such as a PGS or VobSub subtitle, into the encoded video picture.
 Tests of image-subtitle burn-in also run only locally, against real PGS and VobSub samples, like the PGS tests.
 
+The worker's CI has no VideoToolbox or NVIDIA hardware.
+The hardware-decode rules of ADR 0037 depend on how FFmpeg's decoders behave.
+Each upgrade of a pinned FFmpeg build therefore re-runs the tests on the hardware-decode seek fixtures in a local test run.
+The local run uses a Mac with VideoToolbox for the macOS FFmpeg build and a host with an NVIDIA GPU for the Linux worker image's FFmpeg build.
+Each upgrade of a pinned FFmpeg build also re-runs the NVENC and VideoToolbox encoder checks in the same local run.
+The encoder checks record the keyframes that each encoder produces.
+The encoder checks compare the initialization segment of a variant's first job attempt with the initialization segments of the variant's replacement attempts.
+The encoder checks also run the output check of https://github.com/streamarr/streamarr-transcode-worker/issues/25[streamarr/streamarr-transcode-worker#25].
+The output check compares the codec, codec profile and level of the produced output with the job's decision.
+
 === Explicitly deferred
 
 * A Streamarr-owned permanent binary/source archive and independent build pipeline.
-* Hardware-accelerator certification or new codec selection behavior.
+* New codec selection behavior.
+* The remaining hardware encoders, VAAPI, QSV, AMF and RKMPP, stay deferred to https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] until hardware exists to verify them.
+* Hardware decode on Intel and AMD GPUs (QSV and VAAPI) also stays deferred to https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14].
 * Workers on another host outside a service mesh (link:0035-worker-uses-spring-boot-and-mesh-transport-security.adoc[ADR 0035]) wait for https://github.com/streamarr/streamarr-server/issues/509[streamarr/streamarr-server#509].
 A worker outside a service mesh needs mutual TLS and a decision on how workers authenticate.
 * This ADR leaves open whether an upgrade of the macOS FFmpeg build must pass the committed-fixture tests in CI or only in a local run on a Mac.
@@ -130,6 +158,10 @@ Only a local test run checks an FFmpeg upgrade against PGS subtitles, image-subt
 
 Streamarr reviews the upgrades of two pinned FFmpeg builds instead of one.
 A ServerAdmin who wants VideoToolbox runs both the server and the worker natively on one Apple silicon Mac.
+
+An upgrade of the Linux worker image's FFmpeg build needs a local run on a host with an NVIDIA GPU.
+An upgrade of the macOS FFmpeg build needs a local run on an Apple silicon Mac.
+CI alone cannot accept either upgrade.
 
 == Rejected Alternatives
 

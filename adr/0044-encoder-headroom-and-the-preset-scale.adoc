@@ -98,25 +98,44 @@ That equal share was too small for the 1080p variant to keep up with real time.
 The 360p variant needed less than its equal share.
 Evidence: <<evidence-model>>, <<evidence-presets>>.
 
-[[decision-threshold]]
-=== A variant holds in hls.js at about 1.35× real time
+[[decision-speed-floor]]
+=== Every running variant keeps the speed floor
 
-A variant holds in a player when the player keeps fetching the variant instead of switching down.
-A variant holds in hls.js when the worker produces the variant at about 1.35× real time or faster.
-This ADR calls that speed the hold threshold.
-The eager-start rule in <<decision-eager-start>> protects the hold threshold for every running variant.
-The Automatic preset in <<decision-preset-setting>> protects the hold threshold as well.
+A player switches down to a lower variant when the player's current variant arrives too slowly.
+The speed floor is the production speed that every running variant must keep.
+The speed floor is the larger of two speeds.
+The first speed is 1.35× real time.
+Below 1.35× real time, hls.js switches down.
+The second speed is the floor of the neediest Apple player at the stream session's segment length.
+An Apple player's floor is the lowest production speed at which the first media segment after a seek still arrives within that player's limit.
+AVPlayer abandons a segment request that has received no bytes after one segment length.
+Safari's native player switches down when a held segment request waits longer than the player allows.
+The neediest Apple player is the Apple player with the higher floor.
+At 3 s segments, the neediest Apple player is Safari's native player.
+At 3 s segments, the speed floor is therefore about 2.10× real time.
+The 2.10× floor also covers AVPlayer's lower floor of about 1.70×.
+
+A stream session can have merged-slot segments under link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037].
+In such a stream session, a slot is one 3 s interval of the zero-based media timeline.
+A merged-slot segment spans several slots, so the segments of such a stream session differ in length.
+In a stream session with merged-slot segments, the server computes the speed floor at the session's slot length, 3 s.
+
+Every rule in this ADR that protects a running variant's speed protects the speed floor.
+No rule in this ADR protects 1.35× real time alone.
 
 *Why:* hls.js 1.7.0 keeps a variant while 0.95 × the hls.js throughput estimate is at least the variant's `BANDWIDTH`.
 A variant produced at speed s downloads at about s × its bitrate.
 The server advertises `BANDWIDTH` as 1.2 × `AVERAGE-BANDWIDTH`.
-The hls.js rule for keeping a variant, the download speed and the advertised `BANDWIDTH` together give a threshold of 1.33× to 1.37× across the measured ladder.
-With four variants running, the 1080p variant was produced at 0.94× to 1.06× real time.
-hls.js then made 12 to 16 emergency aborts per session.
-In an emergency abort, hls.js abandons a segment load that hls.js predicts will not finish before the player's buffer runs out.
-hls.js makes that prediction once the load has received no byte for half a segment duration or more.
-hls.js showed mostly 360p on a 25 Mb/s link.
-Evidence: <<evidence-threshold>>, <<evidence-contention>>.
+Those three facts give 1.33× to 1.37× across the ladder.
+The Apple floors are derived, not measured.
+On a 10-core arm64 host, two or three users each started a seek at the same time, at 3 s and 4 s segments, 3 runs for each combination.
+Each seek started a 1080p libx264 job attempt at `faster`.
+A fit of the measured waits against each stream's measured production speed gives each Apple player's floor.
+At 3 s segments, the fit gives 1.64× for AVPlayer and 2.01× for Safari's native player.
+Over 20 seeks of a 1080p variant at 3 s segments, a real server and worker added about 0.1 s on top of the worker's own production time.
+That overhead raises the floors to about 1.70× and 2.10×.
+1.35× alone protects hls.js but not the Apple players.
+Evidence: <<evidence-floor>>, <<evidence-contention>>.
 
 [[decision-calibration]]
 === The server measures each worker's constants continuously
@@ -136,22 +155,21 @@ With one set of three variants running, 1080p measured 1.19× real time in the f
 Evidence: <<evidence-model>>, <<evidence-presets>>.
 
 [[decision-eager-start]]
-=== Extra variants start only while every running variant stays above the hold threshold
+=== Extra variants start only while every running variant keeps the speed floor
 
 The fetched variant is the variant whose media segment the player has just requested.
 ADR 0019 calls the same variant the requested variant.
 An extra variant is any variant of a stream session that ADR 0019's on-demand rules would not start yet.
-The server starts extra variants eagerly only when the headroom model predicts that every running variant stays at about 1.35× real time or faster with the extra variants running.
-That prediction must leave room for several users' concurrent encodes.
-One stream session's extra variants never slow another stream session's fetched variant below 1.35×.
+The server starts extra variants only while the headroom model predicts that every running variant on the worker, in every stream session, stays at or above the speed floor with the extra variants running.
+One stream session's extra variants therefore never push another stream session's fetched variant below the speed floor.
 When those conditions do not hold, ADR 0019's on-demand rules apply.
 Under those rules, creating a stream session starts the variant that the multivariant playlist lists first.
 Once the stream session exists, a variant starts only when the player requests one of that variant's segments.
 Until the encoder-headroom issue validates the model's constants, ADR 0019's on-demand rules apply unconditionally.
 
-*Why:* Four variants running together pushed 1080p down to 0.94× to 1.06× real time.
-That speed is below the hold threshold.
-An extra variant is worth starting only when every running variant stays above the hold threshold with the extra variant running.
+*Why:* With libx264 at `medium` and 6 s segments, four variants running together pushed 1080p down to 0.94× to 1.06× real time.
+That speed is below the speed floor.
+An extra variant is worth starting only when every running variant keeps the speed floor with the extra variant running.
 ADR 0019 gives the player measurements behind starting variants on demand.
 Evidence: <<evidence-contention>>.
 
@@ -174,7 +192,7 @@ On the preset scale, libsvtav1 preset `10` is `faster`.
 
 Once the encoder-headroom issue validates the headroom model's constants, Automatic becomes headroom-driven.
 The server picks a variant's preset when that variant's first job attempt starts, and keeps it for that variant, as <<decision-fixed-preset>> requires.
-The server picks the slowest preset from `veryfast` to `medium` that keeps every running variant at about 1.35× real time or faster.
+The server picks the slowest preset from `veryfast` to `medium` that keeps every running variant at or above the speed floor.
 For libsvtav1, that range runs from `faster` to `medium`.
 Those two names map to libsvtav1 presets `10` and `8`.
 
@@ -267,7 +285,12 @@ libx265 and libsvtav1 presets have not been measured on a ladder.
 * Consider one software worker on a host like the measured one.
 On that host, two concurrent `veryfast` ladders slowed the 1080p variants to about real time.
 The model therefore leaves little room for extra variants once several users play at once.
-Whenever the model predicts that an extra variant would push a running variant below the hold threshold, variants start only under ADR 0019's on-demand rules.
+Whenever the model predicts that an extra variant would push a running variant below the speed floor, variants start only under ADR 0019's on-demand rules.
+* The speed floor limits how many encodes a worker carries.
+On a 10-core arm64 host, concurrent 1080p encodes at `faster` each ran at 2.80× real time for two streams and 1.90× for three.
+A 2.10× floor therefore admits two such encodes on that host, not three.
+AVPlayer's 1.70× floor would have admitted about 19 % more load per worker.
+That lower floor would leave Safari's native player below Safari's own floor.
 * The server now owns the production speed of each attempt and the constants of each worker.
 The server needs segment arrival times to measure each worker's constants.
 Until the server has measured a new worker's constants, the server uses the constants from the new worker's short benchmark.
@@ -276,7 +299,7 @@ Headroom decides only whether extra variants start.
 * Encoders, presets and sources become comparable in one unit, pixel rate.
 Metrics can therefore show load against capacity directly.
 * A faster preset costs compression efficiency at a given bitrate.
-Automatic accepts that cost today to keep variants above the hold threshold.
+Automatic accepts that cost today to keep every running variant at or above the speed floor.
 * A preset change, whether by a ServerAdmin or by Automatic, reaches only variants that start afterwards.
 * Every job carries a preset, even while Automatic stays at today's presets.
 A ServerAdmin changes the preset on the web ServerAdmin settings page, never in a worker's configuration.
@@ -295,6 +318,14 @@ A grain-heavy clip fits proportionally fewer encodes.
 * Changing a variant's preset mid-stream changes the variant's initialization segment.
 The server refuses a replacement attempt whose initialization segment differs from the variant's initialization segment.
 A mid-stream preset change would therefore amount to a new variant.
+* Keeping 1.35× real time as the whole speed floor protects hls.js but not the Apple players.
+At 3 s segments, the derived floors are about 1.70× for AVPlayer and 2.10× for Safari's native player.
+* Pacing producers protects no speed by itself.
+The server still needs a speed floor to know how fast each running variant must be produced.
+* A floor for each client kind would need the server to know which player fetches each variant.
+One floor protects hls.js and both Apple players without that knowledge.
+* AVPlayer's floor of about 1.70× would admit about 19 % more load per worker.
+That lower floor would leave Safari's native player below Safari's own floor of about 2.10×.
 
 == Evidence
 
@@ -326,21 +357,46 @@ hls.js also reversed its choice of fetched variant 30 to 34 times per session.
 The control run produced no cycle of emergency aborts.
 The abort cycle therefore comes from the production speed.
 
-[[evidence-threshold]]
-=== The hold threshold
+[[evidence-floor]]
+=== The speed floor
 
-* The threshold comes from the source code of hls.js 1.7.0.
-An independent reading of that source code confirmed the threshold.
+* The 1.35× part of the speed floor comes from the source code of hls.js 1.7.0.
+An independent reading of that source code confirmed the 1.35× figure.
 * hls.js keeps a variant while 0.95 × the hls.js throughput estimate is at least the variant's `BANDWIDTH`.
 hls.js switches up at 0.7 × that estimate.
 * When a segment load receives no byte for half a segment duration or more, and hls.js predicts that the load will not finish before the player's buffer runs out, hls.js abandons that load.
 hls.js then resets its throughput estimate to the `BANDWIDTH` of the lower variant that hls.js switches to.
 * A variant produced at speed s downloads at about s × its bitrate.
-With the hls.js rule for keeping a variant and with `BANDWIDTH` at 1.2 × `AVERAGE-BANDWIDTH`, that download speed gives a threshold of 1.33× to 1.37× for this ladder.
+With the hls.js rule for keeping a variant and with `BANDWIDTH` at 1.2 × `AVERAGE-BANDWIDTH`, that download speed gives 1.33× to 1.37× for this ladder.
 * The runs measured 15 sets of running variants on the animation.
-1080p fell below the threshold in only two sets.
+1080p fell below 1.35× in only two sets.
 1080p ran at 1.06× with all four variants, and at 1.19× with 720p and 480p.
 The set with 720p and 480p measured 1.39× in the independent re-run.
+* The Apple floors are derived, not measured.
+On the 10-core arm64 host, two users and then three users each started a seek at the same time.
+Each seek started a 1080p libx264 job attempt at `faster`.
+The runs used 3 s and 4 s segments, with 3 runs for each combination.
+* AVPlayer abandons a segment request for which the server has sent no bytes after one segment length.
+Safari's native player switches down when a held segment request waits longer than the player allows.
+* For each Apple player, a fit of the measured waits against each stream's measured production speed gives one speed.
+At that speed, the slowest stream's first media segment after a seek arrives just at that player's limit.
+The derived floors are adjusted to 250 ms fragments.
+At 3 s segments, the fit gives 1.64× for AVPlayer and 2.01× for Safari's native player.
+* A real server and worker started a 1080p variant at a new position 20 times, at 3 s segments.
+The player saw about 0.1 s on top of the worker's own production time.
+Other work shared the host, so 0.1 s is an upper bound.
+Adding 0.1 s raises the floors to about 1.70× for AVPlayer and 2.10× for Safari's native player.
+At 4 s segments, the floors would be about 1.49× and 1.85×.
+* 1.35× decides the speed floor only when the neediest Apple floor is lower than 1.35×.
+No derived Apple floor at 3 s or 4 s segments is lower than 1.35×.
+* On the same host, concurrent 1080p encodes at `faster` each ran at 2.80× real time for two streams, 1.90× for three and 1.42× for four.
+Those speeds are measured, with 3 runs for each load.
+A 2.10× floor therefore admits two concurrent 1080p seeks on that host.
+AVPlayer's 1.70× floor would have admitted three.
+Both counts are derived.
+* From the ratio of the two floors, AVPlayer's lower floor would admit about 19 % more load per worker.
+That figure is derived.
+The 2.10× floor protects both Apple players.
 
 [[evidence-presets]]
 === Preset cost and capacity
@@ -429,7 +485,7 @@ SVT-AV1 names 12 as the highest preset intended for human use.
 * https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Docs/CommonQuestions.md[SVT-AV1: Common Questions] — what presets do and their ranges.
 * https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Docs/Parameters.md[SVT-AV1: Parameters] — the preset range and default.
 * https://trac.ffmpeg.org/wiki/Encode/H.264[FFmpeg: H.264 encoding guide] — libx264 preset names.
-* https://github.com/video-dev/hls.js/tree/v1.7.0[hls.js 1.7.0] — the ABR rules behind the hold threshold.
+* https://github.com/video-dev/hls.js/tree/v1.7.0[hls.js 1.7.0] — the ABR rules behind the speed floor's 1.35× real time.
 * https://github.com/streamarr/streamarr-transcode-worker/issues/23[streamarr/streamarr-transcode-worker#23] — the worker passes the job's preset to every software encoder.
 * https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399] — the playback capabilities epic, under which the encoder-headroom issue is to be filed.
 * https://github.com/streamarr/streamarr-server/issues/398[streamarr/streamarr-server#398] — verified hardware encoders.

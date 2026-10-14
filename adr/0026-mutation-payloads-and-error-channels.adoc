@@ -7,7 +7,7 @@ Accepted
 == Context
 
 link:0002-graphql-over-rest.adoc[ADR 0002] makes GraphQL the only delivery protocol, so the mutation contract is the whole write API for the Apple, Android, and web clients.
-All three are first-party; the Apple client generates its types from the checked-in schema, the web client hand-maintains typed operation documents today, and the Android client is not yet implemented.
+All three are first-party; the Apple client generates its types from the checked-in schema, the web client generates its operation types with GraphQL Code Generator, and the Android client is not yet implemented.
 The server keeps the hexagonal shape of link:0005-tdd-and-behavior-testing.adoc[ADR 0005] and link:0014-protocol-agnostic-pagination.adoc[ADR 0014] — services return protocol-independent values and adapters translate — so this decision governs the GraphQL adapter and the shape of the outcomes services return to it; it does not touch how services decide.
 
 On `main`, `root-mutation.graphqls` declares ten mutations and seven of them return `Boolean!`.
@@ -45,7 +45,8 @@ Unexpected failure uses GraphQL's top-level `errors`; every error raised while f
   The prefix names an override path as defined by link:0024-identity-authority-by-relationship.adoc[ADR 0024], not every operation that requires administrative authority; intrinsically administrative operations without an ordinary counterpart (`transferAccount`, `grantServerAdmin`) remain unprefixed.
 * The single `input` argument and the `Input`/`Payload` suffixes are a Relay-style convention Streamarr adopts deliberately, not a GraphQL requirement.
 * A payload exposes exactly one result position — the affected node or a deletion receipt (`deletedProfileId: ID`) — plus `userErrors`. No mutation returns a bare `Boolean`, a bare `ID`, or a domain type directly at the root.
-* Inputs carry only client-controlled command data. A secret-bearing input (password, PIN) is consumed and never echoed in the payload, an error, or a log.
+* Inputs carry only client-controlled command data. A secret-bearing input, such as a new Profile PIN, is consumed and never echoed in the payload, an error, or a log.
+  No GraphQL input carries a password or a confirmation credential (link:0024-identity-authority-by-relationship.adoc[ADR 0024]).
 
 === Expected rejection is typed data in the payload
 
@@ -117,8 +118,10 @@ Payload `userErrors` describe an expected domain rejection that a correctly work
 Top-level:
 
 * Malformed document, variable coercion, and unknown-field errors — the specification's request errors.
-* Missing or invalid authentication (`AUTHENTICATION_REQUIRED`) and the profile- and household-selection gates (`PROFILE_REQUIRED`, `HOUSEHOLD_REQUIRED`) — request-context gates that apply before any mutation's own logic.
-* Cross-cutting authority the whole surface requires — a deny on a surface-level action before any resource is looked up, such as the server-administration surface (`FORBIDDEN` from `requireServerAdmin()` today).
+* Missing or invalid authentication (`AUTHENTICATION_REQUIRED`) and the profile-selection gate (`PROFILE_REQUIRED`) — request-context gates that apply before any mutation's own logic.
+* Cross-cutting authority the whole surface requires — a deny on a surface-level action before any resource is looked up, such as the server-administration surface (`FORBIDDEN` from `AuthorizationService.requireAllowed`, link:0025-cedar-decides-authorization.adoc[ADR 0025]).
+* An authorization evaluation that fails instead of reaching a decision (`AUTHORIZATION_UNAVAILABLE`).
+  ADR 0025 treats such a failure as a denial, and the response carries no diagnostics.
 * Rate limiting and lockout (`TOO_MANY_CREDENTIAL_ATTEMPTS`) — a gate, reported with `retryAfterSeconds` in `extensions` when known.
 * Infrastructure failure, defects, and unexpected exceptions — always sanitized.
 
@@ -126,7 +129,7 @@ Payload `userErrors`:
 
 * Field and form validation.
 * A mutation target that does not exist (`SESSION_NOT_FOUND` on timeline reporting becomes `StreamSessionNotFoundError`); an idempotent command such as `destroyStreamSession` has no not-found outcome — see the idempotency rules below.
-* An invalid confirmation credential or PIN for the specific action being confirmed.
+* An action in ADR 0024's `requiresFreshReauthentication` group that the caller attempts without fresh reauthentication (`ReauthenticationRequiredError`).
 * Domain conflicts, prohibited state transitions, and safety rules — a deletion blocked by a safety rule, a transfer that requires another transfer first, a name already in use.
 * A capability the caller lacks for this specific resource — a link:0025-cedar-decides-authorization.adoc[ADR 0025] deny on the action for that resource — subject to the oracle rule below.
 

@@ -7,6 +7,10 @@ Accepted
 NOTE: Since link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033], the buildpack, lock, notices, and smoke tests described here live in the `streamarr-transcode-worker` repository.
 The server image ships no FFmpeg.
 
+An amendment to this ADR pins the macOS binary of the same FFmpeg release for native macOS workers (<<decision-macos-pin>>).
+The amendment brings hardware decode of seek attempts and the NVENC and VideoToolbox encoders into scope (<<decision-hardware>>).
+The amendment also records how tests guard each upgrade of a pinned FFmpeg build (<<decision-upgrade-guard>>).
+
 == Context
 
 Streamarr runs FFmpeg as a subprocess (link:0004-processbuilder-over-jni.adoc[ADR 0004]) and requires H.264, AV1, and recoverable HLS behavior (link:0009-h264-plus-av1-codec-strategy.adoc[ADR 0009], link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]).
@@ -14,6 +18,15 @@ The previous binary provider retained only a rolling window of daily builds, so 
 CI also installed distribution FFmpeg for smoke tests, exercising a different runtime from the shipped image.
 Jellyfin publishes numbered FFmpeg releases with media-server patches and portable GPL binaries for both supported Linux architectures.
 Its packaging revision is a fourth numeric version component, not a prerelease indicator.
+
+An upgrade of the pinned FFmpeg build can change the initialization segment and the media segments that the worker produces from the same source file.
+
+VideoToolbox is Apple's hardware video framework.
+Only a process that runs natively on macOS can reach VideoToolbox.
+A container on a Mac runs in a Linux virtual machine.
+The FFmpeg build in the Linux worker image therefore cannot reach VideoToolbox on a Mac.
+NVDEC is the hardware video decoder of NVIDIA GPUs.
+NVENC is the hardware video encoder of NVIDIA GPUs.
 
 == Decision
 
@@ -39,10 +52,98 @@ Use a short-lived GitHub App token to create a signed commit containing only tha
 Include the App's commit identity in Renovate's ignored authors so generated commits do not prevent future updates.
 Unprivileged PR CI may execute the proposed resolver to test changes to that resolver.
 
-Explicitly deferred:
+[[decision-macos-pin]]
+=== Native macOS workers run the same pinned FFmpeg release
+
+Streamarr supports native macOS workers on Apple silicon.
+A native macOS worker runs directly on macOS, outside any container.
+A native macOS worker can therefore use VideoToolbox.
+https://github.com/streamarr/streamarr-transcode-worker/issues/54[streamarr/streamarr-transcode-worker#54] packages the worker for macOS and runs the worker natively.
+This ADR pins a macOS FFmpeg binary for native macOS workers.
+The macOS pin names the same numbered release of the same FFmpeg build as the Linux worker image's pin.
+The pinned build publishes a portable macOS arm64 binary beside its Linux binaries.
+The FFmpeg version is therefore the same on every platform that Streamarr supports.
+One upgrade moves the Linux worker image and native macOS workers to the new release together.
+The macOS pin covers Apple silicon (arm64) only.
+A native macOS worker is supported only with a server that runs natively on the same Mac.
+The native macOS worker reaches the server over loopback.
+
+[[decision-hardware]]
+=== Hardware decode of seek attempts and the NVENC and VideoToolbox encoders are in scope
+
+A seek attempt is a job attempt that starts FFmpeg at a point after the start of the source.
+A seek attempt can decode in hardware.
+On a native macOS worker, the hardware decoder is VideoToolbox.
+On a Linux worker with an NVIDIA GPU, the hardware decoder is NVDEC.
+link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] decides which seek attempts decode in hardware.
+https://github.com/streamarr/streamarr-transcode-worker/issues/55[streamarr/streamarr-transcode-worker#55] adds hardware decode of seek attempts.
+https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56] adds the NVENC encoders.
+https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57] adds the VideoToolbox encoders.
+ADR 0037 lists the checks that each hardware encoder backend must pass before a worker encodes with that backend.
+
+[[decision-upgrade-guard]]
+=== Committed fixtures guard each upgrade of the pinned FFmpeg build
+
+FFmpeg's test sources are built-in source filters that synthesize video and audio signals.
+The worker repository holds committed test fixtures that FFmpeg's test sources generate.
+The worker's CI runs tests against those fixtures with the pinned FFmpeg build of the Linux worker image.
+The worker's CI also runs those tests on an Apple silicon macOS runner with the pinned macOS binary.
+The fixture tests need no VideoToolbox, so a hosted macOS runner can run them.
+Every upgrade of the pinned FFmpeg build must pass those tests on Linux and on macOS.
+The tests follow link:0005-tdd-and-behavior-testing.adoc[ADR 0005] and assert the worker's produced output, not how the worker invokes FFmpeg.
+
+FATE, the FFmpeg Automated Testing Environment, is FFmpeg's own test suite with its own set of real sample media files.
+CI runs no FATE job.
+The full FATE sample suite stays outside every repository.
+Only local test runs use the full FATE sample suite.
+Every committed fixture is generated, never copied from the FATE samples.
+A test case that needs a FATE sample runs only locally.
+
+FFmpeg's test sources cannot generate Dolby Vision video.
+One small Dolby Vision profile 8.2 fixture is therefore the only committed fixture that FFmpeg's test sources do not generate.
+Profile 8.2 carries Dolby Vision metadata on an HEVC stream whose compatible base is SDR.
+x265 is an HEVC encoder.
+`dovi_tool` is a tool that writes Dolby Vision metadata into an HEVC stream.
+x265 and `dovi_tool` generate the Dolby Vision fixture once.
+The worker repository commits the generated Dolby Vision fixture.
+The worker's CI makes a stream copy of the Dolby Vision fixture.
+The CI tests check four facts about the copy.
+
+* The tests check the sample entry that the copy carries after the retag.
+The retag writes the sample entry of a Dolby Vision copy whose compatible base is SDR as `hvc1` or `avc1` (link:0013-stream-decision-architecture.adoc[ADR 0013]).
+* The tests check that every frame of the copy carries an RPU.
+An RPU (reference processing unit) holds one frame's Dolby Vision metadata.
+* The tests check whether the copy carries the Dolby Vision configuration record.
+* The tests check the codec string of the copy.
+The codec string is the value that names a stream's codec, codec profile and level in an HLS playlist.
+
+Tests of Dolby Vision color and tone mapping run only locally, against real Dolby Vision samples.
+
+PGS (Presentation Graphic Stream) is the bitmap subtitle format of Blu-ray discs.
+VobSub is the bitmap subtitle format of DVDs.
+FFmpeg's test sources cannot generate PGS subtitles.
+Tests of PGS subtitles therefore run only locally, against real PGS samples.
+Image-subtitle burn-in draws a bitmap subtitle, such as a PGS or VobSub subtitle, into the encoded video picture.
+Tests of image-subtitle burn-in also run only locally, against real PGS and VobSub samples, like the PGS tests.
+
+The worker's CI has no VideoToolbox or NVIDIA hardware.
+The hardware-decode rules of ADR 0037 depend on how FFmpeg's decoders behave.
+Each upgrade of a pinned FFmpeg build therefore re-runs the tests on the hardware-decode seek fixtures in a local test run.
+The local run uses a Mac with VideoToolbox for the macOS binary and a host with an NVIDIA GPU for the Linux worker image's binary.
+Each upgrade of a pinned FFmpeg build also re-runs the NVENC and VideoToolbox encoder checks in the same local run.
+The encoder checks record the keyframes that each encoder produces.
+The encoder checks compare the initialization segment of a variant's first job attempt with the initialization segments of the variant's replacement attempts.
+The encoder checks also run the output check of https://github.com/streamarr/streamarr-transcode-worker/issues/25[streamarr/streamarr-transcode-worker#25].
+The output check compares the codec, codec profile and level of the produced output with the job's decision.
+
+=== Explicitly deferred
 
 * A Streamarr-owned permanent binary/source archive and independent build pipeline.
-* Hardware-accelerator certification or new codec selection behavior.
+* New codec selection behavior.
+* The remaining hardware encoders, VAAPI, QSV, AMF and RKMPP, stay deferred to https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] until hardware exists to verify them.
+* Hardware decode on Intel and AMD GPUs (QSV and VAAPI) also stays deferred to https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14].
+* Workers on another host outside a service mesh (link:0035-worker-uses-spring-boot-and-mesh-transport-security.adoc[ADR 0035]) wait for https://github.com/streamarr/streamarr-server/issues/509[streamarr/streamarr-server#509].
+A worker outside a service mesh needs mutual TLS and a decision on how workers authenticate.
 
 == Consequences
 
@@ -55,12 +156,33 @@ Rebuilds independent of both upstream channels require an owned archive; caches 
 Streamarr accepts Jellyfin's patch and release cadence and retains responsibility for reviewing security updates, redistribution obligations, and runtime compatibility.
 The privileged updater changes only after trusted resolver changes merge, while ordinary PR CI can validate a resolver migration before merge.
 
+The committed fixtures cover the cases that FFmpeg's test sources can generate.
+One generated fixture also covers a stream copy of Dolby Vision profile 8.2.
+CI downloads no FATE samples.
+Only a local test run checks an FFmpeg upgrade against PGS subtitles, image-subtitle burn-in, and Dolby Vision color and tone mapping.
+
+Streamarr reviews one FFmpeg upgrade for every platform.
+An upgrade waits until the pinned build publishes the release's Linux and macOS binaries.
+A fixture result or a measurement on one platform describes the same FFmpeg version on the other platform.
+A ServerAdmin who wants VideoToolbox runs both the server and the worker natively on one Apple silicon Mac.
+
+Every upgrade needs a local run on a host with an NVIDIA GPU and a local run on an Apple silicon Mac.
+CI alone cannot accept an upgrade.
+
 == Rejected Alternatives
 
 * Refresh daily-build pins more frequently — postpones the retention failure without removing the dependency on an expiring artifact.
 * Use a floating latest asset or distribution package — loses a reviewed runtime identity and dev/test/production parity.
 * Treat the packaging suffix as SemVer prerelease — can suppress stable Jellyfin packaging fixes in Renovate.
 * Query release metadata on every build — adds a live resolution dependency to builds whose inputs have not changed.
+* Add a CI job that fetches a subset of the FATE samples whenever the pinned FFmpeg build changes — the committed fixtures guard upgrades instead, and the FATE samples stay local.
+* Run a CI job that fetches a subset of the FATE samples beside the committed fixtures — the committed fixtures alone guard upgrades, and the FATE samples stay local.
+* Commit FATE sample files as fixtures — the FATE samples stay outside every repository, and every committed fixture is generated.
+* Keep every Dolby Vision test local — one small generated fixture lets CI guard the retag, the RPUs, the configuration record and the codec string.
+* Keep the Dolby Vision tests local and add the four checks of the Dolby Vision copy to the local suite — the four checks belong in CI, because one small generated fixture covers them.
+* Defer native macOS workers in link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033] and decode seek attempts in hardware only with NVDEC on Linux — Streamarr supports native macOS workers now, with a pinned macOS binary.
+* Pin a macOS FFmpeg build at its own FFmpeg version — the FFmpeg version must be the same on every platform, so that a test or a measurement on one platform holds on the other.
+* Check an upgrade of the macOS binary only in a local run on a Mac — a hosted macOS runner in CI guards every upgrade without a manual step.
 
 == References
 
@@ -69,3 +191,6 @@ The privileged updater changes only after trusted resolver changes merge, while 
 * https://repo.jellyfin.org/files/ffmpeg/linux/[Versioned Jellyfin FFmpeg mirror]
 * https://docs.renovatebot.com/modules/versioning/regex/[Renovate regex versioning]
 * https://github.blog/changelog/2021-09-13-a-simpler-api-for-authoring-commits/[GitHub signed commit API]
+* https://ffmpeg.org/fate.html[FFmpeg Automated Testing Environment]
+* https://ffmpeg.org/ffmpeg-filters.html#Video-Sources[FFmpeg video source filters]
+* https://ffmpeg.org/ffmpeg-filters.html#Audio-Sources[FFmpeg audio source filters]

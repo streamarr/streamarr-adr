@@ -120,7 +120,7 @@ Every attempt uses this origin, whether it starts from zero or seeks into the so
 The producer keeps the timestamps that FFmpeg writes, with one exception.
 The producer snaps copied audio with fixed-length frames to its codec's encoder frame grid (<<decision-audio,audio rule>>).
 When it copies AAC audio, the worker adds `-bsf:a aac_adtstoasc`, because `delay_moov` stops the mp4 muxer from inserting that filter on its own.
-When an attempt encodes video, the worker passes `-r:v:0` with the probed frame rate and sets no `-fps_mode`.
+When an attempt encodes video, the worker passes `-r:v:0` with the output frame rate (<<decision-frame-rate>>) and sets no `-fps_mode`.
 It computes its frame-count GOP, the keyframe interval it gives the encoder in frames, from the same rate (<<decision-gop,GOP sizing>>).
 FFmpeg's automatic mode then selects the constant-rate path.
 Under `-copyts`, FFmpeg selects an internal variant of that path that keeps the first timestamp.
@@ -128,8 +128,9 @@ The pipe thus carries the HLS muxer's constant-rate frames.
 Frame-count keyframes land on the period.
 A seek does not pad from zero.
 A test replays a recorded fixture and checks that output after a seek under these flags starts at the seek point, so an FFmpeg upgrade cannot silently change this behaviour.
-The worker refuses a video encode whose probed frame rate is not positive and finite with `JOB_ATTEMPT_FAILURE_INVALID_SPECIFICATION`, since it can neither pass that rate to `-r:v:0` nor count a GOP from it.
-Streamarr-server issue #446 requires the server to refuse such a stream session before it dispatches any job attempt.
+The worker refuses a video encode that carries no output frame rate with `JOB_ATTEMPT_FAILURE_INVALID_SPECIFICATION`, since it can neither pass a rate to `-r:v:0` nor count a GOP without one.
+The server never dispatches such a job.
+link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032] decides how the server handles a stream session whose output frame rate the frame-rate rule refused.
 Otherwise the server would spend ADR 0019's recovery budget dispatching jobs that every worker would refuse.
 
 *Why:* `-copyts` alone put a source that begins at 12 s into segment 2 for a job asking for segment 0.
@@ -140,6 +141,47 @@ The runs timed the encoder alone for a 1080p libx264 seek at the `faster` preset
 A 100 ms target saved only 0.03 s more than a 250 ms target.
 Parsing four fragments per media second instead of one cost under 0.1 % of FFmpeg's CPU time.
 Evidence: <<evidence-channel>>, <<evidence-timeline>>, <<evidence-frame-rate>>, https://github.com/streamarr/streamarr-transcode-worker/issues/53[streamarr/streamarr-transcode-worker#53].
+
+[[decision-frame-rate]]
+=== The frame-rate rule chooses the output frame rate
+
+The output frame rate is the rate at which every encode of a file's chosen video stream runs.
+The frame-rate rule chooses the output frame rate.
+The worker's probe job runs the rule once per file, as link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032] records.
+The rule picks from a list of standard rates.
+The list holds 10, 12, 12.5, 15, 23.976, 24, 25, 29.97, 30, 47.952, 48, 50, 59.94 and 60 frames per second, each as an exact fraction.
+For example, the list holds 23.976 as 24000/1001.
+
+A video stream declares two rates: its average rate, `avg_frame_rate`, and its base rate, `r_frame_rate`.
+When the two declared rates agree on a listed rate, the rule keeps that rate.
+When a Matroska file carries per-stream statistics tags, those tags must also agree with that rate before the rule keeps it.
+
+Otherwise the rule measures the motion rate, the frame rate at which the video's motion actually runs.
+A packet scan reads the packet times of the first 30 s of media and measures the motion rate from them.
+The scan trusts a timing pattern only when that pattern recurs.
+The rule then snaps the motion rate to the list:
+
+* A rate below 10 becomes 10.
+* A rate from 60 to 60.3 counts as 60.
+* Above 60.3, the rule divides the rate evenly down to a listed rate: 100 becomes 50, 90 becomes 30, 72 becomes 24 and 119.88 becomes 59.94.
+* Otherwise the rule takes the nearest listed rate.
+
+When the scan finds fewer than 2 frames, the rule snaps the average rate to the list instead.
+When the average rate is not usable, the rule snaps the base rate.
+The rule refuses to choose a rate only when the scan finds fewer than 2 frames and neither declared rate is usable.
+
+The output frame rate stays an exact fraction from the probe to the worker's `-r:v:0` argument.
+No step converts it to a decimal.
+
+*Why:* The rule was modeled on the packet times of 1,622 video streams.
+300 of them came from a library sample, 1,253 from FFmpeg's test suite and 69 from local sources.
+The earlier rule snapped the average rate to the list.
+Under the earlier rule, some variable-frame-rate MP4 and Matroska files dropped 9 to 70 % of their frames, because an output rate below the motion rate makes FFmpeg drop frames to keep a constant rate.
+Under the frame-rate rule, those files drop no frames.
+The frame-rate rule refuses 3 of the test-suite streams, against 13 under the earlier rule, and it refuses none of the library sample.
+294 of the 300 library files keep their declared rate, so about 2 % of files need a packet scan.
+On the six library files that needed a scan, the scan read 8 to 113 MB and took 58 to 336 ms with the files cached.
+Evidence: https://github.com/streamarr/streamarr-transcode-worker/issues/24[streamarr/streamarr-transcode-worker#24].
 
 [[decision-segment-list]]
 === Every variant of a stream session shares one segment list
@@ -253,9 +295,9 @@ Each hardware encoder must pass the same recording checks before it is keyframe-
 Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/14[#14] tracks those checks.
 
 The worker sets each encoder's frame-count GOP by whether that encoder is keyframe-verified.
-For a keyframe-verified encoder, the worker multiplies the period by the probed frame rate, rounds the result up, and adds one frame to obtain the extended GOP.
+For a keyframe-verified encoder, the worker multiplies the period by the output frame rate, rounds the result up, and adds one frame to obtain the extended GOP.
 That GOP never fires while forcing works, and if a forced keyframe were dropped it would place a keyframe one or two frames later, inside the same interval.
-For every other encoder, the worker multiplies the period by the probed frame rate and rounds the result down to obtain the floored GOP.
+For every other encoder, the worker multiplies the period by the output frame rate and rounds the result down to obtain the floored GOP.
 Even if the encoder ignores forced keyframes, that GOP still places one keyframe inside every interval and never skips a segment.
 Under the floored GOP every segment holds at least one keyframe, and most hold two.
 The floored GOP keeps a keyframe in every interval for libx265 but does not close its GOPs.
@@ -489,7 +531,7 @@ Evidence: <<evidence-one-fragment>>.
 
 The producer checks every box size against the segment cap before it allocates the box, and it fails the attempt on a box that exceeds the cap.
 It fails the attempt with the named reason `TRUNCATED_OUTPUT` when the pipe ends inside a box header, inside a box body, or after a `moof` with no `mdat`.
-In a video encode the producer fails the attempt with the named reason `SHORT_VIDEO_SAMPLE` when a video sample is shorter than half the nominal frame duration at the probed frame rate.
+In a video encode the producer fails the attempt with the named reason `SHORT_VIDEO_SAMPLE` when a video sample is shorter than half the nominal frame duration at the output frame rate.
 It reads that duration from `trun` or from the `tfhd` and `trex` defaults.
 Such a sample marks a packet whose decode time FFmpeg rewrote after the encoder emitted it out of order, and the segments may not decode even though FFmpeg exits 0.
 A stream copy is exempt, because a variable-frame-rate source's own sample durations vary.
@@ -816,9 +858,10 @@ One segment awaits acknowledgement while the producer assembles the next.
 The previous worker instead keeps the closed segment on disk while it uploads that segment.
 The worker holds at most the slot count times two segment caps.
 * Variable-frame-rate sources are still padded to a constant rate.
-The worker now uses the probed rate instead of FFmpeg's guess.
+The worker now uses the output frame rate instead of FFmpeg's guess.
 The frame-count GOP and the output rate therefore cannot disagree.
 * Every encoder receives time-based keyframes, so segment boundaries stop drifting with the GOP.
+* A variable-frame-rate file whose average rate lies below its motion rate now encodes at its motion rate, so the encode keeps every frame.
 * Encoded variants cut 3 s segments, so the producer encodes half as much media before the segment that a starting or seeking player waits for.
 At 3 s segments the server must hold every segment request for less than 3 s, because macOS AVPlayer abandons a request after one target duration without a byte.
 * Until merged segment lists arrive, a stream session that only copies keeps 6 s segments, and a copied variant in a stream session that also encodes is encoded when its keyframes do not fit the 3 s grid.
@@ -936,6 +979,9 @@ The HLS muxer's behaviour is an internal variant that `-copyts` selects and that
 That suits time-based forced keyframes but stretches a frame-count GOP until segment numbers lack a keyframe.
 * Choosing `vfr` for encoders that use time-based keyframes and a forced rate for encoders that use frame-count GOPs worked in the measurements.
 It adds a second rule without improving on one forced rate that reproduces the previous worker's output for every encoder.
+* Carrying the frame rate as a double cannot hold a rate such as 24000/1001 exactly, so the rate that reaches `-r:v:0` would differ from the rate that the rule chose.
+* Having the worker convert a double to the nearest fraction repeats a choice that the probe job has already made, and the conversion can pick a different fraction.
+* The frame-rate rule without the packet scan keeps snapping a variable-frame-rate file's average rate, which dropped 9 to 70 % of the frames of some files.
 * Keeping 6 s segments for encoded variants makes the producer encode twice as much media before the segment that a starting or seeking player waits for.
 A 1080p seek's first segment completed 1.95 s after FFmpeg started at 6 s segments, against 1.28 s at 3 s segments.
 * Moving encoded variants to 4 s segments saves less of that time.
@@ -1449,7 +1495,8 @@ The Node recorder that made them (`src/test/fmp4-recorder`) runs in CI without F
 * Issue https://github.com/streamarr/streamarr-server/issues/502[streamarr/streamarr-server#502], which records a variable-frame-rate source whose gap between frames outlasts the period and proposes a seek that keeps the frame the gap repeats.
 * Issue https://github.com/streamarr/streamarr-server/issues/504[streamarr/streamarr-server#504], which moves encoded variants to 3 s segments behind the Apple TV merge gate.
 * Issue https://github.com/streamarr/streamarr-server/issues/512[streamarr/streamarr-server#512], which builds each stream session's segment list from 3 s slots and merges slots without a source keyframe.
-* streamarr-server issue https://github.com/streamarr/streamarr-server/issues/446[#446], which has the server refuse a stream session that would encode video without a usable probed frame rate.
+* Issue https://github.com/streamarr/streamarr-server/issues/446[streamarr/streamarr-server#446], which has the server refuse a stream session that would encode video without a usable frame rate.
+* Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/24[streamarr/streamarr-transcode-worker#24], which reports probe version 2 and runs the frame-rate rule in the probe job.
 * The write-ups of the proofs of concept behind this decision were not committed.
 Neither were their harnesses, measurements or prior-art surveys.
 The Evidence appendix summarises their conclusions.

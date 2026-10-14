@@ -16,19 +16,18 @@ _Avoid_: user (unqualified), Profile (the viewing identity that an Account selec
 A private boundary for administration, catalog and local policy.
 Every Account is a member of exactly one Household, and every Profile belongs to exactly one Household.
 An Account may also use another Household while its Personal Profile is shared there.
-_Avoid_: home Household (ADR 0022's wording), family
+_Avoid_: home Household (ADR 0022's wording)
 
 **Profile**:
 A portable viewing identity with its own name, picture, PIN, Kid or Adult kind, optional Content Ceiling, viewing history, progress and preferences.
 A Profile belongs to exactly one Household and can be shared into others, and its data and policy go with it.
 A Profile cannot sign in or hold administrative authority.
-_Avoid_: viewing profile, user profile, profile (unqualified, where a codec profile could be meant)
+_Avoid_: viewing profile, profile (unqualified, where a codec profile could be meant)
 
 **Personal Profile**:
 The one Profile that represents an Account.
 Every Account has exactly one Personal Profile, and a Profile represents at most one Account.
 The Account and its Personal Profile transfer together, and the Account cannot unlink its Personal Profile.
-_Avoid_: account profile, main profile
 
 **HouseholdAdmin**:
 The Household role that edits a Household's settings and manages its Devices.
@@ -55,7 +54,7 @@ The durable record that fixes a shared Device, such as a television, to one Hous
 A Device registration records the Device name, its Electronic Serial Number (ESN), the Household and the Account that linked the Device.
 Only the winning poll of ADR 0021's pairing flow creates a Device registration.
 A Device registration never expires, and only revocation ends it.
-_Avoid_: pairing grant (the short-lived approval record that comes before it), paired device, device credential
+_Avoid_: pairing grant (the short-lived approval record that comes before it)
 
 ### Probe
 

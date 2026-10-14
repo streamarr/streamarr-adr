@@ -408,26 +408,39 @@ Increase `probe_version` whenever a probe column is added so the server can dete
 Skip probing while the stored success or terminal media error matches the source snapshot and requested version.
 Use the same scheduling path to refresh older terminal errors and older successful results.
 
-=== Probe version 2 deletes version 1 outcomes
+[[upgrade-rescan]]
+When an upgrade needs new probe data, the server queues a re-scan itself.
+The re-scan reuses the existing scan library operation and the durable probe jobs.
+Streamarr adds no separate backfill mechanism.
+A ServerAdmin does not have to start the re-scan.
+The upgrade to probe version 2 deletes the version 1 outcomes before the re-scan, as <<probe-version-2-migration,the section on the version 2 migration>> describes.
+On every upgrade to a probe version after version 2, each file's older outcome stays playable wherever the server can still read that outcome.
+The older outcome stays playable until the server stores the file's new outcome.
+Upgrades of production instances also keep older readable outcomes playable.
+The upgrade path must stay clear and clean, so that production instances upgrade gracefully.
+
+[[probe-version-2-migration]]
+=== Probe version 2 deletes version 1 outcomes, and the server queues a re-scan
 
 The migration to probe version 2 deletes every stored version 1 outcome and its stream rows.
+The server cannot read version 1 outcomes correctly.
 Version 2 changes how the server interprets an outcome.
 In that case, the rules in <<probe-version-rules,the section on source changes and probe versions>> require the migration to delete incompatible outcomes.
 A version 1 outcome would read as an `UNSPECIFIED` dynamic range.
 The server would then copy an HDR file or encode that file without tone mapping.
 The video stream that a version 1 outcome describes may be cover art rather than the chosen video stream.
-After upgrading, the administrator runs a scan.
-The scan requests a probe for every file without a current outcome.
+Deleting the version 1 outcomes is a breaking change.
+Streamarr accepts that breaking change only while Streamarr has no production instances.
+On the upgrade to probe version 2, the server queues a re-scan itself, as <<upgrade-rescan,the section on source changes and probe versions>> describes.
+The re-scan probes the files of every library again.
+The re-scan requests a probe for every file without a current outcome.
 Until a file's probe stores an outcome, a playback request for that file returns the typed not-ready error.
 That playback request also requests the probe, as <<playback,the Playback section>> describes.
-The release that ships the migration tells the administrator to run a scan.
-The release also states that playback stays restricted until the server probes each file again.
-The server does not probe the whole library on its own after the upgrade.
 
 *Why:* Streamarr has no production instances.
 No installation therefore loses playback that it relies on.
 If the server kept version 1 outcomes, playback would make the decisions that probe version 2 exists to prevent.
-Playback would keep making those decisions until a scan refreshed each file.
+Playback would keep making those decisions until the re-scan refreshed each file.
 
 === How the server checks claims and saves results
 
@@ -508,11 +521,10 @@ If a file has a stored terminal `probe_error`, a playback request returns that e
 The server does not enqueue another task for that file.
 
 When this change first ships, no production installations need to migrate.
-The server will not automatically populate probe results across an existing library on upgrade.
-https://github.com/streamarr/streamarr-server/issues/344[streamarr/streamarr-server#344] proposed that work.
-That issue was closed as not planned.
-An administrator runs a scan after upgrading instead.
 Scans and the watcher use the shared enqueue operation to request probes when an outcome is missing or outdated.
+When an upgrade needs new probe data, the server queues a re-scan itself, as <<upgrade-rescan,the section on source changes and probe versions>> describes.
+Streamarr adds no separate backfill mechanism, such as the one that https://github.com/streamarr/streamarr-server/issues/344[streamarr/streamarr-server#344] proposed.
+streamarr/streamarr-server#344 stays closed as not planned.
 Playback continues to use compatible older successful results while those probes run.
 
 Integration tests verify that scans and watchers can enqueue probes concurrently.
@@ -572,15 +584,18 @@ Workers must produce probe outcomes, or the dispatcher must record why attempts 
 The scan keeps waiting while probes wait for busy workers.
 If no worker is connected, the scan can complete once the dispatcher records each attempt's failure.
 Whether a file is ready for playback still depends on the stored probe outcome.
-* Each new probe column requires a version bump.
+* Each new probe column requires a higher probe version.
 When the server processes a file, it schedules a background probe to refresh an outdated outcome.
+When an upgrade needs new probe data, the server also queues a re-scan of every library.
 After ADR 0033, a worker runs the probe.
 Playback can use a compatible outcome while the probe runs.
 If a migration invalidates an incompatible outcome, playback cannot use the file until the server records a new outcome.
 * ADR 0013's pipeline reads its probe input from rows.
 The pipeline itself is unchanged.
 * After the upgrade to probe version 2, no file has a usable outcome until a scan or a playback request probes the file again.
+The server queues a re-scan itself on that upgrade.
 * A full scan under probe version 2 reads more of each library.
+The re-scan on the upgrade to probe version 2 is such a full scan.
 For a library of 23,210 video files, a version 1 scan reads about 21 GB.
 A version 2 scan reads an estimated 570 GB more.
 The 95 % interval for that extra amount is 270–990 GB.
@@ -645,13 +660,14 @@ A scan that requests new inputs would therefore wait for the retry time even if 
 If the source became unreadable after the scan listed the file, the whole scan would fail instead of just the probe attempt.
 * Retry a failed file on each scan without saving why the probe failed.
 An administrator could not see why the file never became playable.
-* Keep version 1 outcomes usable while scans refresh them to probe version 2.
+* Keep version 1 outcomes usable while the re-scan refreshes them to probe version 2.
 Those outcomes would read as an `UNSPECIFIED` dynamic range.
-Until a scan refreshed an HDR file's outcome, the server would copy that file or encode it without tone mapping.
-* Populate probe results across the whole library on upgrade.
-https://github.com/streamarr/streamarr-server/issues/344[streamarr/streamarr-server#344] proposed this work.
-That issue was closed as not planned.
-A scan already requests a probe for every file without a current outcome.
+Until the re-scan refreshed an HDR file's outcome, the server would copy that file or encode it without tone mapping.
+* Tell the ServerAdmin to run a scan after an upgrade, instead of having the server queue the re-scan.
+Playback would stay restricted until a ServerAdmin read the release notes and started the scan.
+* Add a separate backfill mechanism that probes outdated files outside a scan, as https://github.com/streamarr/streamarr-server/issues/344[streamarr/streamarr-server#344] proposed.
+The scan library operation and the durable probe jobs already request, run and retry every probe that a file needs.
+The re-scan that the server queues on an upgrade reuses both.
 * Take the first video stream (`0:v:0`) as the stream the transcode decision reads.
 A file whose first video stream is cover art fails to encode.
 * Take a stream copy's codec string from ffprobe's named profile and level.

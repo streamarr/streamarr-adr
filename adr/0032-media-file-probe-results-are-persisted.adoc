@@ -317,15 +317,21 @@ The measurements are in <<evidence-probe-limits>>.
 [[keyframe-positions]]
 === The server learns where the source's keyframes are before it offers a stream copy
 
-A keyframe position is the media time of a keyframe in the chosen video stream.
+A keyframe position identifies one keyframe in the chosen video stream.
+Each stored keyframe position keeps both the keyframe's presentation time and the keyframe's decode time.
 The probe reads the keyframe positions from the source container's own index when the container has one.
 For MP4 and MOV, that index is the sync-sample table.
 For Matroska, that index is the Cues element.
+The probe trusts a container index only when the probe can read the last keyframe that the index lists.
 A durable background step finds the keyframe positions of every other source.
 In that step, a worker scans every packet of the chosen video stream.
 The step runs for MPEG-TS files, which have no such index.
 The step also runs for AVI files.
 The step also runs for Matroska files whose Cues are sparse or missing.
+The step also runs for a file whose index lists a last keyframe that the probe cannot read.
+Such a file gets the same packet scan as a file without a usable index.
+A stream copy's media playlist therefore never advertises media segments past the source's real end.
+link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] decides what happens when a copied variant still runs short.
 Like the probe step, the keyframe step survives a server restart.
 Stored keyframe positions are probe facts.
 The <<probe-version-rules,probe version rules>> therefore apply to stored keyframe positions.
@@ -342,6 +348,9 @@ Without keyframe positions, the playlist advertised the same fixed duration for 
 A stream-copy seek to a media segment that held no source keyframe failed with `SKIPPED_SEGMENT_NUMBER`, as https://github.com/streamarr/streamarr-server/issues/66[streamarr/streamarr-server#66] describes.
 A container index already lists the keyframes.
 The probe therefore needs no packet scan for a source whose container has an index.
+A truncated file can keep an index that lists keyframes past the file's real end.
+A keyframe's presentation time can lie after the keyframe's decode time.
+A seek that starts reading at a keyframe needs the keyframe's decode time.
 
 === File events and quiet periods
 
@@ -447,6 +456,34 @@ That playback request also requests the probe, as <<playback,the Playback sectio
 No installation therefore loses playback that it relies on.
 If the server kept version 1 outcomes, playback would make the decisions that probe version 2 exists to prevent.
 Playback would keep making those decisions until the re-scan refreshed each file.
+
+[[later-probe-versions]]
+=== Each later change that adds probe facts adds its own probe version
+
+Each later change that adds probe facts increases the probe version when that change merges.
+Such a change does not add its facts to probe version 2.
+The later probe versions add these facts:
+
+* The keyframe positions of the chosen video stream, as <<keyframe-positions,the keyframe section>> describes.
+https://github.com/streamarr/streamarr-server/issues/66[streamarr/streamarr-server#66] adds the keyframe positions.
+* The end time of each stream, where the container header states that end time.
+https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511] adds the end times.
+* The title of each subtitle stream.
+https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60] adds the subtitle titles.
+* The title of each audio stream.
+https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503] adds the audio titles.
+* Whether the video carries CEA-608 or CEA-708 captions.
+The probe detects the captions by decoding keyframes.
+https://github.com/streamarr/streamarr-server/issues/505[streamarr/streamarr-server#505] adds the caption detection.
+
+The probe reads a stream's title from the Matroska `title` or from the MP4 `name`.
+The probe also reads an MP4 `handler_name` as the title when that `handler_name` is not generic.
+`SubtitleHandler` is an example of a generic `handler_name`.
+The ADR that owns each fact decides how the server uses that fact.
+This ADR and link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] decide how the server uses keyframe positions.
+ADR 0037 and link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043] decide how the server uses stream end times.
+ADR 0043 decides how the server uses stream titles and caption detection.
+On the upgrade to each of these probe versions, the server queues a re-scan and keeps older readable outcomes playable, as <<upgrade-rescan,the section on source changes and probe versions>> describes.
 
 === How the server checks claims and saves results
 
@@ -563,6 +600,8 @@ That later version also reads HDR10+ metadata and Dolby Vision RPUs from frames.
 An RPU (reference processing unit) carries Dolby Vision's per-frame picture-adjustment instructions.
 The later version can then report HDR10+ and Dolby Vision as present or absent.
 https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] describes that later version, including the worker's part of it.
+* Identify a Dolby Vision stream without a configuration record that is really profile 5, by reading the RPU header of the stream's first frame.
+https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] adds that check.
 * Record a `MediaFileProbePropertyIssue`.
 Probe version 2 records no such issue, as ADR 0036 decides.
 https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] decides where these issues are stored.
@@ -608,6 +647,7 @@ The 95 % interval for that extra amount is 270–990 GB.
 At 110 MB/s, the extra 570 GB takes about 86 minutes to transfer.
 About 2 % of files also need the frame-rate rule's packet scan over 30 s of media.
 * A source whose container has no usable keyframe index plays through an encode until its keyframe step finishes.
+A source whose index lists a last keyframe that the probe cannot read also plays through an encode until its keyframe step finishes.
 That step reads the whole file once.
 * Probe version 2 leaves three known gaps.
 First, `-scan_all_pmts 0` could omit the streams of a later program in a multi-program transport stream.
@@ -694,6 +734,8 @@ With the limits, an input that seeks into one MPEG-TS source read 220 MB instead
 That input also opened 0.5–0.9 s later.
 * Have the probe report the facts behind the HEVC tag and have the server apply the tag rule.
 The tag rule would then live in two places, the worker and the server.
+* Add keyframe positions, stream end times, subtitle titles and caption detection to probe version 2.
+Probe version 2 would then wait for four unrelated changes before https://github.com/streamarr/streamarr-server/issues/501[streamarr/streamarr-server#501] could play HDR and 10-bit sources as SDR.
 * Scan every packet of every file to find its keyframe positions.
 The scan would read whole files whose container index already lists the keyframes.
 * Read keyframe positions only from Matroska Cues.
@@ -791,12 +833,14 @@ Its 95 % intervals come from bootstrap resampling.
 * link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033: The Transcode Worker Is a Separate Service and Repository]
 * link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036: Video Contracts Share One Vocabulary and Preserve Dynamic-Range Facts]
 * link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037: The Worker Delivers Fragmented MP4 Segments From FFmpeg's Standard Output, and HLS Media Segments Are fMP4 Only]
+* link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043: Audio Tracks and Text Subtitles Are HLS Renditions, so Switching Them Never Restarts the Video]
 * https://ffmpeg.org/ffprobe.html[ffprobe documentation]
 * https://ffmpeg.org/ffmpeg-formats.html#Format-Options[FFmpeg format options: `analyzeduration` and `probesize`] and https://ffmpeg.org/ffmpeg-formats.html#mpegts[the MPEG-TS demuxer's `scan_all_pmts`]
 * https://datatracker.ietf.org/doc/html/rfc6381[RFC 6381: The "Codecs" and "Profiles" Parameters for "Bucket" Media Types]
 * https://aomediacodec.github.io/av1-isobmff/[AV1 Codec ISO Media File Format Binding: `av1C` and the codec string]
 * https://developer.apple.com/documentation/http-live-streaming/hls-authoring-specification-for-apple-devices/[Apple HLS authoring specification: the `CODECS` attribute]
-* https://github.com/streamarr/streamarr-server/issues/66[streamarr/streamarr-server#66: Keyframe timestamps in the probe, and stream-copy segment boundaries from them]
+* https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60: Extract text subtitle tracks in a durable job, and serve them as WebVTT renditions]
+* https://github.com/streamarr/streamarr-server/issues/66[streamarr/streamarr-server#66: Find source keyframes in the container index, and scan files that have no index]
 * https://github.com/streamarr/streamarr-server/issues/248[Issue #248: Restore Maven reactor]
 * https://github.com/streamarr/streamarr-server/issues/415[Issue #415: Probe existing library files without waiting for a quiet period]
 * https://github.com/streamarr/streamarr-server/issues/417[Issue #417: Record why each item fails]
@@ -805,5 +849,9 @@ Its 95 % intervals come from bootstrap resampling.
 * https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394: The later probe version's facts, with its server and worker parts]
 * https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399: Playback capabilities epic]
 * https://github.com/streamarr/streamarr-server/issues/446[streamarr/streamarr-server#446: Refuse a video encode without a usable frame rate]
+* https://github.com/streamarr/streamarr-server/issues/501[streamarr/streamarr-server#501: Play HDR and 10-bit sources as SDR in every client]
+* https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503: Serve each audio track as its own rendition, and switch languages without restarting the video]
+* https://github.com/streamarr/streamarr-server/issues/505[streamarr/streamarr-server#505: Serve CEA-608/708 captions as WebVTT subtitle renditions]
+* https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511: Play to the advertised end when a stream ends early or the source is truncated]
 * https://github.com/streamarr/streamarr-transcode-worker/issues/18[streamarr/streamarr-transcode-worker#18: Write playable sample entries for HEVC output and Dolby Vision copies]
 * https://github.com/streamarr/streamarr-transcode-worker/issues/24[streamarr/streamarr-transcode-worker#24: The worker's part of probe version 2]

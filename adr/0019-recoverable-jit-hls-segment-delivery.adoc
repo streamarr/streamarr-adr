@@ -50,7 +50,10 @@ Robust playback under that obligation is therefore not optional polish; having p
 
 === The advertised playlist is a delivery obligation
 
-On-demand media playlists continue to advertise every segment computed from source duration, close with `EXT-X-ENDLIST`, and embed each segment's own seek offset in its URI so any segment is independently re-producible.
+On-demand media playlists continue to advertise every segment of the stream session's segment list and close with `EXT-X-ENDLIST`.
+link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] defines the segment list.
+Each segment URI names the segment's index.
+The server can start a job attempt at any listed segment, so the server can produce any segment again on its own.
 A listed segment is an obligation, not a hint: the server never un-advertises, gaps, or substitutes an advertised segment and normally fulfills the obligation by recovering a producer and delivering the segment bytes.
 When every eligible execution target has been attempted once in the current recovery cycle and none can produce the segment, the controller returns `503 Service Unavailable`.
 That terminal response reports failure to fulfill the advertised representation and gives the player a clear boundary at which to switch variants or stop; it is not treated as successful HLS delivery.
@@ -253,8 +256,8 @@ Evidence: <<evidence-relocation-gap>>.
 
 === Distributed producers are the recovery redundancy
 
-When the transcode executor is distributed, a variant whose producer fails is re-dispatched, on the next request that needs it, to another available worker for the same source namespace; the pool of workers is the recovery redundancy.
-Recovery is attempt-bounded, never wall-clock-bounded: each variant carries a replacement budget sized by the currently eligible execution targets — locally the single local runner, remotely each live worker connection (its `worker_session_id`, per ADR 0018's live-connection fence).
+A variant whose producer fails is re-dispatched, on the next request that needs it, to another available worker for the same source namespace; the pool of workers is the recovery redundancy.
+Recovery is attempt-bounded, never wall-clock-bounded: each variant carries a replacement budget sized by the currently eligible execution targets, which are the live worker connections (each identified by its `worker_session_id`, per ADR 0018's live-connection fence).
 Every replacement consults the live target set at dispatch time; no snapshot of fleet membership is retained across the recovery window.
 Publication progress clears the attempted-target log (the frontier advancing is the one success signal). Fleet membership is re-derived on every pass; changing it does not clear an active window, but a currently eligible target not yet attempted in a failed window can revive recovery.
 Only when the budget is exhausted does the failure surface, as a terminal `503 Service Unavailable` with no body and no `Retry-After`; the client's own retry budget and its adaptive-bitrate switch to a healthy variant are the last-resort recovery.
@@ -266,7 +269,7 @@ Transient upload back-pressure is a self-classifying condition: the producer ret
 
 === A playlist structure suite gates the advertised representation
 
-An HLS conformance suite maintained in this repository runs inside the standard build and the continuous-integration gate, asserting playlist structure and the delivery obligations above against generated playlists and a controllable segment-producing fake.
+An HLS conformance suite maintained in the streamarr-server repository runs inside the standard build and the continuous-integration gate, asserting playlist structure and the delivery obligations above against generated playlists and a controllable segment-producing fake.
 Intentional deviations from the standard — advertise-ahead first among them — are recorded in this ADR and exercised by the relevant playlist and delivery tests, so the deviation remains reviewable rather than tribal knowledge.
 A deeper platform-specific stream validator remains an optional local check outside the portable gate.
 
@@ -281,7 +284,7 @@ A deeper platform-specific stream validator remains an optional local check outs
 == Consequences
 
 The static-playlist obligation makes recovery mandatory rather than optional, and the decision states that obligation as a first-class contract.
-Liveness-bounded waits remove the spurious-timeout failure mode under load and slow start for both local and distributed execution.
+Liveness-bounded waits remove the spurious-timeout failure mode under load and slow start.
 Pull-based recovery makes a failed producer invisible to the viewer in the common case: a brief stall while a fresh producer catches up; `503 Service Unavailable` appears only after the finite recovery cycle is exhausted.
 The active playlist structure suite converts structural protocol assumptions into always-on checks; the delivery suite lands with the recovery implementation tracked by issue 252.
 ADR 0008's blanket "RFC 8216 compliance" consequence is narrowed: server-generated playlists remain fully controlled, but on-demand delivery intentionally deviates from §6.2.1 immediate-availability as recorded here.

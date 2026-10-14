@@ -128,6 +128,8 @@ A GOP, or group of pictures, is the run of frames from one keyframe to the next.
 A closed GOP decodes without any frame from an earlier GOP.
 The server also encodes HEVC with libx265 only after libx265 closes its GOPs (https://github.com/streamarr/streamarr-server/issues/497[streamarr/streamarr-server#497]).
 Once libx265 closes its GOPs, libx265 can become a keyframe-verified encoder under ADR 0037.
+`EXT-X-INDEPENDENT-SEGMENTS` is the HLS tag that tells a player that the player can start decoding at any media segment without the earlier media segments.
+Until libx265 becomes a keyframe-verified encoder, a variant that libx265 encodes never carries `EXT-X-INDEPENDENT-SEGMENTS`, as ADR 0037 requires.
 
 *Why:* the constant codec string `hvc1.1.6.L120.90` says level 4.0.
 At 1080p60, libx265 writes level 4.1, so the constant codec string misdescribes that encode.
@@ -138,6 +140,14 @@ Apple's HLS authoring specification recommends that authors use `hvc1` rather th
 FFmpeg's mp4 muxer writes `hev1` for an HEVC encode until streamarr/streamarr-transcode-worker#18 makes the worker write `hvc1`.
 The measurements did not check `hev1` playback on iOS or tvOS devices.
 Evidence: <<evidence-strings>>, <<evidence-players>>.
+
+=== Automatic runs libx264 at `faster` and libx265 at `veryfast`
+
+An encoder preset is the encoder setting that trades encoding time for compression efficiency.
+link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044]'s Automatic setting is the default encoder preset setting.
+Under Automatic, libx264 runs at `faster`.
+ADR 0044's headroom model may move libx264 to `veryfast`, but never to a preset slower than `faster`.
+Under Automatic, libx265 stays at `veryfast` until libx265's seek waits are measured.
 
 [[explicitly-deferred]]
 === Explicitly deferred
@@ -159,16 +169,24 @@ This ADR does not defer NVENC or VideoToolbox.
 When that encoder is libx265, streamarr/streamarr-server#497 must merge too.
 The Apple TV app declares HEVC and does not declare AV1.
 An HDR HEVC source that ADR 0013's video decision encodes to SDR for the Apple TV app then becomes an HEVC SDR encode instead of an H.264 SDR encode.
-This outcome is wanted.
+Streamarr wants that SDR HEVC encode.
+ADR 0044's headroom model counts the extra CPU of that SDR HEVC encode against the speed floor.
+The speed floor is the minimum production speed that ADR 0044 sets for every running variant.
 * Until streamarr/streamarr-server#395 merges, no client reaches the HEVC or AV1 encode paths.
 The CPU cost and the bugs of the HEVC and AV1 encode paths therefore affect no session yet.
 Web and iOS sessions stay H.264-only.
 The Apple TV app still receives the copies that ADR 0013's interim copy rule allows.
 Every encode for the Apple TV app is H.264 SDR.
-* At the encoders' own default preset, `medium`, libx265 spends about twice the CPU of libx264 on the same encode.
-At `veryfast`, libx265 spends about three times the CPU of libx264.
-`veryfast` is the preset that link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044]'s Automatic setting uses today for libx264 and libx265.
-A worker that runs libx265 as its worker-verified HEVC encoder pays that extra CPU on each HEVC encode.
+* libx265 spends more CPU than libx264 on the same encode.
+The measurements ran on a 14-core arm64 host, and each encoder encoded a synthetic 1080p30 clip at 8 Mb/s.
+When both encoders ran at `medium`, the encoders' own default preset, libx265 spent about twice the CPU of libx264.
+When both encoders ran at `veryfast`, libx265 spent about three times the CPU of libx264.
+Each ratio compares the two encoders at the same preset.
+Under Automatic, libx264 runs at `faster` and libx265 runs at `veryfast`.
+No measurement compares libx265 at `veryfast` with libx264 at `faster`.
+This ADR therefore states no CPU ratio for the presets that Automatic runs.
+A worker that runs libx265 as its worker-verified HEVC encoder pays the extra CPU on each HEVC encode.
+Evidence: <<evidence-cost>>.
 * H.264 remains the codec that every client receives when it declares nothing better.
 * libx265 and a hardware `hevc_*` encoder write different initialization segments.
 Once streamarr/streamarr-server#398 merges, a variant therefore stays on one encoder backend for its lifetime.

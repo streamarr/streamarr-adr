@@ -16,6 +16,7 @@ Audio renditions and WebVTT segments follow the stream session's segment list fr
 This decision extends link:0013-stream-decision-architecture.adoc[ADR 0013].
 The stream decision selects every audio track and chooses the subtitle tracks.
 Each audio track keeps its own copy-or-encode decision inside one audio codec per stream session.
+An image subtitle track that the viewer selects is burned into the video.
 
 == Context
 
@@ -29,6 +30,7 @@ The worker maps that stream beside the first video stream.
 To map a stream is to tell FFmpeg to include the stream in its output.
 The multivariant playlist lists one audio `EXT-X-MEDIA` tag with no URI.
 The subtitle decision always excludes subtitles, so the worker drops every subtitle stream.
+No code burns a subtitle into the video.
 Clients can already send an audio language and a subtitle language when they start a stream session.
 The server ignores both languages.
 The persisted probe (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]) records each stream's index, codec, language, channel count, and default and forced flags.
@@ -219,7 +221,7 @@ For Opus, the drop removes about 14 ms of real audio at the start of the stream.
 A multiplexed variant's media segment carries video and audio together under link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037].
 Multiplexed variants remain in use until the server delivers audio renditions.
 A video-only variant's media segment carries no audio, so neither rule applies to that segment.
-Before the renditions ticket (https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503]) merges, the ticket's player check shows again that every tested player plays audio renditions without the priming frame.
+Before the renditions ticket (https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503]) merges, the ticket's player check shows again that every tested player plays audio renditions without the priming frame (<<decision-device-checks>>).
 
 *Why:* When segment 0 kept the priming frame, a language switch in the first 6 s stopped hls.js playback for good.
 The stall happened in 10 of 10 runs in Chromium, Firefox and WebKit.
@@ -428,40 +430,72 @@ Issue https://github.com/streamarr/streamarr-server/issues/505[streamarr/streama
 Issue https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511] adds each stream's end time.
 
 [[decision-image-subtitles]]
-=== Image subtitles stay burned into the video
+=== An image subtitle that the viewer selects is burned into the video
 
-An image subtitle track, such as PGS, VobSub or DVB, never becomes a rendition.
-When the stream decision selects an image subtitle track, the variant's job attempts burn that track into the video (link:0013-stream-decision-architecture.adoc[ADR 0013]).
+An image subtitle track is a PGS, VobSub or DVB track, whose lines are pictures rather than text.
+An image subtitle track is burned into the video when the viewer selects the track.
+To burn in a subtitle is to draw the subtitle's pictures into the video frames while the worker encodes the video.
+An image subtitle track never becomes a rendition.
 The server never converts an image subtitle track to text.
+A stream session with a burned-in subtitle always encodes its video (link:0013-stream-decision-architecture.adoc[ADR 0013]), even when the client could play a stream copy.
+On a change to or from an image subtitle, the client replaces the stream session inside the playback session at the viewer's position.
+The playback session is the one viewing of a media title that holds the stream sessions and the format-attempt budget.
+The format-attempt budget limits how many output formats the server chooses in one playback session.
+That replacement uses none of the format-attempt budget.
+Under link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033], the server dispatches a job that burns in a subtitle only to a worker that advertises burn-in.
 
-[[measurements-before-acceptance]]
-=== Cases that measurements must cover before acceptance
+When subtitles are off, a forced image subtitle track whose language matches the selected audio is burned in automatically.
+So the stream session encodes its video.
+A forced image track that is burned in automatically counts as a selected subtitle.
+Under ADR 0045, the client plays the source file directly only when the client's declaration covers every selected subtitle.
+So the file plays over HLS rather than by direct play.
+An audio switch that changes which forced image track applies replaces the stream session inside the playback session at the viewer's position.
+That replacement uses none of the format-attempt budget.
 
-The Evidence section covers one film excerpt with stereo AAC and AC-3 audio.
-Measurements must cover the following cases before this decision is accepted.
-This ADR records no result for them yet.
+*Why:* No code burns a subtitle into the video today, so no client can show an image subtitle.
+In the library sample, 66 of 300 files carry PGS or VobSub subtitles, about one file in five.
+A subtitle choice is the viewer's choice, not a format error, so the replacement spends none of the format-attempt budget.
+A forced track carries lines that a viewer needs even with subtitles off.
+Evidence: <<evidence-library>>.
 
-* 5.1 and other channel layouts
-* E-AC-3, DTS and TrueHD sources
-* ALAC sources
-* AAC at 44.1 kHz
-* Opus and FLAC audio renditions
-* Audio tracks with gaps
-* Sources with long GOPs. A GOP, or group of pictures, is the run of frames from one keyframe to the next.
-* Forced and hearing-impaired subtitles
-* Right-to-left languages
-* Subtitle extraction from MPEG-TS sources.
-On an MPEG-TS source, `-start_at_zero` sets media time zero from the streams that the job maps.
-* SVT-AV1 variants with audio renditions
-* A switch between variants during playback
-* An audio request for the segment just before a relocated attempt's first segment, with the real server and worker.
+[[decision-seek-after-change]]
+=== AVFoundation clients seek in two steps after an audio or subtitle change
+
+AVFoundation is Apple's media framework, which AVPlayer and WebKit's native HLS use.
+When a seek follows an audio or subtitle change inside the same media segment, AVFoundation clients seek in two steps.
+The first step seeks to the start of that media segment, and the second step seeks to the target.
+The iOS client also covers the picture with a still of the current frame, from the seek until the target frame is on screen.
+If the cover fails on the iPhone, the iOS client seeks in place after every change instead of covering the picture.
+A seek in place is a seek to the current position.
+The two-step seek stays the minimum fix in every case.
+
+*Why:* In AVFoundation, any change of audio or subtitle selection drops the buffered media before about the playhead.
+The dropped media includes the keyframe of the current GOP.
+A GOP, or group of pictures, is the run of frames from one keyframe to the next.
+AVFoundation keeps the rest of the buffer, so a later seek into that GOP fetches nothing.
+AVFoundation then has no keyframe to decode from, and holds the old picture until the next keyframe.
+With the 6 s GOP that the worker used in the measurements, the freeze lasted up to about 5 s.
+With the two-step seek, AVPlayer showed the target picture after a median of 216 ms, against 101 ms for a seek with no earlier change.
+The cover keeps every earlier picture off the screen until the target frame appears.
+hls.js did not freeze, so the web client needs neither fix where the web client plays through hls.js.
+Evidence: <<evidence-subtitle-cases>>.
+
+[[decision-device-checks]]
+=== Device checks are merge gates on the tickets
+
+Each device check is a merge gate on the ticket that delivers the behavior that the check covers.
+The checks run AVPlayer on the Apple TV 4K, a Media3 player on the SHIELD TV Pro, and hls.js in Mac browsers.
+The rules of this ADR hold whatever a check shows.
+A failing check comes back to the ticket as a question before the ticket merges.
+The player check of the audio renditions ticket, https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503], runs the real server and worker.
+That check shows again that hls.js plays audio renditions without the priming frame.
+That check also plays a Matroska source whose copied AAC starts off the AAC encoder's frame grid.
+The Apple client's ticket, https://github.com/streamarr/streamarr-apple/issues/4[streamarr/streamarr-apple#4], checks the cover of <<decision-seek-after-change>> on an iPhone.
+
+Three cases have no measurement.
+The cases are an ALAC source, AAC at 44.1 kHz, and an audio request for the segment just before a relocated attempt's first segment.
 A relocation starts a new job attempt at the requested segment when that segment lies before the running attempt's first segment, or too far beyond the running attempt's output (link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]).
-After 23 of 1,160 switches, hls.js first asked for the segment before the playhead's segment.
-Right after a relocation, that request lies before the new attempt's first segment.
-So ADR 0019's rule would relocate again.
-In 20 runs of a model of the server's relocation rule, no second relocation occurred.
-* The cause of the AVFoundation picture freeze that <<consequences>> describes
-* Safari on macOS and Safari on an iPhone
+The acceptance tests of https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503] cover the three cases.
 
 [[explicitly-deferred]]
 === Explicitly deferred
@@ -478,16 +512,19 @@ Until then, the web client declares AAC, with at most 6 channels in Firefox.
 Firefox plays 7.1 AAC in AAC's own channel order and plays 5.1 AAC in WAVE order.
 * Allow more than one audio codec per stream session for Apple clients.
 Apple clients get that exception only if a check shows that their switches between codecs stay in sync.
-* Test audio and subtitle renditions in tvOS apps, on Android, on cast receivers and on TVs.
-Test the renditions with hardware encoders too.
-The measurements for this ADR use macOS computers and an iPhone, and software encoders only.
-Issue https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] covers hardware encoders.
+* Test audio and subtitle renditions on cast receivers.
+* Test audio and subtitle renditions with the VAAPI, QSV, AMF and RKMPP encoders, which https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] adds.
+Issue https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56] adds NVENC, and issue https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57] adds VideoToolbox, so neither encoder is deferred.
 
 [[consequences]]
 == Consequences
 
-* A viewer switches audio language and subtitles, and the video does not restart.
-Choosing an image subtitle track still needs new video job attempts, because the job attempts burn that track into the video.
+* A viewer switches audio language and text subtitles, and the video does not restart.
+Choosing an image subtitle track, or leaving one, replaces the stream session, because the job attempts burn that track into the video.
+Playback then resumes at the viewer's position.
+* Every stream session with a burned-in subtitle encodes its video, which uses worker capacity.
+In the library sample, 4 of 300 files hold 7 forced image tracks, so automatic burn-in can apply to about 1 % of files.
+Each such file then plays over HLS with an encoded video, instead of a stream copy or direct play.
 * In some players, a switch holds the picture for a short time.
 During a hold, the same frame stays on screen.
 The median hold within 3 s of a switch was about 0.2 s in WebKit with hls.js and 0.17 s in AVPlayer.
@@ -524,15 +561,16 @@ The one-codec rule encodes that track to the session's audio codec.
 * An audio track that ends at least one media segment before the video is always encoded, even when the client could play a copy of the track.
 * Once the server delivers audio renditions, video-only variants replace link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]'s multiplexed variants.
 An init per rendition then replaces ADR 0037's single init per variant.
-* The worker contract gains a rendition label on uploads, audio and WebVTT content types, and the extraction job.
+* The worker contract gains a rendition label on uploads, audio and WebVTT content types, the extraction job and burn-in.
 Each change only adds to the contract, as link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033] requires.
 The worker advertises a capability for each addition.
 * Every player places a cue relative to the first video frame, exactly as the player places the picture.
 WebKit starts each cue about 0.2 s late, both in its native HLS and with hls.js.
 WebKit starts each cue late because WebKit evaluates cues only as often as it fires its `timeupdate` event.
-* AVFoundation froze the picture for 1.6 to 2.0 s after a seek in WebKit's native HLS and in AVPlayer.
-The freeze happened when a switch of subtitle language, the seek's start and the seek's target fell in the same segment.
-The measurements so far have not found the cause of the freeze.
+* In AVFoundation players, a seek after an audio or subtitle change into the same GOP froze the picture until the next keyframe.
+With the 6 s GOP that the worker used in the measurements, the freeze lasted up to about 5 s.
+The two-step seek and the iOS client's cover remove that freeze.
+The target picture then shows about 115 ms later than after a seek with no earlier change.
 * With `AUTOSELECT=NO`, Safari no longer turns on subtitles by itself when the audio language differs from the viewer's language.
 The client chooses subtitles.
 A forced track still selects itself in AVFoundation players.
@@ -585,7 +623,7 @@ Nobody measured whether Apple players stay in sync after a switch that changes t
 * Accepting the drift leaves the audio 90 to 140 ms late after a switch that changes the codec, until the next seek.
 * Never copying Opus gives up copies that every tested player plays, because stereo Opus played in all six players.
 * Renditions for the default track and the viewer's preferred languages only leave the file's other languages out of the menu.
-* Encoding DTS and TrueHD whatever the client declares refuses a copy to a client that declares a working path, such as Media3 with an HDMI receiver.
+* Encoding DTS and TrueHD whatever the client declares refuses a copy to a client that can play the codec, such as Media3 with an HDMI receiver.
 * Marking the segments after an audio track's end with `EXT-X-GAP` stopped hls.js for good on an iPhone after a switch into the ended track.
 * Padding a copied track with silence in the track's own codec, without encoding the track, needs a way to make silence in every codec that the worker copies.
 Encoding the track pads every codec in the same way.
@@ -599,6 +637,15 @@ The audio that arrives late comes only at the very end of the output, where no m
 * Subtitle extraction for each stream session reads a whole Matroska file every time a viewer starts playback.
 At 8 MB/s, a 20 GB file would take about 40 minutes, a figure derived from the read rate.
 An extraction of only a time window misses a line that is already on screen when the window starts.
+* Recording image subtitles as unsupported leaves about one file in five of the library sample without its PGS or VobSub subtitles.
+* Delivering image subtitles as timed-image renditions in this work would widen the work beyond audio and text tracks.
+* Burning in a forced image track only when the viewer selects the track leaves out lines that a viewer needs even with subtitles off.
+* Seeking in place after every change as the first fix lengthens the longest gap between shown frames at every change.
+That seek also fetches the whole forward buffer again.
+The seek in place stays the fallback if the iOS cover fails.
+* Relying on 2 to 3 s segments to bound the freeze does not remove the freeze, because the freeze lasts until the next keyframe.
+A 2 s GOP still froze the picture for about 0.58 s, and a shorter GOP costs bitrate on every stream.
+* Holding the subtitle tickets until the device checks run delays the tickets, while each ticket's merge gate runs the checks anyway.
 * Optical character recognition could convert image subtitles to text.
 That conversion adds a recognition engine to the worker.
 The engine's output can differ from the image.
@@ -613,7 +660,7 @@ On Streamarr's zero-based fMP4 timeline, that offset put every cue 10 s late in 
 * Numbered names as the naming scheme tell the viewer nothing about the track.
 The server numbers only names that still collide.
 * Always keeping the SDH token doubles the token in AVPlayer, which appends " SDH" itself.
-* Leaving duplicate names breaks RFC 8216.
+* Leaving duplicate names violates RFC 8216.
 AVPlayer and WebKit's native HLS then exposed only one of two renditions named "English".
 * Telling colliding names apart by the stream index shows the viewer a number that means nothing outside the file.
 * Converting a whole SubRip track with FFmpeg's `-sub_charenc` damages the track's UTF-8 cues.
@@ -623,7 +670,7 @@ On a UTF-8 track with 5 windows-1252 cues, that conversion gave 35 of 100 correc
 * Labeling a damaged subtitle track "(incomplete)", or hiding the track from viewers, adds states that viewers see.
 The track's remaining lines still help the viewer, and the log line and the worker metric expose the loss.
 * Failing the whole extraction job for one damaged track loses every other track of the file.
-* Showing the loss to a ServerAdmin in the UI or the API adds a surface that the log line and the worker metric make unnecessary.
+* Showing the loss to a ServerAdmin in the UI or the API adds UI or API work that the log line and the worker metric make unnecessary.
 * Merging forced cues into the full track changes the source's text to fix a gap that only 3 of 277 forced cues showed in the library sample.
 * A SubRip parser of the worker's own replaces FFmpeg's decoder to save text that 0 of 910,377 sample lines would lose.
 * Keeping captions deferred leaves the caption data in 24 of 254 decodable sample files unused.
@@ -708,6 +755,9 @@ The cost was the same in the video attempt and in a separate job.
 The re-check found 760 of 760.
 * In a model of the server's relocation rule, a backward seek relocated once.
 With one job per language, the same seek relocated four times.
+* After 23 of 1,160 switches, hls.js first asked for the segment before the playhead's segment.
+Right after a relocation, that request lies before the new attempt's first segment, so the rule of link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019] would relocate again.
+In 20 runs of a model of the server's relocation rule, no second relocation occurred.
 * In the audio-only job design, every player froze the picture when a language's job started only at the viewer's selection.
 The freeze lasted 0.34 to 1.07 s when the first segment took 0.7 s.
 The freeze lasted 5.2 to 7.3 s when the first segment took 6 s.
@@ -841,7 +891,8 @@ AVPlayer showed no subtitles with either value.
 * WebKit's native HLS and AVPlayer froze the picture for 1.6 to 2.0 s in 25 of 25 runs of the reproducing cases.
 In every freeze, the switch of subtitle language, the seek's start and the seek's target fell in one 6 s segment.
 The measurements inferred that pattern from 18 cases.
-The measurements did not trace the freeze's cause inside the player.
+These measurements did not trace the freeze's cause inside the player.
+The later subtitle measurements found the cause (<<evidence-subtitle-cases>>).
 A seek into the next segment did not freeze.
 A switch 11 s before the seek did not freeze either.
 * The re-check found every cue in every segment that the cue overlaps, and in no other segment, in all four languages.
@@ -880,10 +931,23 @@ WebKit's native HLS listed the forced track as a track of kind `forced` and neve
 With the name "English" and the SDH characteristics, AVPlayer showed "English SDH".
 * In a test where two renditions were both named "English", AVPlayer and WebKit's native HLS exposed only one of the two, in 3 of 3 plays.
 * WebKit laid out every Arabic and Hebrew cue left to right, in WebKit's native HLS and with hls.js.
-With each line wrapped in the Unicode characters U+202B and U+202C, all four tested engines rendered those cues correctly.
+With each line wrapped in the Unicode characters U+202B and U+202C, every tested player rendered those cues correctly.
 * No text codec on this ADR's list can exist in an MPEG-TS source.
 FFmpeg writes SubRip, ASS, WebVTT and mov_text into MPEG-TS as data streams.
 Text subtitles in real MPEG-TS sources are teletext or CEA-608 captions.
+* Any change of audio or subtitle selection in AVPlayer dropped the buffered media before about the playhead, including the current GOP's keyframe.
+AVPlayer's loaded range restarted after the keyframe in 48 of 48 changes that reported a range.
+* A later seek into that GOP fetched no video.
+AVFoundation then held the old picture until the next keyframe, in 54 of 54 freezing runs.
+* With the 6 s GOP that the worker used, the freeze lasted a median of 1.71 s for a seek 1.5 s before the next keyframe.
+The freeze lasted a median of 5.02 s for a seek 4.8 s before the next keyframe.
+A 2 s GOP bounded the freeze at about 0.58 s, and 1 s subtitle segments did not help.
+* With the two-step seek, AVPlayer showed the target picture after a median of 216 ms, within 172 to 225 ms.
+A seek with no earlier change showed the picture after 101 ms.
+* A seek in place right after each change showed the picture after a median of 104 ms at the later seek.
+At the change, the seek in place lengthened the longest gap between two shown frames from 45 ms to 130 ms.
+The seek in place also fetched the whole forward buffer again.
+* hls.js did not freeze in Chromium, Firefox or WebKit.
 
 [[evidence-captions]]
 === Captions
@@ -938,16 +1002,21 @@ Another 59 tracks need the flags, and 20 tracks in 10 groups need a trailing num
 * FFmpeg's header probe marks captions on 0 files.
 Decoding the first 30 s of each file finds caption data in 24 of the 254 files that decode.
 * The sample holds no teletext among its 1,162 subtitle streams.
+* 66 files carry PGS or VobSub subtitles, in 372 PGS streams and 23 VobSub streams.
+The sample holds no DVB subtitles.
+* 4 files hold 7 forced image tracks.
 
 == References
 
 * Issue https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60] (subtitle extraction and WebVTT, in the server and the worker).
 * Issue https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503] (audio renditions), issue https://github.com/streamarr/streamarr-server/issues/505[streamarr/streamarr-server#505] (captions), issue https://github.com/streamarr/streamarr-server/issues/508[streamarr/streamarr-server#508] (subtitles that extraction finishes during playback) and issue https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511] (streams that end early).
 * Issue https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] (typed capability declarations) and issue https://github.com/streamarr/streamarr-web/issues/29[streamarr/streamarr-web#29] (the web client's declarations).
-* Issue https://github.com/streamarr/streamarr-apple/issues/4[streamarr/streamarr-apple#4] (audio and subtitle selection in the Apple client).
+* Issue https://github.com/streamarr/streamarr-server/issues/496[streamarr/streamarr-server#496] (the epic for switching audio and subtitles without restarting the video) and issue https://github.com/streamarr/streamarr-server/issues/506[streamarr/streamarr-server#506] (image subtitle burn-in).
+* Issue https://github.com/streamarr/streamarr-apple/issues/4[streamarr/streamarr-apple#4] (audio and subtitle switching in the Apple client), issue https://github.com/streamarr/streamarr-web/issues/74[streamarr/streamarr-web#74] (the web player's menus) and issue https://github.com/streamarr/streamarr-android/issues/1[streamarr/streamarr-android#1] (playback with Media3 on Android TV).
+* Issue https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] (the VAAPI, QSV, AMF and RKMPP encoders), issue https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56] (NVENC) and issue https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57] (VideoToolbox).
 * Pull request https://github.com/streamarr/streamarr-transcode-worker/pull/50[streamarr/streamarr-transcode-worker#50], which declares copied audio's bitrate unknown.
-* link:0013-stream-decision-architecture.adoc[ADR 0013], link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018], link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019], link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032], link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033], link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] and link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037].
-* The measurements of 2026-09-27 to 2026-09-29 and their harnesses were not committed, so the Evidence section gives their results.
+* link:0013-stream-decision-architecture.adoc[ADR 0013], link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018], link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019], link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032], link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033], link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036], link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037], link:0042-graphql-subscriptions-run-over-websocket-until-token-expiry.adoc[ADR 0042] and ADR 0045.
+* The measurements of 2026-09-27 to 2026-09-30 and their harnesses were not committed, so the Evidence section gives their results.
 * https://datatracker.ietf.org/doc/html/rfc8216#section-4.3.4.1[RFC 8216 §4.3.4.1: `EXT-X-MEDIA`], https://datatracker.ietf.org/doc/html/rfc8216#section-4.3.4.2[§4.3.4.2: `EXT-X-STREAM-INF`, `CODECS` and `BANDWIDTH`] and https://datatracker.ietf.org/doc/html/rfc8216#section-3.5[§3.5: WebVTT segments and `X-TIMESTAMP-MAP`]
 * https://developer.apple.com/documentation/http-live-streaming/hls-authoring-specification-for-apple-devices/[Apple HLS authoring specification: audio and subtitle renditions]
 * https://www.w3.org/TR/webvtt1/[W3C WebVTT: The Web Video Text Tracks Format]

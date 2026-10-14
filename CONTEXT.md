@@ -42,7 +42,7 @@ _Avoid_: base layer (a Dolby Vision layer, not a picture format), HDR10 (PQ with
 
 **Codec profile**:
 The profile and level that a video codec such as H.264, HEVC or AV1 signals for a video stream.
-_Avoid_: profile (unqualified), viewing profile (the household concept in ADR 0024)
+_Avoid_: profile (unqualified), Profile (the portable viewing identity in ADR 0024)
 
 **Codec string**:
 The RFC 6381 value that names one stream's codec with its codec profile, level and other parameters, such as `avc1.640028`.

@@ -27,7 +27,8 @@ A job that spans many tasks therefore belongs to Streamarr.
 == Decision
 
 A library operation is a durable job that Streamarr owns.
-The mutation that requests it claims the library in its transaction, and one scheduled task runs it.
+The mutation that requests a library operation stores the operation in the mutation's transaction.
+Storing the operation marks the library busy, and one scheduled task runs the operation.
 A restart runs the operation again from the start, and its tasks run in memory.
 A stop admits no new tasks, lets running tasks finish, and leaves the library usable.
 
@@ -41,7 +42,7 @@ In Streamarr, tasks group work for a file, title or library item.
 Job:: A requested operation with an overall completion criterion.
 A library operation is one kind of job; a transcode job is another, and it has attempts directly, with no tasks or steps.
 Library operation:: The job that scans a library, refreshes it, or removes its items with missing files.
-Streamarr stores it as a durable row from its claim to its end.
+Streamarr stores each library operation as a durable row and deletes the row when the operation ends.
 Task:: A distinct portion of a job's work, grouped around one subject: a file in a scan, a title in a refresh, a library item in a removal.
 A task is defined by its work, not by the thread that runs it, and it requires one or more steps.
 Step:: A logical operation that can be executed and retried independently, such as identify, fetch poster, fetch backdrop, probe, or fetch person or company artwork.
@@ -59,30 +60,32 @@ https://github.com/streamarr/streamarr-server/issues/412[#412] will allow Stream
 Streamarr does not use the terms "operation item" or "subtask".
 A group of items processed together is a batch, never a page, and library operations have no batches: admission is per task (link:0041-scans-and-refreshes-admit-tasks-through-an-adaptive-limit.adoc[ADR 0041]).
 
-=== Claiming an operation
+=== Storing an operation
 
 A library has at most one library operation.
 `Library.status` shows the running kind, `SCANNING`, `REFRESHING` or `REMOVING_ITEMS_WITH_MISSING_FILES`, and shows `STOPPING` after a ServerAdmin stops it; `HEALTHY` and `UNHEALTHY` mean that no operation runs.
-The mutation that requests an operation claims the library, stores the operation and schedules its scheduled task in one transaction, deciding atomically on the library's row.
-An operation therefore never exists without its scheduled task, and a failed transaction claims nothing and returns ADR 0026's top-level `UNAVAILABLE` error.
+The mutation that requests an operation stores the operation, marks the library busy and schedules the operation's scheduled task in one transaction.
+The transaction reads and writes the library's row atomically, so concurrent requests for one library store at most one operation.
+An operation therefore never exists without its scheduled task.
+A failed transaction stores nothing and returns ADR 0026's top-level `UNAVAILABLE` error.
 
 * A library that does not exist returns `LibraryNotFoundError`.
-* An idle library is claimed, and the payload returns it in its busy status.
+* For an idle library, the mutation stores the operation, and the payload returns the library in its busy status.
 * A busy library refuses every request for library work with `LibraryBusyError`, which carries the current status and a message that names the running kind, such as "A library scan is already in progress."
 
 The refusal covers an identical request and a stronger one, such as a refresh that replaces artwork while a refresh that keeps artwork runs.
 An identical request succeeds only when the server itself runs the operation again after a restart, which users never trigger.
 Streamarr never queues library work.
 This ADR amends ADR 0026: a busy library rejects even an identical request with `LibraryBusyError`.
-Streamarr retires `LIBRARY_WORK_NOT_SCHEDULED` because it claims the library and schedules the operation's task in one transaction.
+Streamarr retires `LIBRARY_WORK_NOT_SCHEDULED` because one transaction stores the operation and schedules the operation's scheduled task.
 The rules below replace ADR 0026's earlier rules for compensating when work cannot start and for running on a single server.
 
-Adding a library claims its first scan in the transaction that adds the library, and removing a library returns `LibraryBusyError` while an operation runs.
+Adding a library stores the library's first scan in the transaction that adds the library, and removing a library returns `LibraryBusyError` while an operation runs.
 Each mutation that starts or stops an operation, or changes the scan schedule, has its own typed intent and Cedar action, which the service layer checks through the authorization service (link:0025-cedar-decides-authorization.adoc[ADR 0025]).
 
 === Running an operation
 
-The claim schedules the operation's one-time scheduled task, inside the claim's transaction, on a scheduler dedicated to library operations.
+The mutation's transaction schedules the operation's one-time scheduled task on a scheduler dedicated to library operations.
 An operation's execution waits for probes and artwork, so it never runs on, or holds, the scheduler threads that run them.
 Every execution walks the library from the start and skips completed work by the normal rules: a scan skips a matched file whose stored facts are current, and a refresh skips a title whose item result for fetching metadata carries the operation's id.
 Streamarr keeps no checkpoints.
@@ -115,7 +118,7 @@ Primary artwork consists of the posters and backdrops of movies and series, plus
 For each item whose result for fetching metadata carries the operation's id, the operation requires primary artwork results that carry the same operation id.
 Those artwork results count whether the artwork was saved, unavailable or failed.
 An operation that removes items with missing files requires no result.
-A result recorded after the claim proves nothing by its time alone, because artwork requested before the claim can finish after it.
+A result recorded after the operation started proves nothing by its time alone, because artwork requested before the operation started can finish later.
 Person and company artwork is background work, which an operation requests and never waits for.
 A retry after a recorded failure never holds an operation open either; its result later replaces the recorded failure.
 
@@ -123,7 +126,7 @@ Once the walk is done and every required result is recorded, the finishing steps
 A scan updates file availability, removes items with missing files when the library's setting allows it (ADR 0038), and recalculates the letter index; a refresh or a removal recalculates the letter index, which takes over https://github.com/streamarr/streamarr-server/issues/447[#447]'s recount after a refresh.
 Each finishing step is keyed by the operation's id and is idempotent, so a step that a restart interrupted has the same effect when it runs again.
 A finishing step for an operation that has ended does nothing, so a stale execution cannot apply a step to a later operation.
-To end an operation, Streamarr sets the library's final status and deletes the operation in one transaction: `HEALTHY` for a finished operation, the library's status from before the claim for a stopped one, and `UNHEALTHY` for a failed one.
+To end an operation, Streamarr sets the library's final status and deletes the operation in one transaction: `HEALTHY` for a finished operation, the library's status from before the operation for a stopped one, and `UNHEALTHY` for a failed one.
 A stopped or failed operation skips the finishing steps that it has not started, except that it still recalculates the letter index, because tasks that finished can change titles.
 
 === Stopping an operation
@@ -131,7 +134,7 @@ A stopped or failed operation skips the finishing steps that it has not started,
 A ServerAdmin stops an operation with `stopScanningLibrary`, `stopRefreshingLibrary` or `stopRemovingItemsWithMissingFiles`, and the library shows `STOPPING`.
 A stop leaves the library usable, as it was before the operation except for the tasks and finishing steps that the operation already finished and the items that it already removed:
 
-* The library returns to the status that it had before the operation was claimed.
+* The library returns to the status that it had before the operation started.
 * Every library item is either untouched or fully through its foreground steps: identify, fetch poster and fetch backdrop.
 * No task is stopped halfway, and the letter index is recalculated.
 * A scan stopped before its finishing steps changes no file's availability and removes nothing (ADR 0038).
@@ -142,7 +145,7 @@ A graceful stop is meant to take seconds and at most about a minute: only the fe
 Streamarr stores the stop request with the operation.
 If the server restarts while the library is `STOPPING`, the new execution completes the stored stop.
 The execution admits no tasks and waits until every item whose result for fetching metadata carries the operation's id has primary artwork results that carry the same operation id.
-The execution then recalculates the letter index and restores the library's status from before the operation was claimed.
+The execution then recalculates the letter index and restores the library's status from before the operation started.
 A stop does not wait for probes or background artwork; they keep running, and their results appear afterwards.
 A stopped operation requests no new background artwork, and the interface distinguishes a stopped operation from details that are still arriving.
 
@@ -211,14 +214,14 @@ The scheduled task runs the operation again with backoff until that transaction 
 == Rejected Alternatives
 
 * Durable fan-in now, with per-task request rows and dependency tracking between steps — counting completions durably is a protocol of its own, and an operation id on each subject's one request is enough to tell which results an operation waits for.
-* Proving completion by the claim time — artwork requested before the claim can finish after it, so a refresh would skip a title it never refreshed or finish on artwork fetched for a weaker request.
+* Proving completion by the operation's start time — artwork requested before the operation started can finish later, so a refresh would skip a title it never refreshed or finish on artwork fetched for a weaker request.
 * A scheduled task for each task — db-scheduler cannot report when a group finishes and deletes a successful one-time execution, so the operation could not tell when its tasks finished.
 * A workflow engine beside db-scheduler — it adds a second durable engine with its own replay model, and a caller could not share a subject-keyed step that another caller requested.
 * Queueing a second operation, or upgrading the running operation to a stronger request — a queue needs its own durable state and ordering, the ServerAdmin cannot see when queued work will start, and an upgraded refresh would refresh some titles twice.
 * Checkpointing progress inside an operation — a checkpoint must stay valid while files change between executions, and walking the library again reads its current state.
 * Canceling running work on a stop — canceling interrupts running tasks, breaks the pooled connections that they hold, and leaves items half done.
 * Crash-recovery markers that turn interrupted work `UNHEALTHY` at startup — they discard accepted work and report a failure that nobody caused.
-* Starting the work in memory after the claim and compensating when it cannot start, as the first proposal did — scheduling the scheduled task in the claim's transaction leaves no gap to compensate.
+* Starting the work in memory after storing the operation and compensating when the work cannot start, as the first proposal did — scheduling the scheduled task in the mutation's transaction leaves no gap to compensate.
 * Running every missed scheduled scan after downtime — the scans would repeat back to back and find the same state.
 * Intervals that do not divide 24, or cron expressions — start times would move from day to day, and cron adds a syntax for one setting.
 * Storing a time zone with the schedule — the schedule would disagree with the server's clock and logs.

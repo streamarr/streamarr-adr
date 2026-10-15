@@ -231,9 +231,13 @@ Until then, an interim rule chooses each stream session's segments:
 
 * A stream session whose every variant is a stream copy keeps 6 s segments on the plain 6 s grid.
 * A stream session with any encoded variant uses the plain 3 s grid.
-* The server offers a stream copy only when every interval of the stream session's grid holds a source keyframe.
+* The server offers a stream copy only when every interval of the stream session's grid holds a source keyframe, except the final interval.
 Otherwise the server encodes that variant instead.
 In a stream session with an encoded variant, the server therefore encodes the copied variant when the source's keyframes do not fit the 3 s grid.
+* When the grid's final interval holds no source keyframe, that interval joins the segment before it in every variant of the stream session.
+The stream session then advertises one segment fewer than the grid holds, and its last segment runs to the end of the media.
+That last segment can last up to twice the period: 12 s on the 6 s grid and 6 s on the 3 s grid.
+The playlist's target duration covers that segment, as RFC 8216 requires.
 
 *Why:* 3 s segments let a player start and seek sooner, because the producer encodes half as much media before the segment that the player waits for is complete.
 With 1080p libx264 at the `faster` preset, the decode-only early-start seek (<<decision-seek>>), the pinned FFmpeg 8.1.2 and 1 s fragments, a seek completed its first segment 1.28 s after FFmpeg started at 3 s segments, against 1.95 s at 6 s segments.
@@ -247,7 +251,13 @@ The merge gate checks that risk on the Apple TV, a primary client.
 A stream copy's segments can start only at source keyframes.
 On a plain 3 s grid, more sources would therefore leave an interval without a keyframe, and the server would encode those sources instead of copying them.
 Merged segment lists let every stream session use 3 s slots without encoding more sources.
-Evidence: https://github.com/streamarr/streamarr-server/issues/504[streamarr/streamarr-server#504], https://github.com/streamarr/streamarr-server/issues/512[streamarr/streamarr-server#512].
+The interim rule exempts the final interval because AAC priming can carry an ordinary source just past a period boundary.
+An AAC encoder adds priming samples, so a container runs about 23 ms longer than its video.
+FFmpeg's `lavfi` test source, given 36 s of video and AAC audio, makes a file that measures 36.023 s.
+That file's final 6 s grid interval runs from 36 s to 36.023 s and holds no keyframe.
+Without the exemption, the server would encode that file although every full interval holds a keyframe.
+Streamarr adopts the exemption to learn how players handle the longer last segment, and will revisit it if players mishandle that segment.
+Evidence: https://github.com/streamarr/streamarr-server/issues/504[streamarr/streamarr-server#504], https://github.com/streamarr/streamarr-server/issues/512[streamarr/streamarr-server#512], https://github.com/streamarr/streamarr-server/pull/534[streamarr/streamarr-server#534].
 
 === Every encoder forces the boundary keyframes from a list
 
@@ -982,6 +992,7 @@ The frame-count GOP and the output rate therefore cannot disagree.
 At 3 s segments the server must hold every segment request for less than 3 s, because macOS AVPlayer abandons a request after one target duration without a byte.
 * Until merged segment lists arrive, a stream session that only copies keeps 6 s segments, and a copied variant in a stream session that also encodes is encoded when its keyframes do not fit the 3 s grid.
 Once merged segment lists arrive, every stream session uses 3 s slots, and a stream copy's playlist advertises segments of different lengths.
+* In a stream session with a copied variant, every variant's last segment can last up to twice the period when the grid's final interval holds no source keyframe.
 * The server encodes a source until it knows the source's keyframe positions, so a file without a usable container index is encoded until its keyframe scan finishes.
 * A keyframe-verified encoder's segments hold one keyframe instead of the two that most segments hold under the floored GOP.
 Other encoders keep the extra keyframe until they are verified.
@@ -1127,6 +1138,9 @@ WebKit kept 1080p in only 4 of 15 sessions, and hls.js in Chromium held 1080p fo
 At equal VMAF, 2 s segments needed 6.0 to 16.4 % more bitrate than 6 s segments, against 2.9 to 7.7 % more for 3 s segments.
 * Measuring the library's keyframe spacing before choosing a stream copy's segment length would delay a choice that the spacing no longer decides.
 Merged segment lists let every stream session use 3 s slots without encoding more sources, whatever the spacing is.
+* Requiring a source keyframe in the grid's final interval as well, the interim rule that this decision first accepted, would encode ordinary sources.
+AAC priming makes a container run about 23 ms past its video.
+A source whose video ends on a period boundary therefore leaves a final interval of about 23 ms, and that interval holds no keyframe.
 * Writing `EXT-X-INDEPENDENT-SEGMENTS` for every variant would claim independence for stream copies and libx265, whose segments can start with an open GOP.
 * Never writing `EXT-X-INDEPENDENT-SEGMENTS` would keep Safari's native player fetching two extra segments before every seek target.
 * Recording the VideoToolbox encoders only in https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] would keep them off the keyframe-verified list that the worker reads.
@@ -1635,6 +1649,7 @@ The Node recorder that made them (`src/test/fmp4-recorder`) runs in CI without F
 * Issue https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511], which pads streams and sources that end early and reports an early end.
 * Issue https://github.com/streamarr/streamarr-server/issues/504[streamarr/streamarr-server#504], which moves encoded variants to 3 s segments behind the Apple TV merge gate.
 * Issue https://github.com/streamarr/streamarr-server/issues/512[streamarr/streamarr-server#512], which builds each stream session's segment list from 3 s slots and merges slots without a source keyframe.
+* Pull request https://github.com/streamarr/streamarr-server/pull/534[streamarr/streamarr-server#534], which advertises each stream copy segment's real duration and joins a final grid interval without a source keyframe to the segment before it.
 * Issue https://github.com/streamarr/streamarr-server/issues/446[streamarr/streamarr-server#446], which has the server refuse a stream session that would encode video without a usable frame rate.
 * Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/24[streamarr/streamarr-transcode-worker#24], which reports probe version 2 and runs the frame-rate rule in the probe job.
 * The write-ups of the proofs of concept behind this decision were not committed.

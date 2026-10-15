@@ -203,7 +203,14 @@ _Avoid_: workflow, scheduled task (the db-scheduler record that runs a job)
 **Library operation**:
 The job that scans a library, refreshes it, or removes its items with missing files.
 A library has at most one at a time, and `Library.status` shows its kind while it runs.
-_Avoid_: library task (a task is a portion of a job), library work (when naming one operation)
+The mutation that requests a library operation stores the operation, and storing the operation marks the library busy.
+_Avoid_: library task (a task is a portion of a job), library work (when naming one operation), claim (for storing a library operation)
+
+**Removal**:
+Removing a library's items with missing files (ADR 0038).
+A removal runs as a scan's finishing step when the library's setting allows the step, or as its own library operation through `removeItemsWithMissingFiles`.
+`removeLibrary` removes a whole library and is not a removal.
+_Avoid_: removal (for `removeLibrary`), deletion, cleanup
 
 **Task**:
 A distinct portion of a job's work, grouped around one subject: a file in a scan, a media title in a refresh, a library item in a removal.
@@ -224,14 +231,45 @@ _Avoid_: try, retry (for the first attempt), run
 
 **Item result**:
 The latest recorded outcome of a step for a subject.
-It carries the id of the operation that it was produced for, if any.
+An item result that counts for a library operation carries the operation's id.
 It is not an attempt history: an attempt that crashes records nothing.
 _Avoid_: attempt history, attempt log, job result
+
+**Take over**:
+To set a library operation's id on a pending artwork request for the same item, so the operation waits on that request (ADR 0027).
+The pending request may carry no operation id, as with a file-watcher request, or the id of an operation that has ended.
+Taking over a request that waits to retry runs the request again at once.
+The operation also sets the operation's id on the request's results of the current generation that no retry will replace.
+_Avoid_: claim, adopt, reassign
 
 **Scheduled task**:
 A persisted db-scheduler task instance, as distinct from its registered task definition: the one that runs each library operation, or a step that must survive a restart, such as a probe.
 Use the term only at the scheduling boundary.
 _Avoid_: task (unqualified), job
+
+**Execution**:
+One run of a library operation by the operation's scheduled task.
+A restart starts another execution of the same library operation, and every execution walks the library from the start (ADR 0027).
+Streamarr does not record executions separately.
+_Avoid_: attempt (one execution of a step or a transcode job), rerun, run (unqualified)
+
+**Finishing step**:
+An action that runs after a library operation's walk is done and every required result is recorded, such as updating file availability or recalculating the letter index (ADR 0027).
+The finishing steps run in a fixed order.
+Each finishing step is keyed by the library operation's id and is idempotent, so a finishing step that a restart interrupted has the same effect when the finishing step runs again.
+A finishing step acts on the whole library operation, while a step acts on one subject.
+_Avoid_: step (unqualified), post-processing, cleanup
+
+**Conclusion**:
+How a library operation ends: finished, failed or stopped.
+The conclusion decides the library's final status and which finishing steps run (ADR 0027).
+_Avoid_: result (an item result belongs to a step), outcome, status (`Library.status`)
+
+**Stop**:
+A ServerAdmin's request that a running library operation admit no new tasks, let admitted tasks finish their foreground steps, and leave the library usable (ADR 0027).
+`stopLibraryScan`, `stopLibraryRefresh` and `stopRemovingItemsWithMissingFiles` request a stop, and the library shows `STOPPING` until the stop completes.
+A stop never cancels running work.
+_Avoid_: cancel, abort, rollback
 
 **System actor**:
 The reserved identity recorded for work that no user requested, such as a scheduled library scan.
@@ -296,6 +334,12 @@ A set of folders the server scans, together with the items built from their file
 Removing a library deletes its items but leaves their catalog entries in place.
 _Avoid_: collection (a user-curated grouping), section
 
+**Letter index**:
+The number of a library's top-level items, movies or series, whose sort title starts with each letter.
+Every library operation recalculates the letter index before the operation ends (ADR 0027).
+The GraphQL field `Library.alphabetIndex` returns the letter index.
+_Avoid_: alphabet index (except the GraphQL field name), letter counts
+
 **Media title**:
 A movie, series, season or episode, independent of the libraries that hold it.
 Use "title" as shorthand only when the context distinguishes it from the title field that holds its name.
@@ -319,6 +363,11 @@ _Avoid_: work, title (as a type name), metadata entry, catalog item
 A metadata edit that adds or removes one person, company or genre on a movie's or series' credits.
 The effective credit list is the provider's list without the removed credits, plus the added ones.
 _Avoid_: cast lock, credit override
+
+**Unmatched item**:
+An item whose catalog entry has no provider id.
+The `unmatched` library filter selects unmatched items.
+_Avoid_: unidentified item, local item, item without an external id
 
 **Unmatched person**:
 A person with a catalog entry but no provider ids, created by a ServerAdmin with only a name while adding them to a media title's credits.
@@ -356,3 +405,50 @@ _Avoid_: orphaned edit, dangling edit
 Moving an item to a different catalog entry because it matched the wrong media title.
 The ServerAdmin chooses which metadata edits to copy, and watch state attributable to that item is copied automatically.
 _Avoid_: rematch (unqualified), identify, unmatch
+
+### Watch state
+
+**Watch state**:
+The facts that Streamarr keeps about one Profile's viewing of a catalog entry: watched status, resume position, completions, manual marks and last watched.
+Watch state belongs to the Profile and the catalog entry, so every attached item shows the same watch state (ADR 0039).
+_Avoid_: watch activity, user data (unqualified), watch status (the watched status alone)
+
+**Watched status**:
+Whether an item is watched, in progress or unwatched for a Profile.
+Only a counted resume position puts an item in progress.
+A season or series derives its watched status from its episodes.
+The GraphQL field `watchStatus` returns the watched status, and the `watchStatus` filter selects items by the watched status.
+_Avoid_: watch status (in prose), played
+
+**Resume position**:
+Where playback of an item resumes for a Profile.
+The resume position comes from the latest progress that a stream session saved for the item with a position above zero.
+A resume position counts only when Streamarr saved the resume position after the item's latest completion that is not dismissed.
+The GraphQL field `watchProgress` returns the resume position.
+_Avoid_: watch progress (in prose), bookmark, playback position
+
+**Completion**:
+A watch-history entry that says a Profile watched an item.
+Playback that finishes creates a completion, and so does `markWatched`.
+`markUnwatched` dismisses the item's completions.
+A dismissed completion stays in watch history but no longer makes the item watched and no longer counts toward last watched.
+_Avoid_: completed attempt (a job attempt that completes), play, view
+
+**Manual mark**:
+A `markWatched` or `markUnwatched` that a Profile applies to an item.
+A manual mark records that item as the mark's source (ADR 0039).
+A manual mark on a season or series applies to each episode.
+`markUnwatched` also clears the resume positions that the mark covers.
+_Avoid_: toggle, override (reserved for administrative overrides in ADR 0024)
+
+**Last watched**:
+The time a Profile last watched an item.
+Last watched is the later of the time Streamarr saved the item's counted resume position and the time of the item's latest completion that is not dismissed.
+A series' last watched is the latest last watched among the series' episodes.
+Last watched orders the `LAST_WATCHED` sort and Continue Watching, and the GraphQL field `lastWatchedAt` returns the time.
+_Avoid_: last played, last activity, recently watched
+
+**Continue Watching**:
+The per-Profile list of movies and episodes that have a counted resume position, ordered by last watched, newest first.
+Continue Watching does not yet list a series' next episode after a Profile finishes an episode.
+_Avoid_: up next (a series' next episode, which Continue Watching does not list yet), recently watched, resume list

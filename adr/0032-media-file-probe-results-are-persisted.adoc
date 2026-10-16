@@ -250,6 +250,20 @@ The transfer, primaries, matrix and range of a stream stay with the later probe 
 The chapter times use the timeline of the keyframe positions.
 A future chapter menu and the markers of https://github.com/streamarr/streamarr-server/issues/285[streamarr/streamarr-server#285] use the chapters.
 The worker reads the chapters with ffprobe's `-show_chapters` option.
+* The title of each audio and subtitle stream.
+https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503] names each audio rendition by its title or by its language.
+https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60] names each subtitle rendition the same way.
+The worker reads the `title` tag first, then the MP4 `name` tag, then the MP4 `handler_name` tag.
+The worker takes the first of these tags whose value is not blank.
+The worker compares tag names without regard to case, so a Matroska `HANDLER_NAME` tag counts as `handler_name`.
+FFmpeg's MP4 muxer writes a stream's title into the track's `name` atom, so ffprobe reports that title as `name`, not as `title`.
+A generic handler name counts as no title.
+A handler name is generic when it ends with "Handler" or starts with "Core Media ", ignoring case.
+FFmpeg writes `SoundHandler` or `SubtitleHandler` into every MP4 audio or subtitle track that has no handler name of its own.
+A title holds at most 512 bytes of UTF-8.
+The worker leaves a longer title out and never shortens it.
+The server accepts at most 128 KiB in one session message, so the limit keeps one title from closing the worker's session (https://github.com/streamarr/streamarr-server/issues/554[streamarr/streamarr-server#554]).
+Video streams report no title, because nothing reads a video stream's title yet.
 * The exact codec string of every video and audio stream, in the form that RFC 6381 defines.
 The probe computes the codec string from the stream's decoder configuration record.
 Depending on the codec, that record is `avcC`, `hvcC`, `av1C`, `dvcC` or `dvvC`, or `esds`.
@@ -286,6 +300,8 @@ The 5 misses were AV1 in IVF or raw OBU files.
 The measurement did not parse the sequence headers of those files.
 ffprobe's named profile and level matched only 41 of the 59 video copies.
 The measurements are in <<evidence-stream-facts>>.
+In the library sample, 79 audio and 75 subtitle streams had a handler name.
+The generic-name rule kept all 57 names that named a track and left out the other 97 (<<evidence-stream-titles>>).
 
 [[output-frame-rate]]
 === The probe job chooses the output frame rate once per file
@@ -525,17 +541,17 @@ No server requests probe version 2, and no worker advertises it.
 A change after probe version 4 does not add its facts to probe version 4.
 The probe versions after version 4 add these facts:
 
-* The title and the hearing-impaired flag of each subtitle stream.
-https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60] adds the subtitle titles and each subtitle stream's hearing-impaired flag.
-* The title of each audio stream.
-https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503] adds the audio titles.
+* The hearing-impaired flag of each subtitle stream.
+https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60] adds the flag.
 * Whether the video carries CEA-608 or CEA-708 captions.
 The probe detects the captions by decoding keyframes.
 https://github.com/streamarr/streamarr-server/issues/505[streamarr/streamarr-server#505] adds the caption detection.
 
-The probe reads a stream's title from the Matroska `title` or from the MP4 `name`.
-The probe also reads an MP4 `handler_name` as the title when that `handler_name` is not generic.
-`SubtitleHandler` is an example of a generic `handler_name`.
+Probe version 4 already reports the title of each audio and subtitle stream.
+https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503] and https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60] read those titles and leave the probe version unchanged.
+The titles are stream tags.
+The probe reads them in the same ffprobe pass as every other version 4 fact.
+Caption detection stays in a later probe version, because it decodes the video's keyframes.
 The ADR that owns each fact decides how the server uses that fact.
 This ADR and link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] decide how the server uses keyframe positions.
 ADR 0037 and link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043] decide how the server uses stream end times.
@@ -800,8 +816,16 @@ With the limits, an input that seeks into one MPEG-TS source read 220 MB instead
 That input also opened 0.5–0.9 s later.
 * Have the probe report the facts behind the HEVC tag and have the server apply the tag rule.
 The tag rule would then live in two places, the worker and the server.
-* Add subtitle titles and caption detection to probe version 4.
-Probe version 4 would then wait for two unrelated changes before https://github.com/streamarr/streamarr-server/issues/501[streamarr/streamarr-server#501] could play HDR and 10-bit sources as SDR.
+* Add caption detection to probe version 4.
+Caption detection decodes the video's keyframes.
+Every version 4 fact comes from the headers and tags of one ffprobe pass.
+Probe version 4 would then wait for a change that decodes frames before https://github.com/streamarr/streamarr-server/issues/501[streamarr/streamarr-server#501] could play HDR and 10-bit sources as SDR.
+* Leave the stream titles to a later probe version.
+Every library would then need a second re-scan before https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503] and https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60] could name their renditions.
+The titles come from the same ffprobe pass as the other version 4 facts.
+* Report every handler name unchanged, and let the server decide which names are generic.
+A change to the generic-name rule would then need no new probe version.
+But every audio and subtitle stream of an MP4 file would then carry a name such as `SoundHandler`, which adds bytes to a result that must fit in one session message.
 * Give the facts for https://github.com/streamarr/streamarr-server/issues/501[streamarr/streamarr-server#501] probe version 2 after probe version 3 has shipped.
 The server compares probe versions by number.
 A version 3 outcome would then count as newer than a version 2 outcome, although the version 3 outcome lacks the facts of version 2.
@@ -865,6 +889,26 @@ The file still held both elements.
 * MP4 files with `hvc1` or `hev1` sample entries reported neither value as stream side data when only the `hvcC` record and the samples held the SEI messages.
 A Matroska file without the mastering elements, an MPEG-TS file and a raw HEVC file also reported none.
 * In all of those files, ffprobe reported both values as frame side data of the first frame.
+
+[[evidence-stream-titles]]
+=== Stream titles
+
+These measurements ran on 2026-10-15 against FFmpeg and ffprobe 8.1.3 in the pinned worker image.
+FFmpeg generated each test file from its own test sources, with one video, one AAC audio and one text subtitle stream.
+
+* An MP4 or MOV file whose audio and subtitle streams had title metadata reported each title as the tag `name`.
+ffprobe reported no `title` tag for those streams.
+The handler names stayed `SoundHandler` and `SubtitleHandler`.
+* An MP4 file without titles reported only the handler names `VideoHandler`, `SoundHandler` and `SubtitleHandler`.
+An MP4 file whose handler name metadata was empty reported the same three names.
+* An MP4 file with the handler names "Stereo Mix" and "Forced" reported both names unchanged as `handler_name`.
+* A Matroska file reported each stream's title as the tag `title`.
+A Matroska file that FFmpeg remuxed from MP4 kept each handler name as the tag `HANDLER_NAME`.
+
+In the 300-file library sample, 79 audio and 75 subtitle streams had a handler name.
+97 of those names were generic, such as `SoundHandler` (43 audio streams), `SubtitleHandler` (28 subtitle streams) and `USP Sound Handler` (18 audio streams).
+Every one of the 97 ends with "Handler".
+The other 57 names were track names, such as a language, "English SDH" or "Surround".
 
 [[evidence-frame-rate]]
 === Output frame rate

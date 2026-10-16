@@ -71,7 +71,8 @@ The server answers a request past the real end with a padded segment.
 When no padded segment is stored yet, the server starts a job attempt at the last segment that holds source frames.
 That job attempt pads the segments up to the advertised end.
 A source that ends early adds no exception to the rule that a listed segment is an obligation.
-`503 Service Unavailable` after exhausted recovery stays the only way that the server refuses an advertised segment.
+`503 Service Unavailable` stays the only way that the server refuses an advertised segment.
+The server answers `503 Service Unavailable` after exhausted recovery, or when a full transcode limit keeps a variant from starting (<<decision-requested-variant>>).
 A copied variant cannot be padded.
 link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] makes a copied variant that runs short a format error.
 
@@ -146,6 +147,12 @@ The server starts, restarts and stops variants by these rules:
 * A request for a media segment of one video variant stops the producers of the stream session's other video variants.
 * A relocation restarts only the requested variant at the requested segment.
 * After a relocation, a variant that is not running starts when the player next requests one of that variant's segments.
+* The configured transcode limit caps how many job attempts run at once across every stream session that transcodes.
+When a variant must start and the transcode limit leaves no room, the server starts nothing.
+The server answers that request with `503 Service Unavailable`, with no body and no `Retry-After`.
+The server never stops another stream session's variant to make room.
+A media-segment request stops the stream session's other video variants before the server checks the limit, so their job attempts no longer count.
+A stream session that only remuxes starts its variants without checking the limit.
 * Apart from the first-listed variant, no variant starts before the player requests one of that variant's segments, unless the headroom model of link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] allows that variant to start early.
 * Until the headroom model is validated, the headroom model allows no variant to start early.
 * Once the headroom model is validated, a variant that the headroom model started early is exempt from the rule that a media-segment request stops the other video variants.
@@ -176,6 +183,13 @@ In that simulation, the link dropped and then recovered.
 AVPlayer and WebKit's native player each failed every attempt to switch up after the link recovered, over 2 sessions for each player.
 Later simulations compared variant orders and segment lengths under the stop rule that this ADR adopts.
 No AVPlayer session in those later simulations timed out or failed, over 3 sessions for each tested combination.
+
+*Why a full transcode limit answers 503 instead of stopping another stream session's variant:* Another stream session's running variant serves a viewer who is watching it.
+Stopping that variant would stall that viewer to start a variant for someone else.
+That viewer's player would then request its segment again, and the new request could stop a third stream session's variant.
+Stream sessions would keep stopping each other's variants.
+`503 Service Unavailable` gives the player the same clear boundary as exhausted recovery.
+The player's own retry budget and its adaptive-bitrate switch then decide what happens next.
 
 *Why other variants wait for a request:* The measurements in this paragraph used libx264 at the `medium` preset, 6 s segments and the four-variant ladder on a 10-core host.
 Starting the four variants together made every variant about 3× slower than starting that variant alone.

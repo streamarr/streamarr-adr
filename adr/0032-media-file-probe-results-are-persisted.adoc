@@ -14,6 +14,14 @@ The keyframe positions shipped first, as probe version 3.
 The facts for https://github.com/streamarr/streamarr-server/issues/501[streamarr/streamarr-server#501] are probe version 4, which includes every fact of version 3.
 Version 2 is unused.
 
+A further amendment gives probes their own capacity on each worker (<<probe-capacity>>).
+A probe never takes a playback slot, so a scan never delays playback.
+Each worker sizes its probe capacity from its cores.
+
+The same amendment changes playback of a file without a stored probe outcome (<<playback>>).
+The server moves the file's durable probe to the front of the queue and waits, within a configured bound, for the stored outcome.
+Playback then starts, instead of returning the not-ready error at once.
+
 == Context
 
 Streamarr learns a media file's technical properties by running ffprobe.
@@ -524,8 +532,7 @@ Streamarr accepts that breaking change only while Streamarr has no production in
 On the upgrade to probe version 4, the server queues a re-scan itself, as <<upgrade-rescan,the section on source changes and probe versions>> describes.
 The re-scan probes the files of every library again.
 The re-scan requests a probe for every file without a current outcome.
-Until a file's probe stores an outcome, a playback request for that file returns the typed not-ready error.
-That playback request also requests the probe, as <<playback,the Playback section>> describes.
+Until a file's probe stores an outcome, a playback request for that file moves the file's probe to the front of the queue and waits for the outcome, as <<playback,the Playback section>> describes.
 
 *Why:* Streamarr has no production instances.
 No installation therefore loses playback that it relies on.
@@ -639,13 +646,62 @@ Use capped backoff without requiring a file change or version bump.
 Keep one execution per media file during retries.
 Schedule retries without holding a database transaction across the delay.
 
+[[probe-capacity]]
+=== Probes use their own worker capacity and never take playback slots
+
+Each worker advertises two capacities when the worker registers.
+The probe capacity is the number of probes that the worker runs at once.
+The playback slots are the number of job attempts that the worker runs at once.
+Probes count against the probe capacity only.
+Job attempts count against the playback slots only.
+A probe never takes a playback slot, so a scan never delays playback.
+Keyframe packet scans are probes, so keyframe packet scans count against the probe capacity too.
+
+The worker sizes its probe capacity from the cores available to the worker process.
+The default probe capacity is the available cores minus 3, and at least 1.
+The 3 cores stay free for playback and for the worker process.
+A worker setting overrides the default probe capacity.
+The playback slots keep their own setting and their own default.
+
+The server dispatches as many probes at once as the connected compatible workers advertise in total.
+db-scheduler still picks, monitors, recovers and retries each probe execution.
+The server sets no fixed probe limit of its own beside the advertised probe capacity.
+A probe that still finds every compatible worker busy stays pending without a failure, as the section on how probes run describes.
+The worker contract carries the probe capacity in its own field of `WorkerRegistration`, beside `available_slots`.
+https://github.com/streamarr/streamarr-server/issues/578[streamarr/streamarr-server#578] changes the server.
+https://github.com/streamarr/streamarr-transcode-worker/issues/93[streamarr/streamarr-transcode-worker#93] changes the worker.
+
 [[playback]]
 === Playback
 
-A playback request for a file without a usable probe outcome returns a typed not-ready error in the mutation payload, per ADR 0026.
+A playback request for a file without a usable probe outcome moves that file's durable probe to the front of the queue.
 The server publishes `MediaFileProbeRequested(mediaFileId)` in `services.events.library`.
-The library listener uses the shared enqueue operation.
-Probing runs only through background file processing.
+The library listener uses the shared enqueue operation, so the file keeps one execution.
+The probe dispatcher then picks that execution before every other due execution that has not started.
+db-scheduler still picks, monitors, recovers and retries the execution.
+If the file's probe is already running, the server starts no second probe.
+The playback request cancels no running probe of another file.
+Moving the execution to the front does not shorten a quiet period or a retry backoff.
+
+The playback request then waits for the stored outcome, up to a configured bound.
+The wait ends as soon as the server stores the outcome for the requested inputs.
+The wait holds no database transaction or connection.
+A successful outcome starts playback.
+A terminal `probe_error` returns that error as a typed mutation payload error, per ADR 0026.
+Two playback requests for the same file wait for the same probe.
+
+The playback request returns the typed not-ready error, `MediaFileProbeNotReadyError`, in three cases:
+
+* The bound passes before the server stores an outcome.
+* No compatible worker is connected.
+The request returns at once, without waiting for the bound.
+* The attempt fails with a retryable reason.
+The probe keeps its backoff, and the request does not wait for the retry.
+
+In each of these cases the probe stays at the front of the queue.
+The probe runs once a compatible worker connects and the probe's retry time arrives.
+A later playback request therefore finds the outcome sooner.
+https://github.com/streamarr/streamarr-server/issues/579[streamarr/streamarr-server#579] changes playback this way.
 
 If a file has a stored terminal `probe_error`, a playback request returns that error as a typed mutation payload error.
 The server does not enqueue another task for that file.
@@ -703,7 +759,8 @@ After ADR 0033, a worker produces the media.
 * Playback consumers use a `MediaProbe` derived from stored rows instead of a probe process result.
 * The server adds two entities: `MediaFileContainerInfo` and `MediaFileStreamInfo`.
 The server maps the complete probe result to rows in those tables.
-* Playback exposes typed errors for unavailable probe data and recorded terminal media failures.
+* Playback waits, within a configured bound, for a probe that the playback request moved to the front of the queue.
+Playback exposes typed errors for unavailable probe data and recorded terminal media failures.
 The server continues to retry transient failures in the background.
 db-scheduler runs the probe executions and stores when each execution should retry.
 Before the server publishes a result or ends an execution, the server rejects an attempt whose inputs a newer request replaced.
@@ -749,11 +806,22 @@ https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-ser
 Fourth, a stream that carries its HDR10 static metadata only in its HEVC bitstream reports none.
 Every HEVC stream in MPEG-TS or in a raw HEVC file works this way.
 streamarr/streamarr-server#394 reads that metadata from the first frame.
+* Probes and job attempts no longer compete for a worker's slots.
+Before this amendment, probes shared the playback slots, and a worker defaulted to one slot.
+A cold scan of about 1,800 movies on a 72-core host then spent about 20 minutes probing, at about 1.6 files per second.
+About 90 % of the host's CPU stayed idle during that scan.
+A large first scan now probes as fast as the worker's cores and storage allow.
+* During a scan, probes can load every core of the worker's host except 3.
+An operator who runs other work on that host lowers the probe capacity with the worker setting.
 
 == Rejected Alternatives
 
-* Let playback probe a file when no stored outcome exists.
-Playback would wait for the probe and take responsibility for work that belongs to the library.
+* Let playback run an ad hoc probe outside the durable queue when no stored outcome exists.
+The ad hoc probe would duplicate the queued probe of the same file.
+The ad hoc probe would also bypass db-scheduler's retries and the workers' probe capacity.
+Playback instead moves the file's queued probe to the front and waits for the stored outcome.
+* Return the not-ready error at once and let the client retry.
+The viewer would press play again until a scan's probe reached the file, which can take many minutes in a large library.
 * Store raw ffprobe JSON beside the typed columns.
 The server would store the same facts twice, while playback and the worker contract would still use typed fields.
 * Store summary columns on the container row.
@@ -855,6 +923,12 @@ The playlist would also advertise durations that the copy does not have.
 * Compute the output frame rate at session start or in each job attempt.
 Each attempt that needed a packet scan would read the file again.
 Attempts that run different versions of the rule could encode on different frame grids.
+* Keep one shared slot pool for probes and job attempts.
+While a probe held the only slot, playback waited for the scan.
+More shared slots would speed up probes, but the extra slots would also admit encodes that the CPU cannot run at speed, as link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019] observed.
+* Keep a fixed server-wide probe limit.
+The server does not know how many cores each worker has.
+A fixed limit leaves a large worker idle and overloads a small worker.
 
 == Evidence
 
@@ -995,6 +1069,7 @@ Its 95 % intervals come from bootstrap resampling.
 * link:0007-transcode-first-with-smart-remux.adoc[ADR 0007: Transcode-First With Smart Remux]
 * link:0013-stream-decision-architecture.adoc[ADR 0013: Stream Decision Architecture]
 * link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018: Live Playback Authority and Outbound Transcode Workers]
+* link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019: Recoverable Just-In-Time HLS Segment Delivery]
 * link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026: Mutations Return Payloads Whose Expected Errors Are Typed Unions; Top-Level Errors Carry Failure]
 * link:0027-library-operations-are-durable-jobs.adoc[ADR 0027: Library Operations Are Durable Jobs; a Restart Runs Them Again, and a Stop Leaves the Library Usable]
 * link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033: The Transcode Worker Is a Separate Service and Repository, and the Server Runs No FFmpeg]
@@ -1022,5 +1097,8 @@ Its 95 % intervals come from bootstrap resampling.
 * https://github.com/streamarr/streamarr-server/issues/505[streamarr/streamarr-server#505: Serve CEA-608/708 captions as WebVTT subtitle renditions]
 * https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511: Play to the advertised end when a stream ends early or the source is truncated]
 * https://github.com/streamarr/streamarr-server/issues/546[streamarr/streamarr-server#546: Store each file's chapters, and expose them so clients can show a chapter menu]
+* https://github.com/streamarr/streamarr-server/issues/578[streamarr/streamarr-server#578: Probe a library as fast as the workers allow, and keep playback capacity free during scans]
+* https://github.com/streamarr/streamarr-server/issues/579[streamarr/streamarr-server#579: Start playback of an unprobed file by probing it first]
 * https://github.com/streamarr/streamarr-transcode-worker/issues/18[streamarr/streamarr-transcode-worker#18: Write playable sample entries for HEVC output and Dolby Vision copies]
 * https://github.com/streamarr/streamarr-transcode-worker/issues/24[streamarr/streamarr-transcode-worker#24: The worker's part of probe version 4]
+* https://github.com/streamarr/streamarr-transcode-worker/issues/93[streamarr/streamarr-transcode-worker#93: Advertise probe capacity from the worker's cores, apart from playback slots]

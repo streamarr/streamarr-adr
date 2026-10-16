@@ -234,6 +234,18 @@ The codec string never comes from the profile name.
 * The container cropping of each video stream, which a Matroska `PixelCrop` element or an MP4 `clap` box carries.
 The width and height stay the size before cropping.
 The quality ladder and the playlist's `RESOLUTION` use the size after cropping, as they use the size after rotation.
+* The HDR10 static metadata that the container declares for each video stream.
+The HDR10 static metadata is the mastering display color volume and the content light level.
+The worker reads both from the stream side data of the same ffprobe run.
+An MP4 `mdcv` or `clli` box or the Matroska mastering elements carry that side data.
+The values use the units of the HEVC SEI messages with payload types 137 and 144.
+https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396] builds those SEI messages from the stored values and writes them into the `hvcC` record of an HDR10 copy.
+Every job attempt of that variant then writes the same initialization segment.
+Some streams carry the values only in the SEI messages of their HEVC bitstream.
+Those streams report no static metadata, because probe version 4 reads no frames.
+A missing value therefore does not mean that a PQ stream is PQ10.
+The static metadata is not the raw color signaling.
+The transfer, primaries, matrix and range of a stream stay with the later probe version.
 * The container's chapters, with each chapter's start time, end time and title.
 The chapter times use the timeline of the keyframe positions.
 A future chapter menu and the markers of https://github.com/streamarr/streamarr-server/issues/285[streamarr/streamarr-server#285] use the chapters.
@@ -642,8 +654,10 @@ The source snapshot currently uses file size and modification time.
 * Select streams other than the chosen video stream and the first audio stream.
 The code that decides how to transcode would need the selected stream indices.
 The worker contract and command builder would also need those indices.
-* Report typed codec profiles and levels, color properties and static HDR metadata in a later probe version.
+* Report typed codec profiles and levels and the color properties in a later probe version.
+The color properties are the transfer, primaries, matrix and range.
 Probe version 4 keeps only each audio stream's profile name, as ffprobe prints it.
+That later version also reads the HDR10 static metadata of a stream that carries the metadata only in its HEVC bitstream.
 That later version also reads HDR10+ metadata and Dolby Vision RPUs from frames.
 An RPU (reference processing unit) carries Dolby Vision's per-frame picture-adjustment instructions.
 The later version can then report HDR10+ and Dolby Vision as present or absent.
@@ -698,7 +712,7 @@ A source whose index lists a last keyframe that the probe cannot read also plays
 That step reads the whole file once.
 * The upgrade to probe version 4 deletes the keyframe positions that version 3 stored.
 Each source without a usable container index then needs its keyframe step again.
-* Probe version 4 leaves three known gaps.
+* Probe version 4 leaves four known gaps.
 First, `-scan_all_pmts 0` could omit the streams of a later program in a multi-program transport stream.
 The library sample held no multi-program transport stream.
 Second, 15 PGS subtitle streams in 7 of the 300 sampled files still had no size.
@@ -706,6 +720,9 @@ None of the packets of those streams fell within 200 s or 1 GB.
 Third, a Dolby Vision profile 5 stream in MPEG-TS without the Dolby Vision descriptor reads as `UNSPECIFIED`.
 ADR 0013 records how such a stream plays until a later probe reads RPUs from frames.
 https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] describes that later probe.
+Fourth, a stream that carries its HDR10 static metadata only in its HEVC bitstream reports none.
+Every HEVC stream in MPEG-TS or in a raw HEVC file works this way.
+streamarr/streamarr-server#394 reads that metadata from the first frame.
 
 == Rejected Alternatives
 
@@ -829,6 +846,25 @@ The other 4 did not match, because ffprobe reports HE-AAC where the copied `esds
 * ffprobe's named profile and level matched 41 of 59 video copies.
 * FFmpeg's mp4 muxer keeps the sample entry tag (`hvc1`, `hev1` or `dvh1`) of an MP4 or MOV source.
 The muxer writes `hev1` for HEVC from Matroska, MPEG-TS or raw streams.
+
+[[evidence-static-hdr]]
+=== HDR10 static metadata
+
+These measurements ran on 2026-10-15 against ffprobe 8.1.3 in the pinned worker image.
+The sources were short HDR10 test streams that FFmpeg's libx265 encoder generated.
+The measurements ran ffprobe with the probe's `-show_streams` arguments.
+
+* An MP4 file with `mdcv` and `clli` boxes reported both values as stream side data.
+ffprobe printed each chromaticity coordinate over 50000 and each luminance over 10000.
+Those fractions hold the SEI units exactly.
+* A Matroska file with the mastering elements reported both values as stream side data.
+ffprobe printed reduced fractions, such as 177/250 for 35400 units.
+Rounding each fraction to the nearest SEI unit gave the encoded values exactly.
+* A Matroska file reported no light level when its MaxCLL or its MaxFALL was 0.
+The file still held both elements.
+* MP4 files with `hvc1` or `hev1` sample entries reported neither value as stream side data when only the `hvcC` record and the samples held the SEI messages.
+A Matroska file without the mastering elements, an MPEG-TS file and a raw HEVC file also reported none.
+* In all of those files, ffprobe reported both values as frame side data of the first frame.
 
 [[evidence-frame-rate]]
 === Output frame rate

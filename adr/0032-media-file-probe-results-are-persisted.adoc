@@ -9,6 +9,11 @@ db-scheduler picks, monitors, recovers, and retries each probe execution.
 `media_file_probe_task_request` holds the inputs that each file's latest probe request specifies.
 The server guards each result with those requested inputs instead of a claim id and a lease.
 
+Another amendment numbers the probe versions in the order in which they shipped (<<later-probe-versions>>).
+The keyframe positions shipped first, as probe version 3.
+The facts for https://github.com/streamarr/streamarr-server/issues/501[streamarr/streamarr-server#501] are probe version 4, which includes every fact of version 3.
+Version 2 is unused.
+
 == Context
 
 Streamarr learns a media file's technical properties by running ffprobe.
@@ -38,13 +43,14 @@ This ADR first moves probing into library processing.
 It also defines the result that workers will later produce.
 
 Each stored probe outcome records the probe version that produced it.
-Probe version 1 describes each video stream by its codec, size, frame rate and bitrate.
+Probe versions 1 and 3 describe each video stream by its codec, size, frame rate and bitrate.
 With those facts alone, the transcode decision cannot tell an 8-bit stream from a 10-bit stream.
 The transcode decision also cannot tell an SDR stream from an HDR stream.
 The transcode decision cannot compute the codec string that the playlist's `CODECS` attribute must carry for a stream copy.
 The transcode decision also cannot tell which frame rate an encode should use when a file's declared rates disagree.
-Probe version 2 adds the missing facts for the playback capabilities epic, https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399].
-Probe version 2 describes dynamic range in the vocabulary of link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036].
+Probe version 4 adds the missing facts for the playback capabilities epic, https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399].
+Probe version 4 also adds each file's chapters, which a future chapter menu uses.
+Probe version 4 describes dynamic range in the vocabulary of link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036].
 
 == Decision
 
@@ -62,7 +68,9 @@ Each row also stores `probe_version` and an optional typed `probe_error` code.
 `media_file_stream_info` holds one row per stream.
 Each row stores the stream type, index, codec, width, height, frame rate, channels, and bitrate.
 The row also stores the language and the default and forced flags.
-Probe version 2 adds the stream facts listed in <<probe-version-2,the probe version 2 section>>.
+Probe version 4 adds the stream facts listed in <<probe-version-4,the probe version 4 section>>.
+Probe version 4 also reports the container's chapters.
+https://github.com/streamarr/streamarr-server/issues/546[streamarr/streamarr-server#546] decides how the server stores the chapters.
 The tables correspond to ffprobe's `format` and `streams` sections.
 Container properties and `probe_error` are nullable.
 The media file reference, source size, modification time, and `probe_version` are required.
@@ -81,7 +89,7 @@ Derive the playback `MediaProbe` from the stream rows rather than storing summar
 The derived `MediaProbe` uses the same streams as the FFmpeg command.
 Those are the chosen video stream and the first audio stream (`0:a:0`).
 The chosen video stream is the first video stream that is not an attached picture, such as embedded cover art.
-Probe version 1 used the first video stream (`0:v:0`) instead.
+Before probe version 4, the transcode decision read the first video stream (`0:v:0`) instead.
 That first video stream can be cover art.
 Each transcode job names the chosen video stream's index.
 FFmpeg therefore maps the same stream that the transcode decision read.
@@ -195,7 +203,7 @@ The dispatcher probes an unchanged source without waiting for a quiet period.
 If the probe succeeds, the probe returns the complete container-and-stream result.
 For video streams, the result includes width, height, and frame rate.
 The result includes bitrate for any stream that reports a bitrate.
-Probe version 2 adds the facts listed in <<probe-version-2,the probe version 2 section>>.
+Probe version 4 adds the facts listed in <<probe-version-4,the probe version 4 section>>.
 If the probe encounters a terminal media error, the probe returns a typed error.
 Replace `MediaProbe` as the probe's return type.
 Derive `MediaProbe` from the complete result for playback consumers.
@@ -203,19 +211,33 @@ Extend the parser to retain the per-stream dimensions, frame rate, and video bit
 The server first ran ffprobe itself.
 Under ADR 0033, the worker runs ffprobe and returns the result through the same contract.
 
-[[probe-version-2]]
-=== Probe version 2 records the facts the transcode decision needs
+[[probe-version-4]]
+=== Probe version 4 records the facts that playback needs
 
 Streamarr computes facts at probe time wherever it can.
 Playback then reads those facts instead of computing them.
-Probe version 2 adds these facts to a successful outcome:
+Probe version 4 adds these facts to a successful outcome:
 
 * The chosen video stream, which the transcode decision and the frame-rate rule read.
 * The dynamic range of each video stream, as a `VideoDynamicRange`.
-The probe fills the `VideoDynamicRange` from each stream's headers and configuration records, as the probe version 2 section of ADR 0036 decides.
+The probe fills the `VideoDynamicRange` from each stream's headers and configuration records, as the probe version 4 section of ADR 0036 decides.
 * The bit depth and chroma subsampling of each video stream.
 * The rotation of each video stream, which the probe reads from the stream's display matrix.
 * The frame-rate rule's inputs and the output frame rate that the rule chose, as <<output-frame-rate,the next section>> describes.
+* The end time of each video and audio stream, where the container header states that end time.
+https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511] uses the end times to find a stream that ends early.
+* The sample rate of each audio stream.
+The MP3 copy rule needs the sample rate, because the fMP4 muxer refuses MP3 below 16 kHz.
+* The profile name of each audio stream, kept as ffprobe prints it, such as `Dolby Digital Plus + Dolby Atmos` or `DTS-HD MA`.
+https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503] derives the `CHANNELS` attribute of an E-AC-3 Atmos rendition from the profile name.
+The codec string never comes from the profile name.
+* The container cropping of each video stream, which a Matroska `PixelCrop` element or an MP4 `clap` box carries.
+The width and height stay the size before cropping.
+The quality ladder and the playlist's `RESOLUTION` use the size after cropping, as they use the size after rotation.
+* The container's chapters, with each chapter's start time, end time and title.
+The chapter times use the timeline of the keyframe positions.
+A future chapter menu and the markers of https://github.com/streamarr/streamarr-server/issues/285[streamarr/streamarr-server#285] use the chapters.
+The worker reads the chapters with ffprobe's `-show_chapters` option.
 * The exact codec string of every video and audio stream, in the form that RFC 6381 defines.
 The probe computes the codec string from the stream's decoder configuration record.
 Depending on the codec, that record is `avcC`, `hvcC`, `av1C`, `dvcC` or `dvvC`, or `esds`.
@@ -229,8 +251,8 @@ The worker alone holds the tag rule, which picks a copy's sample entry.
 https://github.com/streamarr/streamarr-transcode-worker/issues/18[streamarr/streamarr-transcode-worker#18] changes the tag rule.
 The changed tag rule writes a `dvh1` sample entry as `hvc1`.
 The changed tag rule also writes a `dva1` sample entry as `avc1`.
-Probe version 2 includes the changed tag rule.
-Probe version 2 therefore stores each copy's final codec string, after those rewrites.
+Probe version 4 includes the changed tag rule.
+Probe version 4 therefore stores each copy's final codec string, after those rewrites.
 The stored codec string names the sample entry that the copy really carries.
 Any later change to the tag rule increases the probe version.
 The re-scan that the server queues on the upgrade to the new probe version then refreshes the stored codec strings.
@@ -293,7 +315,7 @@ The measurements are in <<evidence-frame-rate>>.
 [[probe-limits]]
 === ffprobe reads up to 200 s or 1 GB and does not scan for every program map table
 
-The worker runs ffprobe with `-analyzeduration 200M -probesize 1G -scan_all_pmts 0` for probe version 2.
+The worker runs ffprobe with `-analyzeduration 200M -probesize 1G -scan_all_pmts 0` for probe version 4 and later.
 `-analyzeduration 200M` lets ffprobe analyze up to 200 s of media.
 `-probesize 1G` lets ffprobe read up to 1,000,000,000 bytes.
 A program map table lists the streams of one program in an MPEG-TS file.
@@ -345,8 +367,9 @@ Stored keyframe positions are probe facts.
 The <<probe-version-rules,probe version rules>> therefore apply to stored keyframe positions.
 The server offers a stream copy only after it knows the source's keyframe positions.
 Until the server knows those keyframe positions, the server encodes the video.
-The server applies this keyframe condition for a stream copy from the probe version that stores keyframe positions, which https://github.com/streamarr/streamarr-server/issues/66[streamarr/streamarr-server#66] adds.
-Before that probe version takes effect, the server copies the video under ADR 0013's interim copy rule.
+The server applies this keyframe condition for a stream copy from probe version 3, which stores keyframe positions.
+https://github.com/streamarr/streamarr-server/issues/66[streamarr/streamarr-server#66] adds probe version 3.
+Before probe version 3 takes effect, the server copies the video under ADR 0013's interim copy rule.
 A stream copy's media playlist advertises the real duration of each media segment.
 The keyframe positions determine those durations.
 link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] defines how a job attempt seeks to a keyframe position.
@@ -436,25 +459,27 @@ When an upgrade needs new probe data, the server queues a re-scan itself.
 The re-scan reuses the existing scan library operation and the durable probe jobs.
 Streamarr adds no separate backfill mechanism.
 A ServerAdmin does not have to start the re-scan.
-The upgrade to probe version 2 deletes the version 1 outcomes before the re-scan, as <<probe-version-2-migration,the section on the version 2 migration>> describes.
-On every upgrade to a probe version after version 2, each file's older outcome stays playable wherever the server can still read that outcome.
+The upgrade to probe version 4 deletes the version 1 and version 3 outcomes before the re-scan, as <<probe-version-4-migration,the section on the version 4 migration>> describes.
+On every upgrade to a probe version after version 4, each file's older outcome stays playable wherever the server can still read that outcome.
 The older outcome stays playable until the server stores the file's new outcome.
 Upgrades of production instances also keep older readable outcomes playable.
 The upgrade path must stay clear and clean, so that production instances upgrade gracefully.
 
-[[probe-version-2-migration]]
-=== Probe version 2 deletes version 1 outcomes, and the server queues a re-scan
+[[probe-version-4-migration]]
+=== Probe version 4 deletes version 1 and version 3 outcomes, and the server queues a re-scan
 
-The migration to probe version 2 deletes every stored version 1 outcome and its stream rows.
-The server cannot read version 1 outcomes correctly.
-Version 2 changes how the server interprets an outcome.
+The migration to probe version 4 deletes every stored version 1 and version 3 outcome and its stream rows.
+The migration also deletes the keyframe positions that a version 3 outcome stores.
+The server cannot read version 1 and version 3 outcomes correctly.
+Version 4 changes how the server interprets an outcome.
 In that case, the rules in <<probe-version-rules,the section on source changes and probe versions>> require the migration to delete incompatible outcomes.
-A version 1 outcome would read as an `UNSPECIFIED` dynamic range.
+A version 1 or version 3 outcome would read as an `UNSPECIFIED` dynamic range.
 The server would then copy an HDR file or encode that file without tone mapping.
-The video stream that a version 1 outcome describes may be cover art rather than the chosen video stream.
-Deleting the version 1 outcomes is a breaking change.
+Such an outcome does not name the chosen video stream.
+The transcode decision would then read the first video stream, which may be cover art.
+Deleting the version 1 and version 3 outcomes is a breaking change.
 Streamarr accepts that breaking change only while Streamarr has no production instances.
-On the upgrade to probe version 2, the server queues a re-scan itself, as <<upgrade-rescan,the section on source changes and probe versions>> describes.
+On the upgrade to probe version 4, the server queues a re-scan itself, as <<upgrade-rescan,the section on source changes and probe versions>> describes.
 The re-scan probes the files of every library again.
 The re-scan requests a probe for every file without a current outcome.
 Until a file's probe stores an outcome, a playback request for that file returns the typed not-ready error.
@@ -462,20 +487,32 @@ That playback request also requests the probe, as <<playback,the Playback sectio
 
 *Why:* Streamarr has no production instances.
 No installation therefore loses playback that it relies on.
-If the server kept version 1 outcomes, playback would make the decisions that probe version 2 exists to prevent.
+If the server kept version 1 or version 3 outcomes, playback would make the decisions that probe version 4 exists to prevent.
 Playback would keep making those decisions until the re-scan refreshed each file.
 
 [[later-probe-versions]]
-=== Each later change that adds probe facts adds its own probe version
+=== Each change that adds probe facts adds its own probe version
 
-Each later change that adds probe facts increases the probe version when that change merges.
-Such a change does not add its facts to probe version 2.
-The later probe versions add these facts:
+Each change that adds probe facts increases the probe version when that change merges.
+Each probe version reports every fact of the versions before it.
+The probe versions are numbered in the order in which they ship:
 
-* The keyframe positions of the chosen video stream, as <<keyframe-positions,the keyframe section>> describes.
+* Probe version 1 reports the container's format, duration and bitrate.
+It also reports each stream's codec, language, size, frame rate, channels, bitrate and flags.
+* Probe version 3 adds the keyframe positions of the chosen video stream, as <<keyframe-positions,the keyframe section>> describes.
 https://github.com/streamarr/streamarr-server/issues/66[streamarr/streamarr-server#66] adds the keyframe positions.
-* The end time of each stream, where the container header states that end time.
-https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511] adds the end times.
+* Probe version 4 adds the facts that <<probe-version-4,the probe version 4 section>> lists.
+https://github.com/streamarr/streamarr-server/issues/501[streamarr/streamarr-server#501] adds those facts.
+Probe version 4 also reports the keyframe positions of version 3.
+
+Probe version 2 is unused.
+This ADR first gave version 2 to the facts for streamarr/streamarr-server#501.
+The keyframe positions were ready first, so they shipped as version 3.
+No server requests probe version 2, and no worker advertises it.
+
+A change after probe version 4 does not add its facts to probe version 4.
+The probe versions after version 4 add these facts:
+
 * The title and the hearing-impaired flag of each subtitle stream.
 https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60] adds the subtitle titles and each subtitle stream's hearing-impaired flag.
 * The title of each audio stream.
@@ -606,6 +643,7 @@ The source snapshot currently uses file size and modification time.
 The code that decides how to transcode would need the selected stream indices.
 The worker contract and command builder would also need those indices.
 * Report typed codec profiles and levels, color properties and static HDR metadata in a later probe version.
+Probe version 4 keeps only each audio stream's profile name, as ffprobe prints it.
 That later version also reads HDR10+ metadata and Dolby Vision RPUs from frames.
 An RPU (reference processing unit) carries Dolby Vision's per-frame picture-adjustment instructions.
 The later version can then report HDR10+ and Dolby Vision as present or absent.
@@ -613,7 +651,7 @@ https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-ser
 * Identify a Dolby Vision stream without a configuration record that is really profile 5, by reading the RPU header of the stream's first frame.
 https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] adds that check.
 * Record a `MediaFileProbePropertyIssue`.
-Probe version 2 records no such issue, as ADR 0036 decides.
+Probe version 4 records no such issue, as ADR 0036 decides.
 https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] decides where these issues are stored.
 
 == Consequences
@@ -646,19 +684,21 @@ Playback can use a compatible outcome while the probe runs.
 If a migration invalidates an incompatible outcome, playback cannot use the file until the server records a new outcome.
 * ADR 0013's pipeline reads its probe input from rows.
 The pipeline itself is unchanged.
-* After the upgrade to probe version 2, no file has a usable outcome until a scan or a playback request probes the file again.
-The server queues a re-scan itself on the upgrade to probe version 2.
-* A full scan under probe version 2 reads more of each library.
-The re-scan on the upgrade to probe version 2 is such a full scan.
+* After the upgrade to probe version 4, no file has a usable outcome until a scan or a playback request probes the file again.
+The server queues a re-scan itself on the upgrade to probe version 4.
+* A full scan under probe version 4 reads more of each library.
+The re-scan on the upgrade to probe version 4 is such a full scan.
 For a library of 23,210 video files, a version 1 scan reads about 21 GB.
-A version 2 scan reads an estimated 570 GB more.
+The probe limits of version 4 read an estimated 570 GB more.
 The 95 % interval for that extra amount is 270–990 GB.
 At 110 MB/s, the extra 570 GB takes about 86 minutes to transfer.
 About 2 % of files also need the frame-rate rule's packet scan over 30 s of media.
 * A source whose container has no usable keyframe index plays through an encode until its keyframe step finishes.
 A source whose index lists a last keyframe that the probe cannot read also plays through an encode until its keyframe step finishes.
 That step reads the whole file once.
-* Probe version 2 leaves three known gaps.
+* The upgrade to probe version 4 deletes the keyframe positions that version 3 stored.
+Each source without a usable container index then needs its keyframe step again.
+* Probe version 4 leaves three known gaps.
 First, `-scan_all_pmts 0` could omit the streams of a later program in a multi-program transport stream.
 The library sample held no multi-program transport stream.
 Second, 15 PGS subtitle streams in 7 of the 300 sampled files still had no size.
@@ -715,7 +755,7 @@ A scan that requests new inputs would therefore wait for the retry time even if 
 If the source became unreadable after the scan listed the file, the whole scan would fail instead of just the probe attempt.
 * Retry a failed file on each scan without saving why the probe failed.
 An administrator could not see why the file never became playable.
-* Keep version 1 outcomes usable while the re-scan refreshes them to probe version 2.
+* Keep version 1 and version 3 outcomes usable while the re-scan refreshes them to probe version 4.
 Those outcomes would read as an `UNSPECIFIED` dynamic range.
 Until the re-scan refreshed an HDR file's outcome, the server would copy that file or encode it without tone mapping.
 * Tell the ServerAdmin to run a scan after an upgrade, instead of having the server queue the re-scan.
@@ -743,8 +783,11 @@ With the limits, an input that seeks into one MPEG-TS source read 220 MB instead
 That input also opened 0.5–0.9 s later.
 * Have the probe report the facts behind the HEVC tag and have the server apply the tag rule.
 The tag rule would then live in two places, the worker and the server.
-* Add keyframe positions, stream end times, subtitle titles and caption detection to probe version 2.
-Probe version 2 would then wait for four unrelated changes before https://github.com/streamarr/streamarr-server/issues/501[streamarr/streamarr-server#501] could play HDR and 10-bit sources as SDR.
+* Add subtitle titles and caption detection to probe version 4.
+Probe version 4 would then wait for two unrelated changes before https://github.com/streamarr/streamarr-server/issues/501[streamarr/streamarr-server#501] could play HDR and 10-bit sources as SDR.
+* Give the facts for https://github.com/streamarr/streamarr-server/issues/501[streamarr/streamarr-server#501] probe version 2 after probe version 3 has shipped.
+The server compares probe versions by number.
+A version 3 outcome would then count as newer than a version 2 outcome, although the version 3 outcome lacks the facts of version 2.
 * Scan every packet of every file to find its keyframe positions.
 The scan would read whole files whose container index already lists the keyframes.
 * Read keyframe positions only from Matroska Cues.
@@ -759,7 +802,7 @@ Attempts that run different versions of the rule could encode on different frame
 
 == Evidence
 
-Each group below holds the measurements behind one part of probe version 2.
+Each group below holds the measurements behind one part of probe version 4.
 The measurements ran on 2026-09-27 against ffprobe and FFmpeg 8.1.2 in the pinned worker image.
 The write-ups and harnesses for these measurements were not committed.
 This Evidence section therefore gives the results.
@@ -851,6 +894,7 @@ Its 95 % intervals come from bootstrap resampling.
 * https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60: Extract text subtitle tracks in a durable job, and serve them as WebVTT renditions]
 * https://github.com/streamarr/streamarr-server/issues/66[streamarr/streamarr-server#66: Find source keyframes in the container index, and scan files that have no index]
 * https://github.com/streamarr/streamarr-server/issues/248[Issue #248: Restore Maven reactor]
+* https://github.com/streamarr/streamarr-server/issues/285[streamarr/streamarr-server#285: User-editable chapter markers]
 * https://github.com/streamarr/streamarr-server/issues/415[Issue #415: Probe existing library files without waiting for a quiet period]
 * https://github.com/streamarr/streamarr-server/issues/417[Issue #417: Record why each item fails]
 * https://github.com/streamarr/streamarr-server/issues/418[Issue #418: Finish scans after the server records all required results]
@@ -862,5 +906,6 @@ Its 95 % intervals come from bootstrap resampling.
 * https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503: Serve each audio track as its own rendition, and switch languages without restarting the video]
 * https://github.com/streamarr/streamarr-server/issues/505[streamarr/streamarr-server#505: Serve CEA-608/708 captions as WebVTT subtitle renditions]
 * https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511: Play to the advertised end when a stream ends early or the source is truncated]
+* https://github.com/streamarr/streamarr-server/issues/546[streamarr/streamarr-server#546: Store each file's chapters, and expose them so clients can show a chapter menu]
 * https://github.com/streamarr/streamarr-transcode-worker/issues/18[streamarr/streamarr-transcode-worker#18: Write playable sample entries for HEVC output and Dolby Vision copies]
-* https://github.com/streamarr/streamarr-transcode-worker/issues/24[streamarr/streamarr-transcode-worker#24: The worker's part of probe version 2]
+* https://github.com/streamarr/streamarr-transcode-worker/issues/24[streamarr/streamarr-transcode-worker#24: The worker's part of probe version 4]

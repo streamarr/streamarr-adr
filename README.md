@@ -63,6 +63,7 @@ None at present.
 - [ADR 0043: Audio Tracks and Text Subtitles Are HLS Renditions, so Switching Them Never Restarts the Video](adr/0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc)
 - [ADR 0044: Encoder Headroom, Measured in Pixel Rate, Decides When Extra Variants Start, and One Preset Scale Serves Every Software Encoder](adr/0044-encoder-headroom-and-the-preset-scale.adoc)
 - [ADR 0045: In Original Quality, a Client Direct-Plays Each File Its Capability Declaration Covers, and Each Client Uses Its Platform's Own Player](adr/0045-clients-direct-play-covered-files-and-use-platform-players.adoc)
+- [ADR 0046: Home Continue Watching Keeps a Cap without Backfill Reads](adr/0046-home-continue-watching-keeps-a-cap-without-backfill-reads.adoc) — proposed
 
 ## Domain language
 

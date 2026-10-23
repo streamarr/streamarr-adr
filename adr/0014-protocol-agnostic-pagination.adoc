@@ -13,6 +13,13 @@ Swapping GraphQL for REST would require rewriting the service layer, violating t
 The Relay Connection spec (https://relay.dev/graphql/connections.htm) is inherently GraphQL-specific.
 REST APIs use different pagination models such as JSON:API cursor pagination (https://jsonapi.org/profiles/ethanresnick/cursor-pagination/).
 
+Later, sixteen connections paged in four different ways.
+Library and Continue Watching cursors carried the whole media filter.
+Administration lists reused that cursor but each wrote its own seek.
+Device, sharing and invitation lists carried only an item ID, looked up that item's row, and failed with `INVALID_CURSOR` once the item was removed.
+The security audit log used its own cursor format, and three lists paged in memory.
+Every list repeated reverse handling, over-fetching and cursor checks, and each new list chose among these patterns again.
+
 == Decision
 
 Extract Relay-specific pagination logic from the service layer into the GraphQL adapter layer.
@@ -27,6 +34,22 @@ Cursor encoding, decoding, and filter validation are protocol-layer concerns han
 
 The database keyset pagination queries (jOOQ seek conditions) are completely unchanged.
 
+=== One way to page every list
+
+Every cursor-paginated list pages through one shared `Pager`.
+
+* A list implements `PagedList`. It declares its order: the type of value it sorts by and one direction for that value and the item ID. It reads up to a limit of rows beyond a position in that order. Nothing else is list-specific.
+* A position is a typed sort value and an item ID. `Pager` turns reads beyond positions into a page and its `hasNextPage` and `hasPreviousPage` flags. Lists never strip anchor rows, over-fetch or reverse results themselves.
+* A position does not need a row. When the item a cursor names has left the list, the next page starts where that item was. No list fails a cursor because its item was removed.
+* `Pager` rejects a position whose value cannot belong to the list's order, such as text for a list ordered by time.
+* A cursor encodes a position, the list's name and a fingerprint of the list's scope, such as the Profile. It continues only the list and scope that issued it. A cursor from another list, another scope, or with an unreadable position fails with `INVALID_CURSOR`.
+* Decoding a cursor is total. Any cursor a client sends either yields a position or fails with `INVALID_CURSOR`, whichever decoding step rejects it. One rejection boundary wraps the whole decode, so a new field or check cannot let a different error through. Each decoder's tests derive malformed cursors from a genuine one instead of listing bad inputs by hand: every field at every depth removed or replaced by every JSON shape, the payload cut at every length, and seeded random bytes.
+* Every list pages in SQL. Repositories read rows beyond a position through one shared jOOQ keyset query, which binds each typed value exactly, so instants never pass through `java.sql.Timestamp`. No list loads its rows to sort or slice a page in memory. When a rule needs facts beyond the page, the list reads those facts in a second small query and keeps the rule in one place. The Profile picker, for example, reads the Household's Kid Profiles to decide which Profiles on the page are locked.
+* Edges expose `orderKey` through the `OrderedEdge` interface only on lists that publish live changes. Every list can compute the key, so adding live changes to another list is a schema change only.
+* Each list's integration test extends one shared contract. The contract pages the list forward and backward against PostgreSQL and checks ties and removed items.
+
+Lists move to the shared `Pager` one pull request at a time. Continue Watching moved first, and the Library moves last.
+
 == Consequences
 
 * Services are truly protocol-agnostic.
@@ -35,6 +58,21 @@ The database keyset pagination queries (jOOQ seek conditions) are completely unc
 * `PageItem<T>` pairs each entity with its sort-field value so adapters can build cursors without knowing entity internals.
 * Cursor format is protocol-specific as Relay and JSON:API use different encodings for the same keyset state
 * Cursor filter validation (preventing mid-pagination filter changes) moves to the protocol layer boundary, consistent with "validate inputs at the API boundary" (see link:0005-tdd-and-behavior-testing.adoc[ADR 0005])
+* A new list implements two methods and extends one test contract; page flags, cursors and removed-item handling come with `Pager`.
+* After an administrator removes the device, block or invitation a page ended on, the next page loads instead of failing.
+* A continued page costs one query when the cursor's item is still in the list. When that item has left the list, one more limit-1 query decides `hasPreviousPage` or `hasNextPage`.
+* Ties on a sort value fall back to item ID in the same direction as the sort value. A list whose ties ran the other way changes its tie order when it moves.
+* Cursors issued before a list moves no longer decode. Streamarr has no production instances, and clients treat cursors as opaque.
+
+== Rejected Alternatives
+
+* Keep ID-only cursors that look up their item's row — a removed item fails the next page, and every list needs its own lookup query.
+* Let each list keep its own page assembly — every new list repeats over-fetching, reverse handling and cursor checks, and the four patterns keep drifting apart.
+* Read one row the other way on every continued page to decide the opposite flag — the common case, where the cursor's item is still listed, would cost a second query.
+* Sign cursors — clients never need to forge positions, and a forged position can only move within lists the caller may already read. Validating the decoded position against the list's order is enough.
+* Translate each decoding step's failures where it happens and list known bad cursors in tests — every new field or check could let a different error through as `INTERNAL`. Review kept finding the next malformed cursor this way.
+* Page small lists in memory — a list that looks small can grow without notice. Profile activity loaded a Profile's whole viewing history on every page request. Two ways to page would also let the in-memory lists drift from the shared contract.
+* Expose `orderKey` on every connection — administration lists would carry a field that no client reads until they publish live changes.
 
 == References
 

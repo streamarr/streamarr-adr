@@ -321,11 +321,41 @@ _Avoid_: hold threshold, real time (as the speed to keep)
 The encoding load that a worker can still take on. After the worker takes on that load, every running variant in every session that the worker serves must stay at or above the speed floor.
 _Avoid_: free slots, spare capacity (unqualified)
 
+**Production speed**:
+The media seconds that a job attempt produces per second of wall-clock time. The worker measures it from each media segment's production time, which leaves out the worker's waits for earlier uploads, and reports the production time with the segment's upload (ADR 0032, ADR 0044).
+_Avoid_: encode speed, transcode rate, arrival rate
+
 **Encoder preset**:
 The encoder setting that trades encoding time for compression efficiency. Streamarr names each preset on one preset scale. The preset scale maps each name to every software encoder's own preset.
 The preset setting is a server setting. Every job carries its variant's preset to the worker.
 A variant keeps one preset for its whole life.
 _Avoid_: speed, quality setting, profile (a codec profile is a different fact)
+
+### Worker capacity
+
+**Capacity**:
+The number of items of one kind that a worker accepts at once. Each worker grants its own capacities, and the server never sends an item beyond a granted capacity (ADR 0032). A capacity of 0 accepts nothing of that kind.
+_Avoid_: limit (unqualified), quota, concurrency
+
+**Playback slots**:
+The capacity for job attempts. A worker setting fixes it until encoder headroom replaces it. Probes never use a playback slot.
+_Avoid_: slots for probes, shared slots, free slots (as encoder headroom)
+
+**Playback probe**:
+A probe that a playback request waits for. It uses the playback probe capacity, or a free unit of the background probe capacity, and runs at normal CPU priority.
+_Avoid_: urgent probe, priority probe
+
+**Background probe**:
+A probe that no playback request waits for, such as one a scan requested. It uses only the background probe capacity, which the worker adapts, and runs at the lowest CPU priority.
+_Avoid_: scan probe, low-priority probe
+
+**Keyframe packet scan**:
+A probe that finds keyframe positions by scanning every packet of the chosen video stream. It uses its own capacity, which is 0 while the worker runs any job attempt, and runs at the lowest CPU priority.
+_Avoid_: packet scan (unqualified), keyframe probe
+
+**Brake**:
+The worker's halving of its background probe capacity when a job attempt's production speed falls below the speed floor, and once when a job attempt starts (ADR 0032).
+_Avoid_: throttle, backoff (unqualified)
 
 ### Catalog
 

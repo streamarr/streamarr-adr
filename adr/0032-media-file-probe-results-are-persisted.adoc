@@ -14,6 +14,16 @@ The keyframe positions shipped first, as probe version 3.
 The facts for https://github.com/streamarr/streamarr-server/issues/501[streamarr/streamarr-server#501] are probe version 4, which includes every fact of version 3.
 Version 2 is unused.
 
+A further amendment gives each kind of work its own capacity on each worker (<<probe-capacity>>).
+A probe never takes a playback slot, so a scan never delays playback.
+Each worker grants its own capacities, and the server sends no work beyond them.
+The worker lowers its background probe capacity when its job attempts produce too slowly.
+That amendment also changes link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044]: the worker, not the server, measures production speed.
+
+The same amendment changes playback of a file without a stored probe outcome (<<playback>>).
+The server moves the file's durable probe to the front of the queue and waits, within a configured bound, for the stored outcome.
+Playback then starts, instead of returning the not-ready error at once.
+
 == Context
 
 Streamarr learns a media file's technical properties by running ffprobe.
@@ -524,8 +534,7 @@ Streamarr accepts that breaking change only while Streamarr has no production in
 On the upgrade to probe version 4, the server queues a re-scan itself, as <<upgrade-rescan,the section on source changes and probe versions>> describes.
 The re-scan probes the files of every library again.
 The re-scan requests a probe for every file without a current outcome.
-Until a file's probe stores an outcome, a playback request for that file returns the typed not-ready error.
-That playback request also requests the probe, as <<playback,the Playback section>> describes.
+Until a file's probe stores an outcome, a playback request for that file moves the file's probe to the front of the queue and waits for the outcome, as <<playback,the Playback section>> describes.
 
 *Why:* Streamarr has no production instances.
 No installation therefore loses playback that it relies on.
@@ -626,6 +635,8 @@ Also use `TEMPORARY` when a reply breaks the contract or an unexpected exception
 
 A canceled attempt, including `PROBE_FAILURE_CANCELLED`, did not finish.
 Retry the probe with backoff and do not record a failure reason, just as when the probe waits for a busy worker.
+A worker that reports `PROBE_FAILURE_NO_FREE_CAPACITY` refused the probe before ffprobe started.
+The server treats that refusal as a wait for a busy worker and records no failure reason (<<probe-capacity>>).
 Do not store a retryable failure as a terminal `probe_error`.
 The server does not retry a terminal error while the source and probe version stay the same.
 An unreadable source may become readable again.
@@ -639,13 +650,224 @@ Use capped backoff without requiring a file change or version bump.
 Keep one execution per media file during retries.
 Schedule retries without holding a database transaction across the delay.
 
+[[probe-capacity]]
+=== Each worker grants a separate capacity for each kind of work, and playback comes first
+
+A worker runs four kinds of work:
+
+* A job attempt produces one variant of a stream session for playback.
+* A playback probe is a probe that a playback request waits for, as <<playback>> describes.
+* A background probe is any other probe that reads ffprobe's facts, such as a probe that a scan requested.
+* A keyframe packet scan scans every packet of the chosen video stream, as <<keyframe-positions>> describes.
+
+A capacity is the number of items of one kind that a worker accepts at once.
+Each worker grants a separate capacity for each kind of work.
+The playback slots are the capacity for job attempts.
+The other three capacities are the playback probe capacity, the background probe capacity and the keyframe packet scan capacity.
+The server sends a worker an item only while the worker's capacity for that kind of item has a free unit.
+The server never sends an item beyond a granted capacity.
+The server decides only the order in which queued work goes out.
+Playback probes go first.
+Background probes go next.
+Keyframe packet scans go last.
+Each probe request names the probe's kind, so the worker knows which capacity the probe uses.
+A probe never takes a playback slot, and a job attempt never takes a probe's capacity.
+
+A worker can lower a capacity at any time during the worker's session.
+Work that already runs keeps running when a capacity drops below that work.
+The server learns of a lower capacity only when the worker's message arrives.
+A probe that the server sent before that message can therefore arrive beyond the lower capacity.
+The worker refuses such a probe with `PROBE_FAILURE_NO_FREE_CAPACITY` before ffprobe starts.
+The server treats that refusal like a busy worker.
+The probe stays queued without a failure.
+Any worker with a free unit of the right capacity can then take the probe.
+
+*Why:* The worker alone can see the worker's host.
+The worker alone sees the other services on the host, the host's disks and the cores that the worker's own job attempts use.
+The server sees viewers, but the server cannot see a worker's host.
+A worker that grants capacity also fits workers of different sizes.
+A 72-core host, a 4-CPU Kubernetes pod and a GPU node each grant what each one can run.
+The server adds up the capacities and needs no knowledge of each host.
+A capacity for each kind of work keeps urgent work from waiting behind work that the worker already accepted.
+Temporal's workers keep a separate slot pool for each task type in the same way, and Kubernetes' API Priority and Fairness keeps separate limits for each priority level.
+
+==== Playback slots
+
+The playback slots stay fixed for the worker's session.
+A worker setting sets the playback slots.
+https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499] replaces the fixed count with measured encoder headroom, as link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] decides.
+
+==== Playback probe capacity
+
+The playback probe capacity is 2 on every worker.
+The playback probe capacity stays fixed for the worker's session.
+The worker never lowers the playback probe capacity.
+A playback probe can also use a free unit of the background probe capacity.
+A background probe never uses the playback probe capacity.
+A playback probe therefore never waits behind a background probe, behind a keyframe packet scan or behind a lowered background probe capacity.
+No probe holds a particular unit.
+The server and the worker each count the playback probes and the background probes that run.
+Both compute the background units in use with the same formula: the background probes, plus the playback probes beyond the playback probe capacity.
+The server counts a probe until the probe's result arrives, so the server's counts never fall below the worker's counts.
+The worker therefore accepts every probe that the server sends while no capacity drops.
+The server measures how long each playback probe waits for a free unit.
+
+*Why:* Two units cover two viewers who start unprobed files at the same moment.
+A probe that held the unit it arrived on would let the two sides disagree.
+The server learns that a probe ended only when the probe's result arrives.
+Until then, the worker can place the next playback probe on a playback unit that the server still counts as used.
+The server would then count a free background unit that the worker has filled, and the worker would refuse a background probe although no capacity dropped.
+Other systems reserve similarly small pools: Apache Flink reserves 2 buffers for each channel, and PostgreSQL reserves 3 connections for superusers.
+A playback probe that waits for a free unit shows that 2 units are too few.
+
+==== Background probe capacity
+
+The worker adapts the background probe capacity while the worker runs.
+The adaptation is an additive-increase, multiplicative-decrease limit, `AIMDLimit` from Netflix's concurrency-limits library.
+The limit starts at 4.
+The limit never falls below 1.
+The limit never rises above the processor count of the worker's JVM.
+In Kubernetes, the deployment example sets that processor count from the worker container's CPU request.
+When a probe ends that used a background unit, and at least half of the limit was in use, the limit grows by 1.
+The limit does not grow while a judged job attempt produces below the floor.
+A brake halves the limit.
+After a brake, the limit does not grow for 30 s.
+A worker setting fixes the background probe capacity and turns the adaptation off.
+The worker reports whether the worker's background probe capacity adapts or stays fixed.
+
+*Why:* The limit uses the whole host while nothing plays.
+A fixed reserve of cores for playback would waste those cores while nothing plays.
+A fixed reserve also could not protect a software encode that needs more cores than the reserve holds.
+Netflix's PlayAPI gives work that users start the first share of its capacity, and prefetch runs only on capacity that remains.
+The 30 s pause after a brake keeps the limit from swinging up and down against a long encode.
+LinkedIn's Hodor waits in the same way before it raises a limit again.
+
+==== The brake
+
+The brake protects the production speed of the worker's job attempts.
+Production speed is the number of media seconds that a job attempt produces per second of wall-clock time, as ADR 0044 defines it.
+The worker measures each job attempt's production speed from the attempt's own media segments.
+The worker averages the production speed over the media segments that the attempt finished in the last 15 s of wall-clock time.
+The average always covers at least the attempt's last 2 media segments, even when those segments finished more than 15 s ago.
+The average is the media seconds of those segments divided by the seconds that the worker took to produce them.
+The worker judges an attempt only after the attempt's media segments have taken 15 s of production time in total.
+The brake applies when a judged attempt's average falls below 2.10× real time.
+While the average stays below 2.10×, the brake applies again once in each further 15 s.
+A brake for a slow attempt waits until 15 s have passed since the previous brake, whatever applied it.
+Every job attempt counts, including a stream copy and a remux.
+The brake also applies once when a job attempt starts, before the worker can judge that attempt.
+
+A media segment's production time runs from the end of the attempt's previous media segment until the worker finished the segment.
+The first media segment's production time runs from the moment the worker started FFmpeg.
+The production time leaves out every wait in which the worker held FFmpeg back until an earlier segment's upload was accepted.
+This includes a wait for the worker's segment memory, which other job attempts' uploads also hold.
+The worker measures production times on a monotonic clock, so a correction of the host's clock cannot apply the brake.
+The worker reports each media segment's production time with the segment's upload.
+The server takes each job attempt's production speed from those reports.
+One measurement therefore serves both the brake and ADR 0044's headroom.
+
+*Why:* The brake measures harm to playback, not how busy the host is.
+The production time leaves out waits for uploads, because probes do not slow an upload.
+A slow network or a server that holds back a producer, as https://github.com/streamarr/streamarr-server/issues/55[streamarr/streamarr-server#55] plans, would otherwise apply the brake.
+ADR 0044's headroom needs the encoder's speed for the same reason.
+Slow production catches a contended CPU and a contended disk alike.
+Google's CPI² and LinkedIn's Hodor also act on harm to the work that matters.
+The window is a span of time, not a number of segments, because media segments differ in length.
+A merged-slot segment under link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] can span several 3 s slots.
+The window of 15 s lets the brake act before a player's buffer of about 30 s runs out.
+Raw production speed of each media segment varies too much to act on.
+Livepeer had to smooth the same measurement.
+The first media segments of an attempt are slow for reasons other than contention, such as FFmpeg's startup and the source seek.
+2.10× is ADR 0044's speed floor at 3 s segments, the floor of the neediest player.
+The server does not compute a floor for each stream session yet.
+A fixed 2.10× therefore lowers the background probe capacity during some playback that keeps its own floor.
+That error slows a scan but never risks playback.
+The brake at the start of an attempt clears probes from the host while a viewer waits for the first media segment.
+The probes that run then finish within seconds, so the brake takes effect almost at once.
+
+==== Keyframe packet scan capacity
+
+The worker sets the keyframe packet scan capacity to 0 while the worker runs any job attempt.
+The keyframe packet scan capacity returns to 1 once no job attempt has run on the worker for 30 s.
+
+*Why:* A keyframe packet scan reads a whole file, and a file can take tens of seconds to scan.
+CPU priority does not protect disk reads.
+A Jellyfin user ran trickplay generation at idle CPU priority, and playback from a 7200 RPM disk still failed.
+Pausing a scan costs only time.
+After the scan finishes, playback can copy the file's video instead of encoding it.
+
+==== CPU priority
+
+The worker runs background probes and keyframe packet scans at the lowest CPU priority, nice 19.
+The worker runs playback probes at normal CPU priority.
+
+*Why:* The kernel then gives the worker's job attempts the CPU first, before the brake has measured anything.
+A process needs no privilege to lower its own priority.
+The priority applies only inside the worker's container.
+The priority therefore does not protect playback from other services on the same host.
+
+==== The server's part
+
+The server dispatches as many probes at once as the connected compatible workers grant in total.
+db-scheduler still picks, monitors, recovers and retries each probe execution.
+The server sets no fixed probe limit of its own beside the granted capacities.
+A probe that finds no free unit of the right capacity stays pending without a failure, as the section on how probes run describes.
+The worker contract carries each capacity, the probe's kind and each media segment's production time.
+https://github.com/streamarr/streamarr-server/issues/578[streamarr/streamarr-server#578] changes the server and the worker contract.
+https://github.com/streamarr/streamarr-transcode-worker/issues/93[streamarr/streamarr-transcode-worker#93] changes the worker.
+
+This amendment defers the following work:
+
+* A brake from held segment requests.
+A held segment request is a viewer's request for a media segment that does not exist yet.
+Only the server sees held segment requests.
+The worker would need a new message from the server.
+* A brake from Linux pressure stall information.
+Hosts with cgroup v1, such as RHEL 8, have no pressure stall information by default.
+* A speed floor for each stream session.
+https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499] computes that floor.
+The server can then send each job attempt's floor with the attempt.
+* A limit on how far a job attempt runs ahead of the viewer.
+https://github.com/streamarr/streamarr-server/issues/55[streamarr/streamarr-server#55] covers that limit.
+
 [[playback]]
 === Playback
 
-A playback request for a file without a usable probe outcome returns a typed not-ready error in the mutation payload, per ADR 0026.
+A playback request for a file without a usable probe outcome moves that file's durable probe to the front of the queue.
 The server publishes `MediaFileProbeRequested(mediaFileId)` in `services.events.library`.
-The library listener uses the shared enqueue operation.
-Probing runs only through background file processing.
+The library listener uses the shared enqueue operation, so the file keeps one execution.
+The probe dispatcher then picks that execution before every other due execution that has not started.
+The dispatcher sends the execution as a playback probe, which uses a worker's playback probe capacity (<<probe-capacity>>).
+db-scheduler still picks, monitors, recovers and retries the execution.
+If the file's probe is already running, the server starts no second probe.
+The playback request then waits for the running probe, even when the running probe is a background probe.
+The playback request cancels no running probe of another file.
+Moving the execution to the front does not shorten a quiet period or a retry backoff.
+
+*Why the request waits for a running background probe:* The running probe has already done part of the file's work.
+A second probe would start from the beginning.
+A probe mostly waits for the source's disk, and a second probe would wait for the same disk.
+The running background probe's low CPU priority matters only while the CPU is busy.
+
+The playback request then waits for the stored outcome, up to a configured bound.
+The wait ends as soon as the server stores the outcome for the requested inputs.
+The wait holds no database transaction or connection.
+A successful outcome starts playback.
+A terminal `probe_error` returns that error as a typed mutation payload error, per ADR 0026.
+Two playback requests for the same file wait for the same probe.
+
+The playback request returns the typed not-ready error, `MediaFileProbeNotReadyError`, in three cases:
+
+* The bound passes before the server stores an outcome.
+* No compatible worker is connected.
+The request returns at once, without waiting for the bound.
+* The attempt fails with a retryable reason.
+The probe keeps its backoff, and the request does not wait for the retry.
+
+In each of these cases the probe stays at the front of the queue.
+The probe runs once a compatible worker connects and the probe's retry time arrives.
+A later playback request therefore finds the outcome sooner.
+https://github.com/streamarr/streamarr-server/issues/579[streamarr/streamarr-server#579] changes playback this way.
 
 If a file has a stored terminal `probe_error`, a playback request returns that error as a typed mutation payload error.
 The server does not enqueue another task for that file.
@@ -703,7 +925,8 @@ After ADR 0033, a worker produces the media.
 * Playback consumers use a `MediaProbe` derived from stored rows instead of a probe process result.
 * The server adds two entities: `MediaFileContainerInfo` and `MediaFileStreamInfo`.
 The server maps the complete probe result to rows in those tables.
-* Playback exposes typed errors for unavailable probe data and recorded terminal media failures.
+* Playback waits, within a configured bound, for a probe that the playback request moved to the front of the queue.
+Playback exposes typed errors for unavailable probe data and recorded terminal media failures.
 The server continues to retry transient failures in the background.
 db-scheduler runs the probe executions and stores when each execution should retry.
 Before the server publishes a result or ends an execution, the server rejects an attempt whose inputs a newer request replaced.
@@ -749,11 +972,28 @@ https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-ser
 Fourth, a stream that carries its HDR10 static metadata only in its HEVC bitstream reports none.
 Every HEVC stream in MPEG-TS or in a raw HEVC file works this way.
 streamarr/streamarr-server#394 reads that metadata from the first frame.
+* Probes and job attempts no longer compete for a worker's slots.
+Before this amendment, probes shared the playback slots, and a worker defaulted to one slot.
+A cold scan of about 1,800 movies on a 72-core host then spent about 20 minutes probing, at about 1.6 files per second.
+About 90 % of the host's CPU stayed idle during that scan.
+A large first scan now probes as fast as the worker's cores and storage allow.
+* While nothing plays, background probes can load every core of the worker's host.
+The brake protects only the worker's own job attempts.
+Another service on the same host, such as another media server, competes with the probes.
+An operator who runs such a service on the host fixes the background probe capacity with the worker setting.
+* A scan runs more slowly while the worker plays, because the brake lowers the background probe capacity.
+Keyframe packet scans wait until playback ends.
+* The worker contract carries a production time with each media segment's upload.
+ADR 0044's headroom takes production speed from those reports instead of from arrival times at the server.
 
 == Rejected Alternatives
 
-* Let playback probe a file when no stored outcome exists.
-Playback would wait for the probe and take responsibility for work that belongs to the library.
+* Let playback run an ad hoc probe outside the durable queue when no stored outcome exists.
+The ad hoc probe would duplicate the queued probe of the same file.
+The ad hoc probe would also bypass db-scheduler's retries and the workers' probe capacity.
+Playback instead moves the file's queued probe to the front and waits for the stored outcome.
+* Return the not-ready error at once and let the client retry.
+The viewer would press play again until a scan's probe reached the file, which can take many minutes in a large library.
 * Store raw ffprobe JSON beside the typed columns.
 The server would store the same facts twice, while playback and the worker contract would still use typed fields.
 * Store summary columns on the container row.
@@ -855,6 +1095,39 @@ The playlist would also advertise durations that the copy does not have.
 * Compute the output frame rate at session start or in each job attempt.
 Each attempt that needed a packet scan would read the file again.
 Attempts that run different versions of the rule could encode on different frame grids.
+* Keep one shared slot pool for probes and job attempts.
+While a probe held the only slot, playback waited for the scan.
+More shared slots would speed up probes, but the extra slots would also admit encodes that the CPU cannot run at speed, as link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019] observed.
+* Keep a fixed server-wide probe limit.
+The server does not know how many cores each worker has.
+A fixed limit leaves a large worker idle and overloads a small worker.
+* Let the server compute each worker's probe capacity.
+The server cannot see the worker's host, such as another service or a busy disk.
+The server would also have to know the size of every worker.
+* Keep one probe capacity for every kind of probe and order the probes by priority.
+A keyframe packet scan or a background probe that a worker already accepted would then hold the capacity that a playback probe needs.
+A playback probe that skipped the capacity would arrive at a worker that granted no room for the probe.
+* Refuse keyframe packet scans during playback instead of granting a keyframe packet scan capacity of 0.
+The server would keep sending scans to a worker that plays, and each scan would come back refused.
+With several workers, the scans would keep going to the worker that plays while another worker sits idle.
+* Size the background probe capacity at the worker's cores minus 3.
+The 3 reserved cores would sit idle while nothing plays.
+A software encode at 4K can need more than 3 cores, so the reserve would not protect that encode either.
+* Use Gradient2 or hill climbing on probe throughput as the limit.
+Gradient2's defaults suit services with hundreds of requests in flight, not ffprobe on one host.
+Hill climbing needed noise handling and about ten interacting parameters in the .NET thread pool.
+* Brake on probe latency.
+Probe latency depends on each file, and probe latency measures probes, not harm to playback.
+* Measure production speed on both the server and the worker.
+Two measurements of one quantity can disagree, and each needs its own code and tests.
+* Brake against each player's own speed floor in this change.
+The server does not compute those floors yet.
+Building them here would pull ADR 0044's player rules into probe capacity.
+* Start a second, normal-priority probe when a playback request finds the file's background probe running.
+The second probe would start from the beginning and wait for the same disk.
+The running probe usually finishes first.
+* Give the worker the Linux capability to raise a running probe's CPU priority.
+Every operator, in Docker Compose and in Kubernetes, would have to grant that capability.
 
 == Evidence
 
@@ -995,12 +1268,14 @@ Its 95 % intervals come from bootstrap resampling.
 * link:0007-transcode-first-with-smart-remux.adoc[ADR 0007: Transcode-First With Smart Remux]
 * link:0013-stream-decision-architecture.adoc[ADR 0013: Stream Decision Architecture]
 * link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018: Live Playback Authority and Outbound Transcode Workers]
+* link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019: Recoverable Just-In-Time HLS Segment Delivery]
 * link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026: Mutations Return Payloads Whose Expected Errors Are Typed Unions; Top-Level Errors Carry Failure]
 * link:0027-library-operations-are-durable-jobs.adoc[ADR 0027: Library Operations Are Durable Jobs; a Restart Runs Them Again, and a Stop Leaves the Library Usable]
 * link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033: The Transcode Worker Is a Separate Service and Repository, and the Server Runs No FFmpeg]
 * link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036: Video Contracts Share One Vocabulary and Preserve Dynamic-Range Facts]
 * link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037: The Worker Delivers Fragmented MP4 Segments From FFmpeg's Standard Output, and HLS Media Segments Are fMP4 Only]
 * link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043: Audio Tracks and Text Subtitles Are HLS Renditions, so Switching Them Never Restarts the Video]
+* link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044: Encoder Headroom, Measured in Pixel Rate, Decides When Extra Variants Start, and One Preset Scale Serves Every Software Encoder]
 * https://ffmpeg.org/ffprobe.html[ffprobe documentation]
 * https://ffmpeg.org/ffmpeg-formats.html#Format-Options[FFmpeg format options: `analyzeduration` and `probesize`] and https://ffmpeg.org/ffmpeg-formats.html#mpegts[the MPEG-TS demuxer's `scan_all_pmts`]
 * https://datatracker.ietf.org/doc/html/rfc6381[RFC 6381: The "Codecs" and "Profiles" Parameters for "Bucket" Media Types]
@@ -1008,11 +1283,13 @@ Its 95 % intervals come from bootstrap resampling.
 * https://developer.apple.com/documentation/http-live-streaming/hls-authoring-specification-for-apple-devices/[Apple HLS authoring specification: the `CODECS` attribute]
 * https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60: Extract text subtitle tracks in a durable job, and serve them as WebVTT renditions]
 * https://github.com/streamarr/streamarr-server/issues/66[streamarr/streamarr-server#66: Find source keyframes in the container index, and scan files that have no index]
+* https://github.com/streamarr/streamarr-server/issues/55[streamarr/streamarr-server#55: Keep encoders from running far ahead of their viewer]
 * https://github.com/streamarr/streamarr-server/issues/248[Issue #248: Restore Maven reactor]
 * https://github.com/streamarr/streamarr-server/issues/285[streamarr/streamarr-server#285: User-editable chapter markers]
 * https://github.com/streamarr/streamarr-server/issues/415[Issue #415: Probe existing library files without waiting for a quiet period]
 * https://github.com/streamarr/streamarr-server/issues/417[Issue #417: Record why each item fails]
 * https://github.com/streamarr/streamarr-server/issues/418[Issue #418: Finish scans after the server records all required results]
+* https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499: Start extra quality levels and pick presets from measured encoder headroom]
 * https://github.com/streamarr/streamarr-server/issues/344[streamarr/streamarr-server#344: Backfill missing and outdated persisted outcomes], closed as not planned
 * https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394: The later probe version's facts, with its server and worker parts]
 * https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399: Playback capabilities epic]
@@ -1022,5 +1299,8 @@ Its 95 % intervals come from bootstrap resampling.
 * https://github.com/streamarr/streamarr-server/issues/505[streamarr/streamarr-server#505: Serve CEA-608/708 captions as WebVTT subtitle renditions]
 * https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511: Play to the advertised end when a stream ends early or the source is truncated]
 * https://github.com/streamarr/streamarr-server/issues/546[streamarr/streamarr-server#546: Store each file's chapters, and expose them so clients can show a chapter menu]
+* https://github.com/streamarr/streamarr-server/issues/578[streamarr/streamarr-server#578: Probe a library as fast as the workers allow, and keep playback capacity free during scans]
+* https://github.com/streamarr/streamarr-server/issues/579[streamarr/streamarr-server#579: Start playback of an unprobed file by probing it first]
 * https://github.com/streamarr/streamarr-transcode-worker/issues/18[streamarr/streamarr-transcode-worker#18: Write playable sample entries for HEVC output and Dolby Vision copies]
 * https://github.com/streamarr/streamarr-transcode-worker/issues/24[streamarr/streamarr-transcode-worker#24: The worker's part of probe version 4]
+* https://github.com/streamarr/streamarr-transcode-worker/issues/93[streamarr/streamarr-transcode-worker#93: Advertise probe capacity from the worker's cores, apart from playback slots]

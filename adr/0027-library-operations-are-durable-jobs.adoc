@@ -12,6 +12,10 @@ An amendment for https://github.com/streamarr/streamarr-server/issues/478[stream
 The amendment also makes an operation wait on the primary artwork requests that carry the operation's id, so a scan and a refresh that keeps existing artwork can finish after a restart.
 An operation that takes over a request also sets the operation's id on the request's results that no retry will replace.
 
+A second amendment moves the letter index out of the finishing steps.
+The transaction that adds, removes or renames a movie or series now changes the library's letter index.
+A client therefore sees the letter index grow while a scan runs.
+
 == Context
 
 link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026] fixes the contract of `startLibraryScan` and `startLibraryRefresh`: each returns the `Library` node, accepted is not completed, and a client observes `Library.status` afterwards.
@@ -137,11 +141,21 @@ Person and company artwork is background work, which an operation requests and n
 A retry after a recorded failure never holds an operation open either; its result later replaces the recorded failure.
 
 Once the walk is done and every required result is recorded, the finishing steps run in a fixed order.
-A scan updates file availability, removes items with missing files when the library's setting allows it (ADR 0038), and recalculates the letter index; a refresh or a removal recalculates the letter index, which takes over https://github.com/streamarr/streamarr-server/issues/447[#447]'s recount after a refresh.
+A scan updates file availability and removes items with missing files when the library's setting allows it (ADR 0038).
 Each finishing step is keyed by the operation's id and is idempotent, so a step that a restart interrupted has the same effect when it runs again.
 A finishing step for an operation that has ended does nothing, so a stale execution cannot apply a step to a later operation.
 To end an operation, Streamarr sets the library's final status and deletes the operation in one transaction: `HEALTHY` for a finished operation, the library's status from before the operation for a stopped one, and `UNHEALTHY` for a failed one.
-A stopped or failed operation skips the finishing steps that it has not started, except that it still recalculates the letter index, because tasks that finished can change titles.
+A stopped or failed operation skips the finishing steps that it has not started.
+
+=== The letter index
+
+The letter index counts a library's movies and series by the first letter of each sort title.
+The transaction that adds, removes or renames a movie or series also changes the library's letter index.
+The letter index is therefore current while an operation runs, and no finishing step recalculates the letter index.
+Database triggers change the letter index, so every write counts, including a cascade and a migration.
+A stopped or failed operation leaves a correct letter index, because each finished task's transaction already changed the letter index.
+While a library's titles change, Streamarr pushes the library's counts to subscribers at most once every two seconds.
+The first change after a quiet interval pushes the counts at once.
 
 === Stopping an operation
 
@@ -150,7 +164,7 @@ A stop leaves the library usable, as it was before the operation except for the 
 
 * The library returns to the status that it had before the operation started.
 * Every library item is either untouched or fully through its foreground steps: identify, fetch poster and fetch backdrop.
-* No task is stopped halfway, and the letter index is recalculated.
+* No task is stopped halfway.
 * A scan stopped before its finishing steps changes no file's availability and removes nothing (ADR 0038).
 
 A stop is not a rollback: it admits no new tasks and lets the tasks already running finish their foreground steps.
@@ -159,7 +173,7 @@ A graceful stop is meant to take seconds and at most about a minute: only the fe
 Streamarr stores the stop request with the operation.
 If the server restarts while the library is `STOPPING`, the new execution completes the stored stop.
 The execution admits no tasks and waits on the primary artwork requests that carry the operation's id, by the same rule as an operation that finishes.
-The execution then recalculates the letter index and restores the library's status from before the operation started.
+The execution then restores the library's status from before the operation started.
 A stop does not wait for probes or background artwork; they keep running, and their results appear afterwards.
 A stopped operation requests no new background artwork, and the interface distinguishes a stopped operation from details that are still arriving.
 
@@ -224,6 +238,7 @@ They return when an operation needs membership beyond the operation id that artw
 * Scheduled scans read every library's storage on schedule, even when nothing changed.
 * If Streamarr repeatedly fails to commit the transaction that sets the library's final status and deletes the operation, the library stays busy.
 The scheduled task runs the operation again with backoff until that transaction commits.
+* Two transactions that add titles with the same first letter to the same library wait for each other on that letter's row until the first transaction commits.
 
 == Rejected Alternatives
 
@@ -242,6 +257,10 @@ The scheduled task runs the operation again with backoff until that transaction 
 * Running every missed scheduled scan after downtime — the scans would repeat back to back and find the same state.
 * Intervals that do not divide 24, or cron expressions — start times would move from day to day, and cron adds a syntax for one setting.
 * Storing a time zone with the schedule — the schedule would disagree with the server's clock and logs.
+* Recalculating the letter index after each item — each recalculation reads every title in the library, so a scan's recalculations grow with the square of the library's size.
+* Recalculating the letter index at a fixed interval while an operation runs — the letter index lags the titles, and each recalculation still reads every title in the library.
+* Changing the letter index from an application listener in the writer's transaction — every write path must publish an event, and a rename must carry the old letter.
+* Changing the letter index after the writer's transaction commits — a crash between the two commits loses the change, and nothing repairs the letter index.
 
 == References
 

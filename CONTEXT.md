@@ -254,7 +254,7 @@ Streamarr does not record executions separately.
 _Avoid_: attempt (one execution of a step or a transcode job), rerun, run (unqualified)
 
 **Finishing step**:
-An action that runs after a library operation's walk is done and every required result is recorded, such as updating file availability or recalculating the letter index (ADR 0027).
+An action that runs after a library operation's walk is done and every required result is recorded, such as updating file availability (ADR 0027).
 The finishing steps run in a fixed order.
 Each finishing step is keyed by the library operation's id and is idempotent, so a finishing step that a restart interrupted has the same effect when the finishing step runs again.
 A finishing step acts on the whole library operation, while a step acts on one subject.
@@ -366,7 +366,7 @@ _Avoid_: collection (a user-curated grouping), section
 
 **Letter index**:
 The number of a library's top-level items, movies or series, whose sort title starts with each letter.
-Every library operation recalculates the letter index before the operation ends (ADR 0027).
+The transaction that adds, removes or renames a movie or series changes the letter index (ADR 0027).
 The GraphQL field `Library.alphabetIndex` returns the letter index.
 _Avoid_: alphabet index (except the GraphQL field name), letter counts
 

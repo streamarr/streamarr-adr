@@ -23,18 +23,19 @@ Only the rows above the anchor were unreachable.
 Under TITLE sort, `startLetter` resolves a position in the unfiltered ordering — it is a seek anchor, not part of the result set's identity.
 
 * `LetterJumpResolver` rewrites a cursor-less request as a FORWARD keyset fetch anchored at the predecessor row. `findLetterJumpPredecessor` finds that row using the complement of the landing range.
-* TITLE ordering, keyset comparisons, placement values and order-key normalization use `lower(title_sort COLLATE "C")`. Applying the collation before case folding keeps ASCII I independent of Turkish or Azeri database defaults. The index uses the same expression. Under `C`, lowercasing folds ASCII only: `É` and `é` remain distinct and sort separately.
+* TITLE ordering, keyset comparisons, placement values and order-key normalization use `lower(title_sort COLLATE "C")`. Applying the collation before case folding keeps ASCII I independent of Turkish or Azeri database defaults. The index uses the same expression. Lowercasing under `C` folds ASCII only, so sort titles are normalized when they are written instead: Latin diacritics, ligatures and full-width Latin letters fold to their base letters, so `Élite` sorts and counts as `Elite`, while text in other scripts is left exactly as written. Leading characters that sort above `z` (`{`, `|`, `}` and `~`) are dropped unless nothing else would remain. Display titles never change.
 * Untitled items sort last in ascending TITLE order and first in descending TITLE order; the cursor and order key preserve that placement.
 * TITLE landing and predecessor predicates use half-open ranges in the normalized domain. For Q, ASC landing is `>= q` and DESC landing is `< r`; predecessor probes use the complementary bounds. These range predicates let the functional index seek directly.
-* Alphabet membership is determined from the first character of the original sort title under the `C` collation: ASCII A–Z/a–z belong to their uppercase letter; other characters, empty strings and null titles belong to HASH. Counts and non-TITLE letter filters use this same classification, rather than Unicode folding or a normalized range.
+* Alphabet membership is determined from the first character of the stored sort title under the `C` collation: ASCII A–Z/a–z belong to their uppercase letter; other characters, empty strings and null titles belong to HASH. Counts and non-TITLE letter filters use this same classification, rather than Unicode folding or a normalized range.
 * The existing limit+2 cursor machinery strips the anchor row, sets `hasPreviousPage`, and mints ordinary position cursors. Backward pages can therefore cross the letter boundary without letter-specific cursor logic.
 * Cursor pages never re-apply the letter under TITLE sort (`startLetterCursorPageCondition`); forward pages already imply the bound through the keyset ordering.
 * Cursor validation ignores `startLetter` under TITLE sort — clients may keep or drop the letter on cursor pages; the cursor's position wins either way.
 * Under every other sort, `startLetter` stays an equality restriction on every page and remains part of cursor identity — a letter cannot be a position in a date or runtime ordering.
 * If no predecessor exists, the request is not rewritten and `hasPreviousPage` stays false. This covers the top of the library, HASH under ASC, and Z under DESC.
-* HASH occupies two runs of the ordering: titles that sort below `a`, such as digits, and titles that sort above `z`, including every non-ASCII first character. HASH under DESC lands on the run below `a`, so its landing is `< a` and its predecessor probe is `>= a`. Titles above `z` stay at the top of the ordering and are reached by paging backward. When the view has no title below `a`, every HASH title sorts above `z`, so the jump lands at the top of the ordering, as Z does. Every landing page is therefore one contiguous range, and event placement treats the letter as an anchor rather than a membership restriction.
+* HASH occupies two runs of the ordering: titles that sort below `a`, such as digits, and titles that sort above `z`. Because sort titles are normalized, the run above `z` holds only titles whose first character is still outside ASCII: non-Latin scripts, and the few Latin letters without a decomposition, such as `Ø` and `Æ`. HASH under DESC lands on the run below `a`, so its landing is `< a` and its predecessor probe is `>= a`. Titles above `z` stay at the top of the ordering and are reached by paging backward. When the view has no title below `a`, every HASH title sorts above `z`, so the jump lands at the top of the ordering, as Z does. Normalization does not remove this case: a view whose only HASH titles are non-Latin still reaches it. Every landing page is therefore one contiguous range, and event placement treats the letter as an anchor rather than a membership restriction.
 * `alphabetIndex` counts are unchanged — they count titles per letter, and a seek does not change what a letter contains.
 * Explicitly deferred:
+** Locale-specific ordering, such as a per-language or per-viewer collation. Ordering, cursors and counts would then depend on the viewer's locale and on the database's collation library, which the portable `C` ordering exists to avoid.
 ** A backfill cursor for an empty anchor page. A jump past the last title returns an empty page with `hasPreviousPage = true` but no cursor for paging backward (the Relay empty-connection gap). The alphabet rail cannot reach this case because it enables only letters with a nonzero count.
 
 == Consequences
@@ -42,6 +43,7 @@ Under TITLE sort, `startLetter` resolves a position in the unfiltered ordering �
 * The jump-then-backfill flow works with plain Relay pagination; the client needs no special letter handling after the first page.
 * The landing page's content is unchanged for every letter and direction except HASH under DESC, which no longer includes titles above `z`; those remain reachable backward.
 * A letter jump with rows above it costs one extra limit-1 probe query, on the same index as the landing fetch. HASH under DESC costs one more, to find whether the view has a title below `a`.
+* Accented Latin titles and titles that start with `{`, `|`, `}` or `~` file under their letter instead of HASH. Existing sort titles are re-encoded once on upgrade, and the letter counts are rebuilt from them.
 * Alphabetic landing and predecessor predicates are index range conditions rather than first-character filters, so their work is bounded by the requested page instead of the number of titles before or after the target letter.
 
 == Follow-up
@@ -58,6 +60,7 @@ https://github.com/streamarr/streamarr-apple/commit/e573ddc0d701563612a88f19b91a
 * Keep the letter in TITLE-sort cursor identity and teach clients to always resend it — validation would pass, but the pages above the anchor would still be walled off by the restriction.
 * Restrict the DESC HASH landing page to both HASH runs — the page skips every lettered title between the runs, no cursor page can reach them, and a change to a lettered title falls inside the loaded window, so clients cannot reconcile it.
 * Land DESC HASH at the top of the ordering, as Z does — the jump would open on titles above `z` rather than the digits most people mean by #.
+* Transliterate non-Latin titles into Latin letters, for example with ICU's Any-Latin transform — readings depend on the title's language, which the server does not know. Any-Latin gives Japanese kanji their Mandarin readings, so a Japanese title would file under a letter a Japanese reader would not expect. Non-Latin titles stay in HASH, above `z`.
 
 == References
 

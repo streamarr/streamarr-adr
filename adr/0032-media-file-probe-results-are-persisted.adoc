@@ -24,6 +24,13 @@ The same amendment changes playback of a file without a stored probe outcome (<<
 The server moves the file's durable probe to the front of the queue and waits, within a configured bound, for the stored outcome.
 Playback then starts, instead of returning the not-ready error at once.
 
+A later amendment adds two brakes that work while nothing plays (<<probe-timeout-brake>>).
+A probe that reaches the server's probe timeout halves the worker's background probe capacity.
+That brake works on every host.
+The server's cancel command tells the worker that a probe reached the timeout.
+Where the host provides Linux pressure stall information, high IO pressure also halves the capacity.
+That brake acts before probes reach the timeout.
+
 == Context
 
 Streamarr learns a media file's technical properties by running ffprobe.
@@ -723,7 +730,8 @@ A playback probe that waits for a free unit shows that 2 units are too few.
 ==== Background probe capacity
 
 The worker adapts the background probe capacity while the worker runs.
-The adaptation is an additive-increase, multiplicative-decrease limit, `AIMDLimit` from Netflix's concurrency-limits library.
+The background probe capacity is an additive-increase, multiplicative-decrease limit, `AIMDLimit` from Netflix's concurrency-limits library.
+The sections below call the background probe capacity the limit.
 The limit starts at 4.
 The limit never falls below 1.
 The limit never rises above the processor count of the worker's JVM.
@@ -731,8 +739,10 @@ In Kubernetes, the deployment example sets that processor count from the worker 
 When a probe ends that used a background unit, and at least half of the limit was in use, the limit grows by 1.
 The limit does not grow while a judged job attempt produces below the floor.
 A brake halves the limit.
+Three brakes exist: the brake for job attempts, the brake for timed-out probes and the brake from pressure stall information.
 After a brake, the limit does not grow for 30 s.
-A worker setting fixes the background probe capacity and turns the adaptation off.
+A worker setting holds the background probe capacity at a set value.
+That setting stops the limit from adapting and turns every brake off.
 The worker reports whether the worker's background probe capacity adapts or stays fixed.
 
 *Why:* The limit uses the whole host while nothing plays.
@@ -742,9 +752,9 @@ Netflix's PlayAPI gives work that users start the first share of its capacity, a
 The 30 s pause after a brake keeps the limit from swinging up and down against a long encode.
 LinkedIn's Hodor waits in the same way before it raises a limit again.
 
-==== The brake
+==== The brake for job attempts
 
-The brake protects the production speed of the worker's job attempts.
+The brake for job attempts protects the production speed of the worker's job attempts.
 Production speed is the number of media seconds that a job attempt produces per second of wall-clock time, as ADR 0044 defines it.
 The worker measures each job attempt's production speed from the attempt's own media segments.
 The worker averages the production speed over the media segments that the attempt finished in the last 15 s of wall-clock time.
@@ -766,7 +776,7 @@ The worker reports each media segment's production time with the segment's uploa
 The server takes each job attempt's production speed from those reports.
 One measurement therefore serves both the brake and ADR 0044's headroom.
 
-*Why:* The brake measures harm to playback, not how busy the host is.
+*Why:* The brake for job attempts measures harm to playback, not how busy the host is.
 The production time leaves out waits for uploads, because probes do not slow an upload.
 A slow network or a server that holds back a producer, as https://github.com/streamarr/streamarr-server/issues/55[streamarr/streamarr-server#55] plans, would otherwise apply the brake.
 ADR 0044's headroom needs the encoder's speed for the same reason.
@@ -785,6 +795,116 @@ That error slows a scan but never risks playback.
 The brake at the start of an attempt clears probes from the host while a viewer waits for the first media segment.
 The probes that run then finish within seconds, so the brake takes effect almost at once.
 
+[[probe-timeout-brake]]
+==== The brake for timed-out probes
+
+The server ends every probe that has not finished within the probe timeout.
+The probe timeout is a server setting.
+The default is 60 s.
+The server alone owns the probe timeout.
+When the server ends a probe, the server sends the worker a cancel command.
+The cancel command says why the server ended the probe.
+The reason is the probe timeout, a server shutdown or another reason.
+The server retries a timed-out probe later, as the section on transient failures describes.
+
+A probe that the server cancels for the probe timeout applies a brake, which halves the limit.
+Both a background probe and a playback probe apply that brake.
+A cancel command with the server shutdown reason or another reason never applies a brake.
+A keyframe packet scan has a timeout of its own and applies no brake.
+Only a probe that started after the latest brake can apply the next brake for a timed-out probe.
+A probe that started before the latest brake applies no brake when the probe times out.
+A brake for a timed-out probe also waits until 15 s have passed since the previous brake, whatever applied that brake.
+After that brake, the limit does not grow for 30 s, as after every brake.
+A probe that ended at the probe timeout never grows the limit.
+At the limit's floor of 1, a probe that reaches the timeout cannot lower the limit further.
+That probe fails like any other timed-out probe.
+The server retries the probe later.
+The brake for timed-out probes works while no job attempt runs.
+The brake for timed-out probes works on every host and needs no extra privilege.
+
+*Why:* A busy disk can stop every probe from finishing.
+The brake for job attempts cannot see a busy disk while nothing plays.
+A RHEL 8 host showed the failure.
+A library manager gave every movie file of a library a new path.
+A scan then had to probe most of the library again.
+Nothing played.
+Another media server on the same host read the same files at the same time.
+The limit stayed at 72, the host's core count.
+Between 65 and 73 probes ran at once.
+The worker logs a probe summary each minute.
+Over eight minutes, the average probe time in those summaries rose from 1.4 s to 60 s.
+In the last observed minute, all 69 probes that ended had reached the 60 s probe timeout.
+The server recorded 207 probe timeouts in about 6 minutes.
+The ffprobe processes waited for the disk in uninterruptible sleep.
+No brake applied, because no job attempt ran.
+Three days earlier, a cold scan of the same library took 2 to 3 s per file.
+Only 12 of that scan's probes reached the timeout.
+
+The probes did no useful work.
+A probe that reaches the timeout discards every byte that the probe read.
+The server retries each timed-out probe, so the retries keep the disk as busy as before.
+The number of finished probes fell to zero while the limit stayed at its maximum.
+Networks call this failure congestion collapse.
+TCP avoids congestion collapse with the rule that the limit already follows.
+TCP halves its congestion window when the network loses a packet.
+TCP then grows the window by one step at a time.
+A probe that reaches the timeout corresponds to a lost packet.
+One slow file that times out alone halves the limit once.
+The other probes keep finishing, so the limit grows back after the 30 s pause.
+When many probes reach the timeout together, the host is the cause, not the files.
+
+TCP also halves the window only once for each window of data in flight.
+RFC 5681 describes that rule.
+When the first probe times out, many other probes may already be running.
+The first brake cannot help the probes that started before the brake.
+Those earlier probes keep reaching the timeout for up to 60 s after the first brake.
+With only the 15 s wait between brakes, the earlier probes would apply about 4 more brakes and lower a limit of 72 to about 2.
+
+A playback probe that times out also applies the brake.
+A playback probe that waits behind the disk reads of background probes is the worst case, because a viewer is waiting.
+A playback probe uses the playback probe capacity, which stays fixed.
+The brake therefore lowers the background probe capacity, because background probes load the disk.
+
+The server owns the timeout.
+The reason in the cancel command is therefore the only way the worker learns of a timeout.
+A server shutdown says nothing about the host.
+A cancel command with the shutdown reason therefore never applies a brake.
+The brake for timed-out probes reacts only when a probe reaches the timeout.
+With the default setting, a probe reaches the timeout 60 s after the probe starts.
+Pressure stall information gives an earlier signal where the host provides it.
+
+==== The brake from pressure stall information
+
+Linux pressure stall information reports the share of time in which tasks waited for a resource.
+The file `/proc/pressure/io` reports that share for IO, such as disk reads.
+The `full` line of that file reports the share of time in which every task that had work to do waited for IO at once.
+The worker reads the host-wide file `/proc/pressure/io`.
+The worker applies a brake while the kernel's 10 s average of the `full` line stays above a threshold.
+The brake from pressure counts IO pressure only, not CPU pressure or memory pressure.
+https://github.com/streamarr/streamarr-transcode-worker/issues/104[streamarr/streamarr-transcode-worker#104] picks the threshold from a measurement on a host that provides pressure stall information.
+A brake from pressure waits until 15 s have passed since the previous brake, whatever applied that brake.
+When the file is missing or unreadable, the worker reports that the brake from pressure is unavailable.
+The brake for job attempts and the brake for timed-out probes still apply on such a host.
+The file is missing on RHEL 8 unless the kernel boots with `psi=1`.
+Other kernels can also turn pressure stall information off.
+Sandboxed container runtimes such as gVisor or Kata Containers can also lack the file.
+
+*Why:* IO pressure rises as soon as tasks wait for the disk.
+A probe reaches the timeout much later.
+The pressure is the time that tasks lost while they waited.
+The pressure therefore measures harm to work on the host, not how busy the host is.
+Linux provides pressure stall information from kernel 4.20.
+The brake from pressure therefore cannot be the only brake for a busy host.
+
+The worker reads the host-wide file because other services' disk stalls also slow probes and playback.
+Linux does not give each container its own `/proc/pressure`.
+An unprivileged container or Kubernetes pod therefore reads the whole host's values.
+In a Docker container, `/proc/pressure/io` matched the counters of the host virtual machine.
+The container's own cgroup `io.pressure` read 0.
+The cgroup file counts only the stalls of the worker's own tasks.
+
+The brake counts IO pressure only, because background probes already run at the lowest CPU priority.
+
 ==== Keyframe packet scan capacity
 
 The worker sets the keyframe packet scan capacity to 0 while the worker runs any job attempt.
@@ -801,7 +921,7 @@ After the scan finishes, playback can copy the file's video instead of encoding 
 The worker runs background probes and keyframe packet scans at the lowest CPU priority, nice 19.
 The worker runs playback probes at normal CPU priority.
 
-*Why:* The kernel then gives the worker's job attempts the CPU first, before the brake has measured anything.
+*Why:* The kernel then gives the worker's job attempts the CPU first, before any brake has measured anything.
 A process needs no privilege to lower its own priority.
 The priority applies only inside the worker's container.
 The priority therefore does not protect playback from other services on the same host.
@@ -815,6 +935,10 @@ A probe that finds no free unit of the right capacity stays pending without a fa
 The worker contract carries each capacity, the probe's kind and each media segment's production time.
 https://github.com/streamarr/streamarr-server/issues/578[streamarr/streamarr-server#578] changes the server and the worker contract.
 https://github.com/streamarr/streamarr-transcode-worker/issues/93[streamarr/streamarr-transcode-worker#93] changes the worker.
+The brake for timed-out probes needs a change to the server and to the worker contract.
+The cancel command must say why the server ended the probe.
+https://github.com/streamarr/streamarr-server/issues/632[streamarr/streamarr-server#632] adds that reason to the server and to the worker contract.
+https://github.com/streamarr/streamarr-transcode-worker/issues/104[streamarr/streamarr-transcode-worker#104] adds the brake for timed-out probes and the brake from pressure stall information to the worker.
 
 This amendment defers the following work:
 
@@ -822,8 +946,6 @@ This amendment defers the following work:
 A held segment request is a viewer's request for a media segment that does not exist yet.
 Only the server sees held segment requests.
 The worker would need a new message from the server.
-* A brake from Linux pressure stall information.
-Hosts with cgroup v1, such as RHEL 8, have no pressure stall information by default.
 * A speed floor for each stream session.
 https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499] computes that floor.
 The server can then send each job attempt's floor with the attempt.
@@ -978,10 +1100,13 @@ A cold scan of about 1,800 movies on a 72-core host then spent about 20 minutes 
 About 90 % of the host's CPU stayed idle during that scan.
 A large first scan now probes as fast as the worker's cores and storage allow.
 * While nothing plays, background probes can load every core of the worker's host.
-The brake protects only the worker's own job attempts.
+The brake for job attempts protects only the worker's own job attempts.
 Another service on the same host, such as another media server, competes with the probes.
-An operator who runs such a service on the host fixes the background probe capacity with the worker setting.
-* A scan runs more slowly while the worker plays, because the brake lowers the background probe capacity.
+The brake for timed-out probes lowers the background probe capacity once probes stop finishing within the probe timeout.
+Where the host provides pressure stall information, the brake from pressure lowers the capacity sooner.
+Until a brake applies, the probes can still slow the other service.
+An operator who runs such a service on the host can still hold the background probe capacity at a set value with the worker setting.
+* A scan runs more slowly while the worker plays, because the brake for job attempts lowers the background probe capacity.
 Keyframe packet scans wait until playback ends.
 * The worker contract carries a production time with each media segment's upload.
 ADR 0044's headroom takes production speed from those reports instead of from arrival times at the server.
@@ -1118,6 +1243,31 @@ Gradient2's defaults suit services with hundreds of requests in flight, not ffpr
 Hill climbing needed noise handling and about ten interacting parameters in the .NET thread pool.
 * Brake on probe latency.
 Probe latency depends on each file, and probe latency measures probes, not harm to playback.
+A probe that reaches the probe timeout is not a measure of latency.
+That probe failed, and the server retries the probe from the beginning.
+* Put the probe's deadline in the probe request, and let the worker end the probe at that deadline.
+Two clocks would then enforce one deadline.
+* Treat every cancel of a probe as a timeout.
+The brake would then apply at every server shutdown or restart.
+* Let every probe that reaches the timeout apply a brake.
+Only the 15 s wait between brakes would space those brakes out.
+The probes that started before the first brake would then apply about 4 more brakes and lower a limit of 72 to about 2.
+* Read the worker's own cgroup `io.pressure` for the brake from pressure.
+That file misses the disk stalls of other services on the host.
+* Count CPU pressure in the brake from pressure.
+Background probes already run at the lowest CPU priority.
+* Read pressure through the kubelet API.
+Kubernetes publishes pressure stall metrics there, as KEP-4205 describes.
+Those metrics are stable in Kubernetes 1.36.
+The kubelet reads the same kernel files.
+Every operator would have to grant the worker a service account with RBAC access to node statistics.
+The worker would also need node discovery and a code path for Kubernetes only.
+The API adds information only inside sandboxed runtimes.
+The brake for timed-out probes already covers those runtimes.
+* Rely on pressure stall information alone to brake while nothing plays.
+Hosts without pressure stall information, such as RHEL 8 by default, would then have no brake for a busy disk.
+* Rely on the operator to set a fixed background probe capacity on a shared host.
+The operator learns that the capacity is too high only after the probes have stopped finishing.
 * Measure production speed on both the server and the worker.
 Two measurements of one quantity can disagree, and each needs its own code and tests.
 * Brake against each player's own speed floor in this change.
@@ -1276,6 +1426,8 @@ Its 95 % intervals come from bootstrap resampling.
 * link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037: The Worker Delivers Fragmented MP4 Segments From FFmpeg's Standard Output, and HLS Media Segments Are fMP4 Only]
 * link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043: Audio Tracks and Text Subtitles Are HLS Renditions, so Switching Them Never Restarts the Video]
 * link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044: Encoder Headroom, Measured in Pixel Rate, Decides When Extra Variants Start, and One Preset Scale Serves Every Software Encoder]
+* https://www.rfc-editor.org/rfc/rfc5681[RFC 5681: TCP Congestion Control]
+* https://docs.kernel.org/accounting/psi.html[Linux kernel documentation: PSI - Pressure Stall Information]
 * https://ffmpeg.org/ffprobe.html[ffprobe documentation]
 * https://ffmpeg.org/ffmpeg-formats.html#Format-Options[FFmpeg format options: `analyzeduration` and `probesize`] and https://ffmpeg.org/ffmpeg-formats.html#mpegts[the MPEG-TS demuxer's `scan_all_pmts`]
 * https://datatracker.ietf.org/doc/html/rfc6381[RFC 6381: The "Codecs" and "Profiles" Parameters for "Bucket" Media Types]
@@ -1304,3 +1456,5 @@ Its 95 % intervals come from bootstrap resampling.
 * https://github.com/streamarr/streamarr-transcode-worker/issues/18[streamarr/streamarr-transcode-worker#18: Write playable sample entries for HEVC output and Dolby Vision copies]
 * https://github.com/streamarr/streamarr-transcode-worker/issues/24[streamarr/streamarr-transcode-worker#24: The worker's part of probe version 4]
 * https://github.com/streamarr/streamarr-transcode-worker/issues/93[streamarr/streamarr-transcode-worker#93: Advertise probe capacity from the worker's cores, apart from playback slots]
+* https://github.com/streamarr/streamarr-transcode-worker/issues/104[streamarr/streamarr-transcode-worker#104: Slow background probes on every host when the host is busy and nothing plays]
+* https://github.com/streamarr/streamarr-server/issues/632[streamarr/streamarr-server#632: Tell the worker when a probe ends at the probe timeout]

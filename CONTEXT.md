@@ -436,6 +436,27 @@ Moving an item to a different catalog entry because it matched the wrong media t
 The ServerAdmin chooses which metadata edits to copy, and watch state attributable to that item is copied automatically.
 _Avoid_: rematch (unqualified), identify, unmatch
 
+**Disk coordinates**:
+The season number and the episode number that Streamarr reads from a file's name or its season folder.
+Numbering corrections attach to disk coordinates, never to a file path (ADR 0047).
+_Avoid_: file path, TMDB numbers, episode number (unqualified)
+
+**Episode ordering**:
+The way TMDB arranges a series' episodes into seasons.
+It is TMDB's default order or one of the series' episode groups.
+A ServerAdmin chooses each series' episode ordering in each library, and Streamarr never chooses it (ADR 0047).
+_Avoid_: display order, sort order, episode order (unqualified)
+
+**Numbering correction**:
+A ServerAdmin's rule that sends one disk season to a TMDB season, or one disk episode to a TMDB episode, for a series in one library.
+An episode correction comes first, then a season correction, then the series' episode ordering (ADR 0047).
+_Avoid_: metadata edit (a value on the catalog entry), override (reserved for administrative overrides in ADR 0024), mapping, remap
+
+**File-to-episode link**:
+A ServerAdmin's link from one file without disk coordinates to one TMDB episode.
+A rename or a replacement of the file loses the link (ADR 0047).
+_Avoid_: numbering correction, fix match (moving an item to another catalog entry), pin
+
 ### Watch state
 
 **Watch state**:

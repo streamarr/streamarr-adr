@@ -14,6 +14,12 @@ An amendment adds the facts that probe version 4 reports under this vocabulary (
 The amendment also decides which playback paths an HDR source permits for a client that declares no dynamic range (<<decision-undeclared-client>>).
 That decision holds until clients can declare a dynamic range.
 The amendment also decides how a stream copy writes and describes a Dolby Vision source with an SDR compatible base.
+
+A second amendment adds the facts that probe version 5 reports under this vocabulary (<<decision-probe-version-5>>).
+Probe version 5 reads the first frames of the chosen video stream before it reports HDR10+ or a Dolby Vision RPU as `ABSENT`.
+The second amendment also decides where `MediaFileProbePropertyIssue` lives and which playback paths each issue rules out (<<decision-property-issues>>).
+The server derives each issue from the stored probe facts and stores no issue.
+The second amendment also decides that the server never copies a Dolby Vision stream whose compatibility identifier disagrees with its signaled transfer.
 The server, worker, and client contracts still need answers to the other open questions listed below.
 A later amendment to this ADR answers the remaining architectural questions.
 The implementation issues resolve the contract questions.
@@ -172,8 +178,10 @@ The probe derives it when it runs, from the base layer's signaled transfer chara
 The signaled transfer decides the value: `SDR` for a standard-dynamic-range transfer, `PQ` for SMPTE ST 2084, and `HLG` for ARIB STD-B67.
 `PQ` covers both HDR10 and PQ10; whether the static HDR metadata is present is a separate stream property.
 `NONE` means the stream has no standard compatible base: Dolby Vision declares none, or the signaled transfer is unspecified while Dolby Vision is present, as in Profile 5.
+From probe version 5 on, a Dolby Vision profile 5 stream's `compatibleBase` is `NONE` whatever the signaled transfer says (<<decision-probe-version-5>>).
 `UNSPECIFIED` means the probe could not read the transfer and found no Dolby Vision claim.
-When the Dolby Vision compatibility identifier disagrees with the signaled transfer, the signaled transfer wins and the probe records a `MediaFileProbePropertyIssue` that names both claims.
+When the Dolby Vision compatibility identifier disagrees with the signaled transfer, the signaled transfer wins.
+The server then derives a `MediaFileProbePropertyIssue` that names both claims (<<decision-property-issues>>).
 The `compatibleBase` value does not guarantee that a device can play the source bytes unchanged.
 The worker may need to transform the source before the player can use the compatible base.
 The server must explicitly choose that change, and the worker must support the change.
@@ -184,7 +192,7 @@ Both `hdr10Plus` and Dolby Vision may be `PRESENT` in the same stream.
 `PRESENT` means the probe found any of a configuration record, a Dolby Vision sample entry, or an RPU in the samples; `ABSENT` means the probe checked all three and found none; `UNSPECIFIED` means the probe could not check.
 Inside `PRESENT`, `declared` holds the configuration record whole or not at all, because the record carries its profile, level, base-layer compatibility identifier and layer flags together, and every value in it is a claim.
 `observedRpu` records whether the samples contain the Dolby Vision picture-adjustment instructions, and it is `UNSPECIFIED` when the probe read no frames.
-A record that claims RPUs over samples that contain none keeps both facts and adds a `MediaFileProbePropertyIssue`.
+A record that claims RPUs over samples that contain none keeps both facts, and the server derives a `MediaFileProbePropertyIssue` from those facts.
 A `PRESENT` stream with no record and no observed RPU still counts as Dolby Vision.
 The Dolby Vision profile of such a stream could be one with no compatible base.
 <<decision-undeclared-client>> decides which playback paths such a stream permits for a client that declares no dynamic range.
@@ -236,16 +244,130 @@ The probe does not read the SEI messages in the HEVC bitstream.
 So a PQ stream without declared static metadata can still be HDR10.
 Probe version 4 therefore does not tell HDR10 from PQ10.
 
-Probe version 4 records no `MediaFileProbePropertyIssue`, because this ADR has not yet decided where to store property issues.
 When the Dolby Vision compatibility identifier disagrees with the signaled transfer, probe version 4 keeps both facts.
 Probe version 4 keeps the whole configuration record and the signaled transfer that decides `compatibleBase`.
-The rules above that record a `MediaFileProbePropertyIssue` apply from the probe version that stores property issues.
+No probe version stores a `MediaFileProbePropertyIssue`.
+The server derives each issue from the stored facts, including the facts of a probe version 4 outcome (<<decision-property-issues>>).
 
 *Why:* Probe version 4 reads each stream's headers and configuration records.
 Probe version 4 does not inspect the samples for per-frame HDR information.
 A feature that travels per frame therefore stays unchecked.
 Under this ADR, a probe never reports an unchecked feature as absent.
 ADR 0032 gives the measurements behind the new facts.
+
+[[decision-probe-version-5]]
+=== Probe version 5 reads the first frames of the chosen video stream before it reports a per-frame feature as absent
+
+Probe version 5 reports every fact of probe version 4.
+Probe version 5 also reads frames of the chosen video stream.
+The chosen video stream is the first video stream that is not an attached picture, such as embedded cover art (ADR 0032).
+link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032] lists every fact that probe version 5 stores.
+ADR 0032 also governs how probe version 5 results replace probe version 4 results.
+This section decides how those facts use this ADR's vocabulary.
+
+* The probe reads the first 3 frames of the chosen video stream.
+The probe reads fewer frames when the stream holds fewer than 3.
+The probe reads no frame of any other stream.
+Each video stream reports whether the probe read its first frames.
+* For the chosen video stream, `hdr10Plus` and `observedRpu` are `PRESENT` or `ABSENT` when the probe can see the feature in the frames that the probe read.
+`ABSENT` means that the frames the probe read carry no such information.
+A feature that the probe cannot see in a codec stays `UNSPECIFIED`.
+A video stream whose frames the probe did not read reports `ABSENT` for no feature.
+* For HEVC and AV1, the probe finds HDR10+ information and RPUs in the side data that ffprobe reports for each frame.
+* FFmpeg's H.264 decoder drops the NAL (network abstraction layer) units of type 28.
+Those NAL units carry the RPUs of Dolby Vision profile 9.
+For H.264, the probe therefore parses the NAL units of the stream's packets itself.
+* For the chosen video stream, `dolbyVision` is `ABSENT` when the probe found no configuration record, no Dolby Vision sample entry and no RPU in the frames that the probe read.
+* Every other video stream keeps the dynamic-range facts of probe version 4.
+For every other video stream, `hdr10Plus` and `observedRpu` stay `UNSPECIFIED`, and `dolbyVision` is never `ABSENT`.
+* When the probe finds an RPU, `dolbyVision` keeps the fields of the first RPU's header that tell the Dolby Vision profile.
+For a stream without a configuration record, the probe derives the Dolby Vision profile from those header fields, the way FFmpeg 8.1 guesses the profile.
+For HEVC, an RPU header with `vdr_rpu_profile` 0 and `bl_video_full_range_flag` 1 means profile 5.
+The worker contract spells out the rule for each codec.
+An RPU header does not carry the compatibility identifier of profile 8.
+The signaled transfer therefore still decides the compatible base of a profile 8 stream without a configuration record.
+* Dolby Vision profile 5 has no compatible base.
+A profile 5 picture is correct only after the player reshapes the picture with the stream's RPUs.
+From probe version 5 on, a profile 5 stream's `compatibleBase` is `NONE` whatever the signaled transfer says.
+The probe knows profile 5 from the configuration record, or from the first RPU header when the stream has no configuration record.
+This rule covers a profile 5 stream tagged BT.709.
+This rule also covers a profile 5 stream in MPEG-TS without the Dolby Vision descriptor.
+* When `dolbyVision` is `PRESENT`, the probe also reports whether a sample that the probe read starts with an RPU ahead of the sample's picture.
+The RPU of a picture belongs after that picture, in the same sample.
+At least one muxer starts a new sample at each RPU, so each RPU sits in the next picture's sample.
+The last sample of such a file holds an RPU and no picture.
+The probe reports this fact as `UNSPECIFIED` when the probe could not see where the RPUs sit.
+* Each video stream reports its codec profile, codec level and codec tier as typed values.
+The probe reads those values from the stream's decoder configuration record or sequence header.
+The probe never maps ffprobe's profile name.
+The probe maps a codec profile that the worker contract does not name to `UNSPECIFIED`.
+Keep the codec profile and level separate from the Dolby Vision profile and level, as the rules above require.
+* Each video stream reports its color primaries, transfer characteristics, matrix coefficients and color range.
+The worker contract numbers the primaries, the transfer and the matrix as ITU-T H.273 does.
+The probe maps a value that the worker contract does not name to `UNSPECIFIED`.
+The worker contract carries none of ffprobe's strings for the codec profile or the color properties.
+* When the container declares no HDR10 static metadata, the probe takes each value from the first frame of the chosen video stream.
+Some streams carry the static metadata only in the SEI messages of their HEVC bitstream.
+Every HEVC stream in MPEG-TS or in a raw HEVC file works this way.
+The probe marks a value as omitted when the stream carries the value but the probe could not read the value.
+A PQ stream is PQ10 when the probe read its first frames and found neither a mastering display nor a content light level, and the probe omitted neither value.
+A stream with an omitted value carries static metadata, so that stream is not PQ10.
+Probe version 5 therefore tells HDR10 from PQ10.
+
+*Why:* A probe that reads no frames cannot report a per-frame feature as `ABSENT`.
+A malformed profile 9 file's first sample holds no RPU, because the muxer moved that RPU into the next sample.
+A probe that read only the first frame would report that file's RPUs as `ABSENT`, and could not see where the RPUs sit.
+ffprobe cannot observe a profile 9 stream's RPUs when it reads frames, because FFmpeg's H.264 decoder drops the NAL units that carry those RPUs.
+FFmpeg guesses the Dolby Vision profile from the first RPU header when the configuration record is missing.
+The pinned ffprobe reports the fields of that header.
+ffprobe reports static metadata that only the bitstream carries as side data of the first frame.
+For comparison, Jellyfin reads only the first video frame, and sets only a nullable HDR10+ flag from that frame.
+ADR 0032 gives the measurements behind the new facts.
+
+[[decision-property-issues]]
+=== The server derives each property issue from the stored probe facts when it decides, and stores no issue
+
+The probe reports facts.
+The worker contract carries no `MediaFileProbePropertyIssue`.
+The server stores the facts under ADR 0032's rules for source snapshots, `probe_version` and guarded publication.
+The server derives each `MediaFileProbePropertyIssue` from the stored facts when the server makes a decision that the issue affects, such as the stream decision of link:0013-stream-decision-architecture.adoc[ADR 0013].
+The server stores no `MediaFileProbePropertyIssue`.
+An issue therefore never outlives the facts that the issue comes from.
+When the server stores a file's new probe outcome, the file's issues follow the new facts.
+A fix to the rule that derives an issue takes effect at the server's next decision.
+A fix to such a rule needs no new probe version and no re-scan.
+The server derives an issue from any stored outcome whose probe version reports the facts that the issue needs.
+
+The server derives the following issues.
+Each issue lists the playback paths that the issue rules out.
+
+* A Dolby Vision compatibility identifier that disagrees with the signaled transfer.
+Dolby Vision profile 7 with SDR transfer and color properties is an example.
+The server never copies such a stream, whatever the client declares.
+The server encodes such a stream.
+The encode interprets the signaled transfer.
+So the stream's `compatibleBase` follows the signaled transfer, and ADR 0013 decides from that compatible base whether the worker tone-maps.
+From probe version 5 on, a Dolby Vision profile 5 stream never has this issue, because its `compatibleBase` is `NONE` whatever its signaled transfer says (<<decision-probe-version-5>>).
+* An RPU that starts a sample.
+The malformed profile 9 files of <<decision-probe-version-5>> have this issue.
+The server never copies such a stream.
+The server encodes such a stream.
+* A configuration record that claims RPUs over frames that hold none.
+The issue applies when the record's `rpu` flag is set and `observedRpu` is `ABSENT`.
+This issue rules out no playback path.
+Playback follows the stream's `compatibleBase`.
+
+*Why:* The probe facts record what the source holds.
+A property issue records the server's judgment of those facts.
+A judgment stored beside the facts would need a new probe version, or a migration, for every fix to the rule.
+A stored judgment could also disagree with the facts that the judgment comes from.
+ADR 0032 makes the same choice for handler names.
+Under ADR 0032, the server fixes its own rule for handler names without a new probe.
+A Dolby Vision stream whose compatibility identifier disagrees with its signaled transfer makes contradictory claims.
+The server cannot tell which claim a player would follow.
+Before this amendment, the server already encoded such a stream and interpreted the signaled transfer.
+Copies of a malformed profile 9 file failed in headless players where the same stream muxed correctly played.
+ADR 0013 gives those player measurements.
 
 === Preserve source facts and report problems separately
 
@@ -298,21 +420,25 @@ The answer holds until clients declare dynamic ranges under https://github.com/s
 Today every client declares none.
 A client that declares no dynamic range may receive a stream copy only of a source whose `compatibleBase` is `SDR` or `UNSPECIFIED`.
 The source must also carry no Dolby Vision compatibility identifier that disagrees with the source's signaled transfer.
+The source must also have no other `MediaFileProbePropertyIssue` that rules out a copy (<<decision-property-issues>>).
 Every other source permits only an encode to 8-bit 4:2:0 SDR.
 The planned output of that encode has `compatibleBase` set to `SDR`.
 The planned output also has `hdr10Plus` and `dolbyVision` set to `ABSENT`.
-Apart from that disagreement, the answer depends on `compatibleBase` alone.
-The source's Dolby Vision profile and HDR10+ presence do not change the answer.
+Apart from those property issues, the answer depends on `compatibleBase` alone.
+The source's Dolby Vision profile changes the answer only through `compatibleBase`, as for profile 5.
+The source's HDR10+ presence does not change the answer.
 A PQ or HLG source without Dolby Vision or HDR10+ also permits only the SDR encode.
 A `PRESENT` Dolby Vision stream whose profile is unknown follows the same `compatibleBase` rule.
 When that stream's signaled transfer is unspecified, its `compatibleBase` is `NONE`.
 The server therefore encodes that stream.
 A Dolby Vision stream whose compatibility identifier disagrees with its signaled transfer permits only the SDR encode, such as Dolby Vision profile 7 with SDR transfer and color properties.
-That limit holds until https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] decides which playback paths such a stream permits.
-link:0013-stream-decision-architecture.adoc[ADR 0013] records the copy rule, the SDR encode and its tone mapping, a copy's planned output, and the known gaps.
+That limit is not interim.
+The server never copies such a stream, whatever the client declares (<<decision-property-issues>>).
+link:0013-stream-decision-architecture.adoc[ADR 0013] records the copy rule, the SDR encode and its tone mapping, and a copy's planned output.
 https://github.com/streamarr/streamarr-server/issues/66[streamarr/streamarr-server#66] adds a probe version that stores keyframe positions.
 From that probe version on, link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032] lets the server offer a stream copy only after the server knows the source's keyframe positions.
 Under this answer, the server copies Dolby Vision profile 8.2 and 9 sources, whose `compatibleBase` is `SDR`.
+The server encodes a profile 9 source in which an RPU starts a sample (<<decision-property-issues>>).
 ADR 0013 records the player evidence for those copies.
 
 *Why:* No playlist can yet describe an HDR copy truthfully to a player that declared nothing.
@@ -374,12 +500,16 @@ The probe can succeed while some properties remain unknown.
 
 |The source reports Dolby Vision Profile 7 alongside SDR transfer and color properties.
 |Keep the observed configuration record, layer flags, and color properties.
-Derive `compatibleBase` from the signaled transfer, so it is `SDR`, and record a `MediaFileProbePropertyIssue` that names the conflicting claims.
+Derive `compatibleBase` from the signaled transfer, so it is `SDR`.
+The server derives a `MediaFileProbePropertyIssue` that names the conflicting claims, and stores no issue.
 Choose how to process colors from the picture signal that the playback path actually uses, and do not tone-map solely because Dolby Vision information is present.
-Under <<decision-undeclared-client>>, this stream permits only the SDR encode.
-That limit holds until https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] decides which playback paths this stream permits.
-The problem code is still open.
-The rules that decide which playback paths each problem rules out are also still open.
+Under <<decision-property-issues>>, the server never copies this stream.
+The server encodes this stream and interprets the signaled SDR transfer, so the worker does not tone-map.
+
+|A Dolby Vision stream has no configuration record and signals BT.709, and the stream's first RPU header says profile 5.
+|Keep the signaled transfer and the RPU header fields in the source description.
+Set `compatibleBase` to `NONE`, because profile 5 has no compatible base (<<decision-probe-version-5>>).
+The server encodes the stream to SDR, and the worker tone-maps the encode as ADR 0013 decides for profile 5.
 
 |A valid Dolby Vision profile has an SDR-compatible base.
 |Keep both the Dolby Vision details and the SDR-compatible base in the source description.
@@ -390,7 +520,9 @@ The rules that derive the broad HDR label must account for the specific profile.
 === Answer the open questions before finalizing the contracts
 
 The questions below remain open, and they do not add agreed fields or requirements.
-A later amendment to this ADR answers the architectural questions.
+A later amendment to this ADR answers the remaining architectural questions.
+<<decision-probe-version-5>> answers what evidence the probe needs before it reports HDR10+ or an RPU as `ABSENT`.
+<<decision-property-issues>> answers where each `MediaFileProbePropertyIssue` lives and which playback paths each issue rules out.
 <<decision-undeclared-client>> decides which playback paths a Dolby Vision or HDR10+ source permits for a client that declares no dynamic range.
 That decision holds until clients declare dynamic ranges.
 
@@ -399,28 +531,17 @@ Architectural questions:
 * Define how to derive the broad HDR or SDR label when the description is complete, incomplete, conflicting, or unfamiliar.
 Include sources known to have HDR when the HDR kind remains unknown.
 Keep source facts even when those facts prevent a simple display label.
-* Decide where to store and publish each `MediaFileProbePropertyIssue`, following ADR 0032's source snapshot, `probe_version` invalidation, and guarded publication, and decide which playback paths each problem rules out.
-Issue https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] answers this item's questions before streamarr/streamarr-server#394 adds the probe version that reads per-frame features.
-Other changes add probe versions of their own, as ADR 0032 decides.
-The probe version that reads per-frame features is therefore not necessarily the one after version 4.
 * Decide which playback paths a Dolby Vision or HDR10+ source permits for a client that declares a dynamic range but neither Dolby Vision nor HDR10+.
 The question includes a `PRESENT` Dolby Vision stream whose Dolby Vision profile is unknown.
 Issue https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] answers this question.
-* Decide what evidence the probe needs before it reports HDR10+ or an RPU as `ABSENT`, because both travel per frame and a stream-level probe cannot see them; decide whether the probe reads frames.
-Issue https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] answers this question before streamarr/streamarr-server#394 adds the probe version that reads per-frame features.
-Until streamarr/streamarr-server#394 decides that evidence, no probe version reports HDR10+ or an RPU as `ABSENT`.
 * Define which combinations and limits a client can report for codec, profile, level, bit depth, dynamic-range features, container, player, and display.
 The contract must describe how a supported value for one property constrains the values of other properties.
 Do not assume that a client supports every combination of the values in separate lists unless the contract explicitly gives the lists that meaning.
 
 Contract questions, resolved inside the implementation issues:
 
-* Decide which codec names to use, how to express codec profiles and levels, and how to represent bit depth and chroma.
-Define color primaries, transfer characteristics, matrix coefficients, and color range, including the transfer codes behind each `compatibleBase` value.
-The worker contract of probe version 4 defines the static HDR metadata fields: mastering display, maximum content light level, and maximum frame-average light level.
-Those fields use the units of the HEVC SEI messages.
-Reuse established names and units where those names and units already exist.
-* Define the fields of `MediaFileProbePropertyIssue`, including how to identify the affected container or stream properties, and decide which problem codes and severities to use.
+* Define the server's `MediaFileProbePropertyIssue` type, including how to identify the affected container or stream properties, and decide which problem codes and severities to use.
+The worker contract carries no issue (<<decision-property-issues>>).
 * Finalize the explicit video-decision fields, decide how to encode the fields on the wire under the `oneof` rule above, and map the fields to the generated server, worker, and client types.
 Keep unknown numeric values distinct from known values, and keep source properties distinct from the selected output properties.
 The existing `StreamingOptions` record mixes the user's choice with client capability facts, and `VideoQuality` has no value for Original; the capability and video-decision issues separate those facts and add the missing choices.
@@ -431,19 +552,29 @@ Publish the protocol from the server repository first.
 Implement the published contract in the worker, then update the server's pinned worker image as the epic requires.
 When adding stored probe properties, follow ADR 0032's `probe_version` rules.
 
+The worker contracts of probe versions 4 and 5 settle how the contracts spell the codec and color values of a video stream.
+Probe version 4 defines the bit depth, the chroma subsampling and the static HDR metadata fields.
+The static HDR metadata fields are the mastering display, the maximum content light level and the maximum frame-average light level, in the units of the HEVC SEI messages.
+Probe version 5 defines the typed codec profile, codec level and codec tier.
+Probe version 5 also defines the color primaries, transfer characteristics, matrix coefficients and color range, numbered as ITU-T H.273 numbers them.
+
 Explicitly deferred:
 
 * Defer encoding Dolby Vision or HDR10+ output.
 A stream copy still passes HDR10+ information and Dolby Vision RPUs through unchanged.
 Recognizing Dolby Vision and HDR10+ in source files stays in scope.
-* Defer reading HDR10+ information and Dolby Vision RPUs from frames.
-Issue https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] does that work, including the worker's part of it.
-ADR 0013 records the gap that this deferral leaves for a Dolby Vision profile 5 stream in MPEG-TS without the Dolby Vision descriptor.
-* Defer deciding which playback paths a Dolby Vision stream permits when the stream's compatibility identifier disagrees with its signaled transfer.
-Until streamarr/streamarr-server#394 decides, such a stream permits only the SDR encode for a client that declares no dynamic range.
+* Defer reading the frames of video streams other than the chosen video stream.
+Every other video stream keeps the dynamic-range facts of probe version 4.
+* Defer deciding whether a `MediaFileProbePropertyIssue` rules out direct play.
+Direct play waits for client capability declarations (link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045]), and https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] decides that question.
+* Defer showing a `MediaFileProbePropertyIssue` to clients.
+ADR 0032 also defers exposing stream properties in GraphQL.
 * Defer conversion between Dolby Vision profiles, such as Profile 7 to Profile 8.1.
 * Defer distinguishing a full enhancement layer from a minimal one.
-The configuration record has no flag for it, detection needs the RPUs parsed from frames, and adding the field later is an additive change.
+The configuration record has no flag that tells the two kinds of enhancement layer apart.
+Detection needs the RPUs parsed from frames.
+Probe version 5 keeps only the RPU header fields that tell the Dolby Vision profile.
+Adding the field later is an additive change.
 * Defer pairing a base-layer track with a separate enhancement-layer track; the dynamic-range description covers one track.
 * Defer the playlist attributes that announce a PQ or HLG video range.
 Also defer the playlist attributes that announce Dolby Vision on a PQ or HLG base.
@@ -468,7 +599,10 @@ Define rules that derive and check the properties for each profile.
 Use representative media examples to check those rules.
 * When a problem arises, the original source facts remain available to explain why the server chose an output or why playback failed.
 Record the problem separately from the source facts.
-The open questions include how to record each problem and how each problem affects which playback paths the server can choose.
+The server derives each problem from the stored facts when the server decides, so a fix to the rule changes the next decision without a new probe version or a re-scan.
+* A Dolby Vision stream whose compatibility identifier disagrees with its signaled transfer plays through an encode for every client.
+That rule still holds after clients can declare Dolby Vision.
+* The upgrade to probe version 5 probes every library again, and each of those probes reads the first frames of the chosen video stream.
 * When the server chooses SDR output, the source description keeps the HDR facts that the probe found.
 The server cannot silently change a manual choice, and the playlist must describe the actual output that the server selected.
 * A stream copy of a Dolby Vision or HDR10+ source delivers the HDR10+ information and the Dolby Vision RPUs unchanged.
@@ -499,13 +633,24 @@ Continue to follow the existing ADR definitions and the order of work recorded i
 A Dolby Vision stream can carry its RPUs only in the samples.
 * Announcing Dolby Vision with `SUPPLEMENTAL-CODECS` in an SDR-base Dolby Vision copy's playlist entry changed nothing measurable in any headless player.
 The playlist leaves that attribute out unless a later need appears.
-* A copy of a Dolby Vision profile 7 stream tagged SDR, sent to a client that declares no dynamic range, would trust a source that makes contradictory claims.
-Such a stream permits only the SDR encode until streamarr/streamarr-server#394 decides which playback paths the stream permits.
+* A copy of a Dolby Vision profile 7 stream tagged SDR would trust a source that makes contradictory claims.
+The server never copies such a stream, even to a client that declares Dolby Vision.
+* An encode of such a stream could interpret the compatibility identifier instead of the signaled transfer.
+The server keeps interpreting the signaled transfer, as the server did before the second amendment.
 * Probe version 4 could read the RPU header of a Dolby Vision stream's first frame, to find a stream without a configuration record that is really profile 5.
-This ADR keeps probe version 4 at stream-level facts instead, and streamarr/streamarr-server#394 takes up the RPU-header method.
-ADR 0013 records the gap that remains until then.
+This ADR keeps probe version 4 at stream-level facts instead, and probe version 5 reads the RPU header.
 * Encoding every Dolby Vision stream without a configuration record would override the `compatibleBase` rule for those streams.
-This ADR keeps the `compatibleBase` rule, ADR 0013 records the gap, and streamarr/streamarr-server#394 decides how to close the gap.
+Probe version 5 identifies profile 5 from the first RPU header instead.
+* Letting the signaled transfer decide the `compatibleBase` of a profile 5 stream would give a profile 5 stream tagged BT.709 an SDR compatible base.
+The server would then copy that stream, and the copy plays with teal colors.
+* Reading only the first frame, as Jellyfin does, would miss the RPUs of a malformed profile 9 file.
+That file's first sample holds no RPU.
+* Reading an H.264 stream's RPUs from the frames that ffprobe decodes would report every profile 9 stream's RPUs as `ABSENT`.
+FFmpeg's H.264 decoder drops the NAL units that carry those RPUs.
+* Storing each `MediaFileProbePropertyIssue` with the probe outcome would need a new probe version, or a migration, for every fix to an issue rule.
+A stored issue could also disagree with the facts that the issue comes from.
+* Having the worker report property issues would put the issue rules in the worker.
+Each fix to an issue rule would then need a new probe version and a re-scan of every library.
 * Putting caption detection into probe version 4 would delay https://github.com/streamarr/streamarr-server/issues/501[streamarr/streamarr-server#501], which plays HDR and 10-bit sources as SDR.
 Caption detection decodes the video's keyframes.
 Probe version 4 reads no frames.
@@ -526,5 +671,5 @@ The narrower answer would still copy PQ and HLG sources to a client that declare
 * link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032: Media File Probe Results Are Persisted and Playback Reads Them]
 * link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019: Recoverable Just-In-Time HLS Segment Delivery] and link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037: The Worker Delivers Fragmented MP4 Segments From FFmpeg's Standard Output, and HLS Media Segments Are fMP4 Only], which define replacement attempts, the initialization segment, and the delivered container
 * https://netflixtechblog.com/rebuilding-netflix-video-processing-pipeline-with-microservices-4e5e6310e359[Netflix explains how to describe sources, encode media, and check the output]
-* https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] (the probe version that reads per-frame features and records property issues) and https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] (typed client capability declarations)
+* https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] (probe version 5, which reads the first frames of the chosen video stream) and https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] (typed client capability declarations)
 * https://github.com/streamarr/streamarr-transcode-worker/issues/24[streamarr/streamarr-transcode-worker#24] (the worker's part of probe version 4)

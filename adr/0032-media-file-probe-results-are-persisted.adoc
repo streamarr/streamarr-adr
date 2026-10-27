@@ -37,6 +37,13 @@ Other temporary failures still retry without a limit.
 A scan probes a file with that terminal error again.
 A scan does not probe a file again for any other terminal error.
 
+Another amendment adds probe version 5 (<<probe-version-5>>).
+Probe version 5 reports each video stream's typed codec profile, level and tier and its color properties.
+Probe version 5 also reads the first frames of the chosen video stream.
+On the upgrade to probe version 5, the server queues a re-scan itself.
+The re-scan runs through the existing scan library operation.
+Playback keeps using each file's probe version 4 outcome until the server stores the file's probe version 5 outcome.
+
 == Context
 
 Streamarr learns a media file's technical properties by running ffprobe.
@@ -74,6 +81,8 @@ The transcode decision also cannot tell which frame rate an encode should use wh
 Probe version 4 adds the missing facts for the playback capabilities epic, https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399].
 Probe version 4 also adds each file's chapters, which a future chapter menu uses.
 Probe version 4 describes dynamic range in the vocabulary of link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036].
+Probe version 4 reads no frames, so probe version 4 cannot report HDR10+ or a Dolby Vision RPU as absent.
+Probe version 5 reads the first frames of the chosen video stream and adds typed codec and color facts.
 
 == Decision
 
@@ -93,6 +102,9 @@ Each row stores the stream type, index, codec, width, height, frame rate, channe
 The row also stores the language and the default and forced flags.
 Probe version 4 adds the stream facts listed in <<probe-version-4,the probe version 4 section>>.
 Probe version 4 also reports the container's chapters.
+Probe version 5 adds the stream facts listed in <<probe-version-5,the probe version 5 section>>.
+The database stores no `MediaFileProbePropertyIssue`.
+The server derives each issue from the stored facts, as ADR 0036 decides.
 https://github.com/streamarr/streamarr-server/issues/546[streamarr/streamarr-server#546] decides how the server stores the chapters.
 The tables correspond to ffprobe's `format` and `streams` sections.
 Container properties and `probe_error` are nullable.
@@ -230,6 +242,7 @@ If the probe succeeds, the probe returns the complete container-and-stream resul
 For video streams, the result includes width, height, and frame rate.
 The result includes bitrate for any stream that reports a bitrate.
 Probe version 4 adds the facts listed in <<probe-version-4,the probe version 4 section>>.
+Probe version 5 adds the facts listed in <<probe-version-5,the probe version 5 section>>.
 If the probe encounters a terminal media error, the probe returns a typed error.
 Replace `MediaProbe` as the probe's return type.
 Derive `MediaProbe` from the complete result for playback consumers.
@@ -270,8 +283,9 @@ Every job attempt of that variant then writes the same initialization segment.
 Some streams carry the values only in the SEI messages of their HEVC bitstream.
 Those streams report no static metadata, because probe version 4 reads no frames.
 A missing value therefore does not mean that a PQ stream is PQ10.
+Probe version 5 reads those values from the first frame (<<probe-version-5>>).
 The static metadata is not the raw color signaling.
-The transfer, primaries, matrix and range of a stream stay with the later probe version.
+Probe version 5 reports the transfer, primaries, matrix and range of each video stream.
 * The container's chapters, with each chapter's start time, end time and title.
 The chapter times use the timeline of the keyframe positions.
 A future chapter menu and the markers of https://github.com/streamarr/streamarr-server/issues/285[streamarr/streamarr-server#285] use the chapters.
@@ -342,6 +356,56 @@ The server can fix its own rule without a new probe.
 link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043] holds the library sample's handler names, which test the server's rule.
 The hearing-impaired flag comes from the same ffprobe run as the other version 4 facts (<<evidence-hearing-impaired>>).
 So https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60] marks SDH renditions without a later probe version.
+
+[[probe-version-5]]
+=== Probe version 5 reads the first frames of the chosen video stream and reports typed codec and color facts
+
+Probe version 5 reports every fact of probe version 4.
+https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] adds probe version 5.
+Probe version 5 adds these facts to a successful outcome:
+
+* The codec profile, codec level and codec tier of each video stream, as typed values.
+The probe reads those values from the stream's decoder configuration record or sequence header.
+The probe never maps ffprobe's profile name.
+A codec profile that the worker contract does not name is `UNSPECIFIED`.
+The codec level is absent when the probe cannot read a level.
+Each audio stream still reports only its profile name, as ffprobe prints it.
+* The color primaries, transfer characteristics, matrix coefficients and color range of each video stream.
+The worker contract numbers the primaries, the transfer and the matrix as ITU-T H.273 does.
+A value that the worker contract does not name is `UNSPECIFIED`.
+* Whether the probe read the first frames of each video stream.
+The probe reads the first 3 frames of the chosen video stream, or fewer when the stream holds fewer.
+The probe reads no frame of any other stream.
+* The HDR10+ and Dolby Vision RPU facts that the first frames show, as the probe version 5 section of ADR 0036 decides.
+Those facts include the fields of the first RPU header that tell the Dolby Vision profile.
+Those facts also include whether a sample that the probe read starts with an RPU.
+* The HDR10 static metadata of the first frame of the chosen video stream, when the container declares none.
+The values keep the units of the probe version 4 static metadata.
+* Whether each video stream carries a static metadata value that the probe could not read.
+* The content light level of the chosen video stream's Matroska track when the track's MaxCLL or MaxFALL element is 0 or missing.
+ffprobe reports a Matroska light level only when both elements are nonzero.
+When ffprobe reports no light level, the probe reads the two elements itself.
+A track that holds either element reports both values, with 0 for an element that the track does not hold.
+
+The server stores every one of these facts with the probe outcome.
+The server stores no `MediaFileProbePropertyIssue`.
+The server derives each issue from the stored facts when the server decides, as ADR 0036 decides.
+A fix to the rule that derives an issue therefore needs no new probe version.
+
+The upgrade to probe version 5 keeps every probe version 4 outcome.
+The server can still read a probe version 4 outcome, because probe version 5 does not change how the server reads a probe version 4 fact.
+On the upgrade, the server queues a re-scan itself, as <<upgrade-rescan,the section on source changes and probe versions>> describes.
+The re-scan runs through the existing scan library operation and the durable probe jobs.
+Playback keeps using each file's probe version 4 outcome until the server stores the file's probe version 5 outcome.
+A probe version 4 outcome stores no codec profile.
+ADR 0013 refuses a copy of an `UNSPECIFIED` codec profile only for an outcome of probe version 5 or later.
+
+*Why:* A probe that reads no frames cannot report HDR10+ or a Dolby Vision RPU as absent.
+Some streams carry their HDR10 static metadata only in their HEVC bitstream.
+Probe version 4 therefore could not tell HDR10 from PQ10.
+A Dolby Vision profile 5 stream without a configuration record names its profile only in its RPUs.
+https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] compares the codec profile and level with what a client declares, so streamarr/streamarr-server#395 needs typed values.
+The measurements are in <<evidence-frame-facts>> and <<evidence-static-hdr>>.
 
 [[output-frame-rate]]
 === The probe job chooses the output frame rate once per file
@@ -572,6 +636,8 @@ https://github.com/streamarr/streamarr-server/issues/66[streamarr/streamarr-serv
 * Probe version 4 adds the facts that <<probe-version-4,the probe version 4 section>> lists.
 https://github.com/streamarr/streamarr-server/issues/501[streamarr/streamarr-server#501] adds those facts.
 Probe version 4 also reports the keyframe positions of version 3.
+* Probe version 5 adds the facts that <<probe-version-5,the probe version 5 section>> lists.
+https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] adds those facts.
 
 Probe version 2 is unused.
 This ADR first gave version 2 to the facts for streamarr/streamarr-server#501.
@@ -579,7 +645,8 @@ The keyframe positions were ready first, so they shipped as version 3.
 No server requests probe version 2, and no worker advertises it.
 
 A change after probe version 4 does not add its facts to probe version 4.
-A probe version after version 4 adds caption detection: whether the video carries CEA-608 or CEA-708 captions.
+A change after probe version 5 does not add its facts to probe version 5.
+A later probe version adds caption detection: whether the video carries CEA-608 or CEA-708 captions.
 The probe detects the captions by decoding keyframes.
 https://github.com/streamarr/streamarr-server/issues/505[streamarr/streamarr-server#505] adds the caption detection.
 
@@ -1092,19 +1159,9 @@ The source snapshot currently uses file size and modification time.
 * Select streams other than the chosen video stream and the first audio stream.
 The code that decides how to transcode would need the selected stream indices.
 The worker contract and command builder would also need those indices.
-* Report typed codec profiles and levels and the color properties in a later probe version.
-The color properties are the transfer, primaries, matrix and range.
-Probe version 4 keeps only each audio stream's profile name, as ffprobe prints it.
-That later version also reads the HDR10 static metadata of a stream that carries the metadata only in its HEVC bitstream.
-That later version also reads HDR10+ metadata and Dolby Vision RPUs from frames.
-An RPU (reference processing unit) carries Dolby Vision's per-frame picture-adjustment instructions.
-The later version can then report HDR10+ and Dolby Vision as present or absent.
-https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] describes that later version, including the worker's part of it.
-* Identify a Dolby Vision stream without a configuration record that is really profile 5, by reading the RPU header of the stream's first frame.
-https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] adds that check.
-* Record a `MediaFileProbePropertyIssue`.
-Probe version 4 records no such issue, as ADR 0036 decides.
-https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] decides where these issues are stored.
+* Report typed codec profiles of audio streams.
+Probe version 5 keeps only each audio stream's profile name, as ffprobe prints it.
+* Read the frames of video streams other than the chosen video stream.
 
 == Consequences
 
@@ -1157,11 +1214,14 @@ The library sample held no multi-program transport stream.
 Second, 15 PGS subtitle streams in 7 of the 300 sampled files still had no size.
 None of the packets of those streams fell within 200 s or 1 GB.
 Third, a Dolby Vision profile 5 stream in MPEG-TS without the Dolby Vision descriptor reads as `UNSPECIFIED`.
-ADR 0013 records how such a stream plays until a later probe reads RPUs from frames.
-https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] describes that later probe.
 Fourth, a stream that carries its HDR10 static metadata only in its HEVC bitstream reports none.
 Every HEVC stream in MPEG-TS or in a raw HEVC file works this way.
-streamarr/streamarr-server#394 reads that metadata from the first frame.
+Probe version 5 closes the third gap and the fourth gap.
+Probe version 5 identifies such a profile 5 stream from its first RPU header.
+Probe version 5 reads such static metadata from the first frame.
+* The re-scan on the upgrade to probe version 5 probes every file again.
+Each of those probes reads the first frames of the chosen video stream.
+Each file keeps its probe version 4 decisions until the server stores the file's probe version 5 outcome.
 * Probes and job attempts no longer compete for a worker's slots.
 Before this amendment, probes shared the playback slots, and a worker defaulted to one slot.
 A cold scan of about 1,800 movies on a 72-core host then spent about 20 minutes probing, at about 1.6 files per second.
@@ -1245,6 +1305,9 @@ A scan that requests new inputs would therefore wait for the retry time even if 
 If the source became unreadable after the scan listed the file, the whole scan would fail instead of just the probe attempt.
 * Retry a failed file on each scan without saving why the probe failed.
 An administrator could not see why the file never became playable.
+* Delete the probe version 4 outcomes on the upgrade to probe version 5, as the upgrade to probe version 4 deleted older outcomes.
+The server can still read every probe version 4 outcome.
+Playback of every file would stop until the re-scan stored the file's probe version 5 outcome.
 * Keep version 1 and version 3 outcomes usable while the re-scan refreshes them to probe version 4.
 Those outcomes would read as an `UNSPECIFIED` dynamic range.
 Until the re-scan refreshed an HDR file's outcome, the server would copy that file or encode it without tone mapping.
@@ -1363,7 +1426,7 @@ Every operator, in Docker Compose and in Kubernetes, would have to grant that ca
 
 == Evidence
 
-Each group below holds the measurements behind one part of probe version 4.
+Each group below holds the measurements behind one part of probe version 4 or probe version 5.
 The measurements ran on 2026-09-27 against ffprobe and FFmpeg 8.1.2 in the pinned worker image.
 The write-ups and harnesses for these measurements were not committed.
 This Evidence section therefore gives the results.
@@ -1409,6 +1472,19 @@ The file still held both elements.
 * MP4 files with `hvc1` or `hev1` sample entries reported neither value as stream side data when only the `hvcC` record and the samples held the SEI messages.
 A Matroska file without the mastering elements, an MPEG-TS file and a raw HEVC file also reported none.
 * In all of those files, ffprobe reported both values as frame side data of the first frame.
+
+[[evidence-frame-facts]]
+=== Frame facts
+
+These measurements ran against ffprobe and FFmpeg 8.1.2 in the pinned worker image.
+
+* FFmpeg's H.264 decoder dropped the NAL units of type 28 that carry Dolby Vision profile 9 RPUs.
+ffprobe therefore could not observe those RPUs when ffprobe read frames.
+* ffprobe read the first frame of a Dolby Vision profile 5 sample without a configuration record.
+ffprobe reported the RPU header fields `vdr_rpu_profile` 0 and `bl_video_full_range_flag` 1.
+FFmpeg guesses profile 5 from the same fields when the configuration record is missing.
+* As a gut check, Jellyfin reads only the first video frame, with ffprobe's `-show_frames -only_first_vframe` options.
+Jellyfin sets only a nullable HDR10+ flag from that frame.
 
 [[evidence-stream-titles]]
 === Stream titles
@@ -1525,7 +1601,7 @@ Its 95 % intervals come from bootstrap resampling.
 * https://github.com/streamarr/streamarr-server/issues/418[Issue #418: Finish scans after the server records all required results]
 * https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499: Start extra quality levels and pick presets from measured encoder headroom]
 * https://github.com/streamarr/streamarr-server/issues/344[streamarr/streamarr-server#344: Backfill missing and outdated persisted outcomes], closed as not planned
-* https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394: The later probe version's facts, with its server and worker parts]
+* https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394: Probe version 5's facts, with its server and worker parts]
 * https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399: Playback capabilities epic]
 * https://github.com/streamarr/streamarr-server/issues/446[streamarr/streamarr-server#446: Refuse a video encode without a usable frame rate]
 * https://github.com/streamarr/streamarr-server/issues/501[streamarr/streamarr-server#501: Play HDR and 10-bit sources as SDR in every client]

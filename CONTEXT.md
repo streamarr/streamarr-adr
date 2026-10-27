@@ -69,6 +69,7 @@ _Avoid_: metadata for technical facts, probe metadata
 **MediaFileProbePropertyIssue**:
 A problem found when checking the container or stream properties reported by a media-file probe.
 A probe can succeed while the reported properties contain problems.
+The server derives each issue from the stored probe properties when it decides, and never stores an issue.
 _Avoid_: VideoPropertyIssue, MediaPropertyIssue, MediaFilePropertyIssue
 
 ### Video properties

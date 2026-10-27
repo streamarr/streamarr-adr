@@ -110,6 +110,7 @@ _Avoid_: codec (the family name alone), codec tag (the sample-entry four-charact
 **Dolby Vision profile**:
 The profile, level and base-layer compatibility that the Dolby Vision configuration record declares for a video stream, kept separate from the codec profile.
 Its values are claims that the probe checks against the picture signaling and the samples.
+When no configuration record names a profile, the probe derives the profile from the first RPU header, as FFmpeg does.
 _Avoid_: profile (unqualified), DV profile
 
 **Output frame rate**:

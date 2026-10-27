@@ -283,7 +283,7 @@ Every job attempt of that variant then writes the same initialization segment.
 Some streams carry the values only in the SEI messages of their HEVC bitstream.
 Those streams report no static metadata, because probe version 4 reads no frames.
 A missing value therefore does not mean that a PQ stream is PQ10.
-Probe version 5 reads those values from the first frame (<<probe-version-5>>).
+Probe version 5 reads those values from the first frame, or from the SEI messages of the first packets (<<probe-version-5>>).
 The static metadata is not the raw color signaling.
 Probe version 5 reports the transfer, primaries, matrix and range of each video stream.
 * The container's chapters, with each chapter's start time, end time and title.
@@ -379,14 +379,19 @@ The probe reads the first 3 frames of the chosen video stream, or fewer when the
 The probe reads no frame of any other stream.
 * The HDR10+ and Dolby Vision RPU facts that the first frames show, as the probe version 5 section of ADR 0036 decides.
 For H.264 and HEVC, the probe also parses the NAL units of the packets that hold those frames, because FFmpeg's decoders drop or ignore some RPUs.
-FFmpeg's AV1 decoders drop an RPU that they cannot parse, and the probe does not parse AV1 packets, so the probe never reports an AV1 stream's RPUs or Dolby Vision as `ABSENT`.
+The probe also reads the SEI messages of those packets and of the HEVC configuration record, because FFmpeg loses some HDR10+ and static metadata messages.
+H.264 streams therefore report HDR10+ as present or absent, as HEVC streams do.
+FFmpeg's AV1 decoders drop an RPU that they cannot parse, and drop a whole frame whose HDR10+ message they cannot parse.
+The probe does not parse AV1 packets, so the probe never reports an AV1 stream's HDR10+, RPUs or Dolby Vision as `ABSENT`.
 Those facts include the fields of the first RPU header that tell the Dolby Vision profile.
 Those facts also include whether a sample that the probe read starts with an RPU.
 * The mastering display of the first frame of the chosen video stream, when the container declares no mastering display.
 The content light level of that first frame, when the container declares no content light level.
+For H.264 and HEVC, when the first frame carries no value either, the value of the first SEI message that carries it and is not nested.
 The values keep the units of the probe version 4 static metadata.
-* Whether each video stream carries a static metadata value that the probe could not read.
+* Whether each video stream carries, or may carry, a static metadata value that the probe left absent.
 That includes a Matroska MasteringMetadata element that FFmpeg's Matroska demuxer drops because neither its primaries nor its luminance are complete.
+That also includes a value that the probe cannot rule out, as ADR 0036 decides, such as a value that a chosen AV1 stream lacks.
 A stream with such an omitted value is never PQ10.
 * The content light level of the chosen video stream's Matroska track when the track's MaxCLL or MaxFALL element is 0 or missing.
 ffprobe reports a Matroska light level only when both elements are nonzero.
@@ -411,6 +416,7 @@ Some streams carry their HDR10 static metadata only in their HEVC bitstream.
 Probe version 4 therefore could not tell HDR10 from PQ10.
 A Dolby Vision profile 5 stream without a configuration record names its profile only in its RPUs.
 FFmpeg's HEVC decoder ignores an RPU that is not the last NAL unit of its sample, so the frames alone can hide the RPUs of a malformed profile 5 stream.
+FFmpeg also loses the HDR10+ and static metadata messages that follow a rejected SEI message, so the frames alone can make an HDR10 stream look like PQ10.
 https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] compares the codec profile and level with what a client declares, so streamarr/streamarr-server#395 needs typed values.
 The measurements are in <<evidence-frame-facts>> and <<evidence-static-hdr>>.
 
@@ -1225,7 +1231,7 @@ Fourth, a stream that carries its HDR10 static metadata only in its HEVC bitstre
 Every HEVC stream in MPEG-TS or in a raw HEVC file works this way.
 Probe version 5 closes the third gap and the fourth gap.
 Probe version 5 identifies such a profile 5 stream from its first RPU header.
-Probe version 5 reads such static metadata from the first frame.
+Probe version 5 reads such static metadata from the first frame, or from the SEI messages of the first packets.
 * The re-scan on the upgrade to probe version 5 probes every file again.
 Each of those probes reads the first frames of the chosen video stream.
 Each file keeps its probe version 4 decisions until the server stores the file's probe version 5 outcome.
@@ -1504,6 +1510,18 @@ ffprobe reported no mastering display, either as stream side data or as side dat
 * No AV1 Dolby Vision sample was available.
 FFmpeg's source shows that both of its AV1 decoders ignore an RPU that fails to parse, and attach no RPU side data to that frame.
 The profile 10.0 rule rests on the RPU header fields that FFmpeg 8.1 reads for AV1, and was tested only with constructed inputs.
+* FFmpeg's source shows that its H.264 decoder stops reading an SEI NAL unit at the first message that it rejects.
+In the pinned build, an HEVC stream whose first SEI message was malformed, followed by an HDR10+ message, showed no HDR10+ on any frame.
+Before the probe read the SEI messages itself, it reported that stream's HDR10+ as `ABSENT`.
+* An MP4 file held, in its `hvcC` record, a user data message shorter than 16 bytes ahead of the mastering display, light level and HDR10+ messages.
+None of its first 3 frames carried any of the three.
+With the same messages inside a scalable nesting message (payload type 133), none of the frames carried any of the three either.
+* An AV1 stream held a malformed HDR10+ message in its first temporal unit.
+ffprobe exited with status 0 and reported 7 frames, none with HDR10+.
+A truncated mastering display or light level message in the first temporal unit failed the first group of pictures, and the later frames carried no static metadata.
+* The worker's recorded ffprobe results include HEVC and H.264 samples with their first packets.
+With the SEI read, every such HEVC sample kept its facts, and a PQ10 sample stayed PQ10.
+The four such H.264 samples now report HDR10+ as `ABSENT`.
 
 [[evidence-stream-titles]]
 === Stream titles

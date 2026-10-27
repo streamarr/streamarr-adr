@@ -382,17 +382,19 @@ A read that keeps fewer than 3 frames of a stream that may hold more reports no 
 For H.264 and HEVC, the probe also parses the NAL units of the packets that hold those frames, because FFmpeg's decoders drop or ignore some RPUs.
 The probe also reads the SEI messages of those packets and of the HEVC configuration record, because FFmpeg loses some HDR10+ and static metadata messages.
 H.264 streams therefore report HDR10+ as present or absent, as HEVC streams do.
-FFmpeg's AV1 decoders drop an RPU that they cannot parse, and drop a whole frame whose HDR10+ message they cannot parse.
-The probe does not parse AV1 packets, so the probe never reports an AV1 stream's HDR10+, RPUs or Dolby Vision as `ABSENT`.
+FFmpeg's AV1 decoders drop the RPUs, the frames and the rest of the packets whose metadata OBUs they cannot parse, and never apply the metadata OBUs of the `av1C` record.
+For AV1, the probe therefore reads the metadata OBUs of the `av1C` record and of those packets.
+AV1 streams therefore report HDR10+, RPUs and Dolby Vision as present or absent, as H.264 and HEVC streams do.
 Those facts include the fields of the first RPU header that tell the Dolby Vision profile.
 Those facts also include whether a sample that the probe read starts with an RPU.
 * The mastering display of the first frame of the chosen video stream, when the container declares no mastering display.
 The content light level of that first frame, when the container declares no content light level.
 For H.264 and HEVC, when the first frame carries no value either, the value of the first SEI message that carries it and is not nested.
+For AV1, when the first frame carries no value either, the value of the first mastering display or content light level metadata OBU without an extension byte.
 The values keep the units of the probe version 4 static metadata.
 * Whether each video stream carries, or may carry, a static metadata value that the probe left absent.
 That includes a Matroska MasteringMetadata element that FFmpeg's Matroska demuxer drops because neither its primaries nor its luminance are complete.
-That also includes a value that the probe cannot rule out, as ADR 0036 decides, such as a value that a chosen AV1 stream lacks.
+That also includes a value that the probe cannot rule out, as ADR 0036 decides, such as a value that an SEI NAL unit or an OBU that the probe could not delimit may hold.
 A stream with such an omitted value is never PQ10.
 * The content light level of the chosen video stream's Matroska track when the track's MaxCLL or MaxFALL element is 0 or missing.
 ffprobe reports a Matroska light level only when both elements are nonzero.
@@ -418,6 +420,7 @@ Probe version 4 therefore could not tell HDR10 from PQ10.
 A Dolby Vision profile 5 stream without a configuration record names its profile only in its RPUs.
 FFmpeg's HEVC decoder ignores an RPU that is not the last NAL unit of its sample, so the frames alone can hide the RPUs of a malformed profile 5 stream.
 FFmpeg also loses the HDR10+ and static metadata messages that follow a rejected SEI message, so the frames alone can make an HDR10 stream look like PQ10.
+FFmpeg's AV1 decoders lose metadata OBUs in the same way, so the frames alone can also hide an AV1 stream's HDR10+, RPUs and static metadata.
 https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] compares the codec profile and level with what a client declares, so streamarr/streamarr-server#395 needs typed values.
 The measurements are in <<evidence-frame-facts>> and <<evidence-static-hdr>>.
 
@@ -1508,7 +1511,7 @@ ffprobe reported Dolby Vision RPU side data on none of the first 3 frames.
 The unchanged stream reported the side data on all 3 frames.
 * A PQ Matroska file held a MasteringMetadata element with a maximum luminance and no primaries, and its HEVC bitstream held no static metadata.
 ffprobe reported no mastering display, either as stream side data or as side data of the first frame.
-* No AV1 Dolby Vision sample was available.
+* No AV1 Dolby Vision sample from a real source was available.
 FFmpeg's source shows that both of its AV1 decoders ignore an RPU that fails to parse, and attach no RPU side data to that frame.
 The profile 10.0 rule rests on the RPU header fields that FFmpeg 8.1 reads for AV1, and was tested only with constructed inputs.
 * FFmpeg's source shows that its H.264 decoder stops reading an SEI NAL unit at the first message that it rejects.
@@ -1524,16 +1527,64 @@ A truncated mastering display or light level message in the first temporal unit 
 With the SEI read, every such HEVC sample kept its facts, and a PQ10 sample stayed PQ10.
 The four such H.264 samples now report HDR10+ as `ABSENT`.
 
-The measurements below ran on 2026-10-27 against FFmpeg and ffprobe 8.1.3 in the pinned worker image.
+The measurements below ran on 2026-10-27 against FFmpeg and ffprobe 8.1.3 in the pinned worker image, which decodes AV1 with libdav1d.
 Each file was constructed for the measurement.
+The AV1 files are an AV1 encode with metadata OBUs inserted into its temporal units, in IVF, MP4 and Matroska.
 Each before and after pair compares the worker's probe without and with the rule that the measurement tests.
 
+* An RPU OBU ahead of a frame's OBU reached that frame, and an RPU OBU after it reached the next frame.
+An HDR10+ OBU ahead of a hidden frame reached the shown frame of the same temporal unit.
+Mastering display and light level OBUs after the OBUs of frame 0 reached only frame 1 and later.
+* An HDR10+ OBU with a malformed body, or an HDR10+ OBU without its trailing bits, in the first temporal unit dropped frame 0.
+A truncated mastering display OBU dropped the rest of its packet.
+An RPU whose EMDF container had a wrong header was ignored, and its frame was kept.
+* A metadata OBU with an extension byte reached the frames when the sequence header's `operating_point_idc` was 0, which selects every layer.
+* FFmpeg's MP4 muxer copied the mastering display and light level OBUs of the first temporal unit into the `av1C` record.
+With those OBUs only in the `av1C` record, neither the frames nor the stream side data showed them.
+* The extradata of an AV1 stream in IVF was the bare OBUs: the sequence header and the metadata OBUs ahead of the first frame.
+* The worker's probe of the constructed AV1 MP4 files changed as follows when it began to walk the OBUs.
+Before the walk, the probe ruled nothing out for AV1.
++
+[cols="2,2,2"]
+|===
+|AV1 MP4 file |Before the OBU walk |With the OBU walk
+
+|PQ, without HDR10+, RPUs or static metadata
+|HDR10+ and Dolby Vision `UNSPECIFIED`, both static values omitted
+|HDR10+ and Dolby Vision `ABSENT`, no value omitted, so PQ10
+
+|An HDR10+ OBU that FFmpeg rejects, in the first temporal unit
+|HDR10+ `UNSPECIFIED`
+|HDR10+ `PRESENT`
+
+|Mastering display and light level OBUs after the OBUs of frame 0
+|No static value, both omitted
+|Both static values reported
+
+|An RPU in an EMDF container with a wrong header
+|Dolby Vision `UNSPECIFIED`
+|Dolby Vision `PRESENT` with an observed RPU and no RPU header
+
+|An RPU that FFmpeg parses
+|Dolby Vision `PRESENT` with its RPU header, HDR10+ `UNSPECIFIED`
+|The same Dolby Vision facts, HDR10+ `ABSENT`
+|===
++
+An AV1 PQ stream in IVF, and an AV1 MP4 file whose samples switch to another sample description, reported HDR10+ and Dolby Vision as `UNSPECIFIED` and both static values as omitted, before and after.
 * An HEVC MP4 file with an edit list held 288 packets and 97 frames, and its first 192 packets decoded to 1 frame.
 Before the probe counted a capped read of a longer stream as cut short, it reported HDR10+ and Dolby Vision as `ABSENT`.
 After, both are `UNSPECIFIED`.
 * A raw HEVC stream held its HDR10+ message inside a regional nesting message (payload type 157), and no frame showed HDR10+.
 Before the probe treated an unread nesting message as undelimited, it reported HDR10+ as `ABSENT`.
 After, HDR10+ is `UNSPECIFIED`.
+* A PQ HEVC stream in MPEG-TS, without static metadata, carried Annex B extradata.
+Before the probe treated such extradata as unread, it reported HDR10+ and Dolby Vision as `ABSENT` and the stream as PQ10.
+After, HDR10+ and Dolby Vision are `UNSPECIFIED`, both static values are omitted, and the stream is not PQ10.
+* A PQ HEVC MP4 file's second sample switched to another `hvcC` record.
+ffprobe printed that the packet carried new extradata, but not the record's bytes.
+Before the probe counted a read with a replacement record as one whose units it could not all delimit, it reported the stream as PQ10, with HDR10+ and Dolby Vision `ABSENT`.
+After, HDR10+ and Dolby Vision are `UNSPECIFIED`, and both static values are omitted.
+The same file without the switch still reports HDR10+ and Dolby Vision as `ABSENT`.
 
 [[evidence-stream-titles]]
 === Stream titles

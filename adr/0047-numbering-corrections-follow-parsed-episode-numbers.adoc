@@ -56,7 +56,7 @@ Sonarr parses the same fields and calls them `ParsedEpisodeInfo`.
 TMDB numbers are the numbers that TMDB uses for the same episode, and they can differ from the parsed episode numbers.
 Streamarr never edits, renames or moves a media file.
 
-=== A ServerAdmin corrects a season or an episode by its parsed season and episode numbers
+=== A ServerAdmin corrects a season or an episode by its parsed episode numbers
 
 A ServerAdmin can correct a season or an episode of a series.
 Each such correction is a numbering correction.
@@ -67,10 +67,17 @@ Parsed episode N of that season then matches episode N of the TMDB season.
 * An episode correction sends one parsed episode to one TMDB episode.
 For example, a ServerAdmin can say that parsed S01E10 is TMDB S02E01.
 
-Streamarr stores each numbering correction under the parsed season and episode numbers that it corrects.
+An episode correction attaches to a parsed season and episode number, a parsed air date or a parsed absolute episode number.
+*Why:* daily shows and absolute-numbered anime have no season and episode numbers in their file names, and Sonarr renames those files often.
+
+Streamarr stores each numbering correction under the parsed episode numbers that it corrects.
 Streamarr never stores a numbering correction under a file path.
 So a numbering correction still applies after Sonarr renames or upgrades a file.
-A numbering correction also applies to a future file with the same parsed season and episode numbers.
+A numbering correction also applies to a future file with the same parsed episode numbers.
+
+A file can hold a range of episodes, such as S01E01-E02.
+Each parsed episode in the range takes its own numbering correction.
+So multi-episode files (https://github.com/streamarr/streamarr-server/issues/650[streamarr/streamarr-server#650]) need no new kind of correction.
 
 An episode correction names its TMDB episode by TMDB's episode id.
 The episode's season and episode number alone aren't enough, because TMDB renumbers episodes.
@@ -84,16 +91,18 @@ Each series uses TMDB's default order until a ServerAdmin chooses another orderi
 TMDB's default order is what every series uses today.
 Streamarr never chooses an ordering.
 Streamarr never switches a series' ordering on its own.
+A ServerAdmin can also enter a TMDB episode group id directly, for a group that the comparison doesn't list.
 
 After a scan finishes, Streamarr compares the series' files with TMDB's default order.
 Streamarr also compares the files with each of the series' episode groups.
 Streamarr doesn't compare as each file arrives, because the fit depends on all the series' files.
 
 Streamarr shows which orderings fit.
-For each ordering, Streamarr shows three counts:
+For each ordering, Streamarr shows four counts:
 
 * the episodes whose title or air date agrees between the file and TMDB;
 * the episodes that Streamarr resolves to exactly one TMDB episode;
+* the files that the ordering couldn't place;
 * the collisions that Streamarr can't explain.
 
 Streamarr explains each ordering with these counts.
@@ -105,6 +114,68 @@ Parsing episode titles from file names is separate work, and this decision doesn
 
 When an ordering other than the current one fits better, Streamarr marks the series for a ServerAdmin to review.
 The ServerAdmin then chooses an ordering or keeps the current one.
+Before the ServerAdmin confirms a new ordering, the review shows how many watched episodes would move.
+
+When a ServerAdmin chooses an ordering, Streamarr matches the series again at high priority.
+Streamarr matches each uncorrected file again from its parsed episode numbers.
+Streamarr never starts from the episode that the file matched before.
+*Why:* a match that starts from the old episode keeps the old ordering's episode (jellyfin/jellyfin#18450).
+
+=== A file's numbers count positions in an episode group
+
+Under an episode group, season N means the group's Nth section, not counting the specials section.
+Episode E means the Eth episode in that section's list.
+The group's specials section is season 0.
+*Why:* DVD-order releases number their files by position.
+
+=== A file that the chosen ordering has no place for stays unmatched
+
+A file can carry numbers that the chosen ordering has no episode for.
+That file stays playable and unmatched, as https://github.com/streamarr/streamarr-server/issues/642[streamarr/streamarr-server#642] describes.
+Streamarr never falls back to TMDB's default order for the file.
+The comparison counts the file as a file that the ordering couldn't place.
+*Why:* a silent fallback puts another episode's details on the file (jellyfin/jellyfin#11274).
+
+=== Streamarr keeps both readings of an ambiguous file name
+
+Some file names can mean an absolute episode number or a season 1 episode number, such as `Episode 127`.
+Streamarr keeps both readings.
+The chosen ordering decides which reading applies.
+An absolute episode group takes the absolute reading.
+Every other ordering takes the season 1 reading.
+The comparison job tests both readings.
+Streamarr never reads absolute episode 127 as S01E127 unless the chosen ordering says so.
+*Why:* a reading that Streamarr fixes when it parses the name puts episodes in the wrong season or drops them (jellyfin/jellyfin#17922, jellyfin/jellyfin#16406).
+
+=== Date-named and absolute-numbered files select their episodes by those numbers
+
+A date-named file selects its episode by its parsed air date.
+Two TMDB episodes can share one parsed air date.
+Streamarr treats that as a collision and marks the series for a ServerAdmin to review.
+A file with only an absolute episode number selects its episode through the series' absolute episode group.
+
+=== A ServerAdmin links a file to an episode only as a last resort
+
+A file named only with the episode title has no parsed episode numbers.
+A numbering correction has nothing to attach to in that file.
+As a last resort, a ServerAdmin can link one file to one TMDB episode.
+A file-to-episode link belongs to that file.
+So a rename or a replacement of the file loses the link.
+Streamarr tells the ServerAdmin this before the ServerAdmin makes the link.
+
+=== Specials always stay in season 0
+
+Specials always appear in season 0, their own category.
+They stay there even when the chosen ordering places them inside a regular season.
+A numbering correction can still send a file to a special.
+*Why:* specials belong in their own category, apart from the regular seasons.
+
+=== Clients show the chosen ordering's season and episode numbers
+
+Clients show each episode with the season and episode numbers of the series' chosen ordering.
+Specials stay in season 0, as the previous section decides.
+A season that a numbering correction moved to another TMDB series appears under that TMDB series.
+*Why:* the ServerAdmin chose the ordering so that viewers see it (jellyfin/jellyfin#17410).
 
 === Streamarr compares orderings in a background job, and only when something it compared changes
 
@@ -153,9 +224,21 @@ ADR 0039 says that all user-authored data belongs on the catalog entry, which ev
 Numbering corrections and chosen orderings don't belong there, because two libraries can number one show differently.
 Catalog entries still hold metadata edits and watch state.
 
+
+=== Watched marks and resume positions follow the file
+
+A numbering correction or a newly chosen ordering can move a file to another TMDB episode.
+Each Profile's watched mark and resume position for that file then move with the file.
+*Why:* a Profile watched the file's content, not its number.
+
+Watch state still lives on the catalog entry, as ADR 0039 decides.
+Streamarr moves the watch state by an explicit transfer from the old episode's catalog entry to the new episode's catalog entry.
+Streamarr transfers only the watch state that came through the file's item, as ADR 0039's fix match does.
+This transfer must work with https://github.com/streamarr/streamarr-server/issues/459[streamarr/streamarr-server#459], which keeps watch state when Streamarr recreates an item.
+
 === An episode correction comes first, then a season correction, then the chosen ordering
 
-For a file with a parsed season and episode number, Streamarr applies the first rule that covers the file:
+For a file with parsed episode numbers, Streamarr applies the first rule that covers the file:
 
 . an episode correction;
 . a season correction;
@@ -169,31 +252,17 @@ Streamarr never falls back silently to a lower rule in place of a broken numberi
 A file that a broken numbering correction covers keeps the episode that the file showed before.
 A new file that a broken numbering correction covers stays playable and unmatched, as streamarr/streamarr-server#642 describes.
 
-=== Files without a parsed season and episode number use their other parsed numbers or a file-to-episode link
-
-Some files carry no season and episode number in their names:
-
-* a file named only with the episode title;
-* a date-named file;
-* an anime file numbered from the show's first episode, such as `Episode 127`.
-
-A numbering correction has nothing to attach to in these files.
-
-A date-named file selects its episode by its parsed air date.
-An absolute-numbered file selects its episode by its parsed absolute episode number in the series' absolute episode group.
-Streamarr never reads absolute episode 127 as S01E127.
-A file named only with the episode title has no parsed episode numbers.
-
-As a last resort, a ServerAdmin can link one file to one TMDB episode.
-A file-to-episode link belongs to that file.
-So a rename or a replacement of the file loses the link.
-Streamarr tells the ServerAdmin this before the ServerAdmin makes the link.
+Streamarr works out which episodes are missing after it applies the numbering corrections and the chosen ordering.
+Streamarr matches episodes to files by TMDB episode id when it works out which episodes are missing.
+*Why:* a list of missing episodes that counts by another numbering shows episodes that the library already has (jellyfin/jellyfin#17379).
 
 === A TMDB change never silently moves a corrected file
 
 A refresh never silently changes which episode a corrected file shows.
 A stored TMDB episode id can disappear, or TMDB can move that episode to other numbers.
 In either case, Streamarr marks the series for a ServerAdmin to review.
+TMDB can also delete the chosen episode group.
+Streamarr then keeps its stored copy of the group and marks the series for a ServerAdmin to review.
 
 === A ServerAdmin resets a series' numbering after Sonarr renumbers it
 
@@ -204,10 +273,8 @@ After a reset, the series uses TMDB's default order.
 
 === Explicitly deferred
 
-* Multi-episode files, which streamarr/streamarr-server#650 covers.
+* Attaching a multi-episode file to every episode it holds, which streamarr/streamarr-server#650 covers.
 * The exact rule that decides when one ordering fits better than another.
-* How Streamarr tells an absolute number from an episode number whose season is missing.
-* Whether watch state follows a file when a numbering correction or a new ordering moves the file to another episode.
 * What happens to a series' numbering corrections and chosen ordering when a ServerAdmin removes the series' library.
 
 == Consequences
@@ -222,8 +289,10 @@ Those files then share metadata edits and watch state, as ADR 0039 decides.
 * A rescan that changes nothing costs no TMDB requests.
 * A series without episode groups costs no extra TMDB requests.
 * A series with episode groups costs one TMDB request for each group, once, plus the occasional refresh.
-* A ServerAdmin's ordering choice can move files to other episodes, including episodes that a Profile already watched.
-The ServerAdmin sees the counts before choosing.
+* A ServerAdmin's ordering choice can move files to other episodes.
+A Profile's watched marks and resume positions move with the files, and the review shows the ServerAdmin how many watched episodes would move.
+* Clients can show season and episode numbers that differ from TMDB's default order.
+* A file that the chosen ordering can't place shows as unmatched, never with another episode's details.
 
 == Rejected Alternatives
 
@@ -246,6 +315,10 @@ An unchanged rescan would repeat the same TMDB requests and the same comparison.
 Two libraries can number one show differently.
 * Offer a per-series ordering setting that doesn't show how well each ordering fits.
 The ServerAdmin then can't see which ordering fits.
+* Fall back to TMDB's default order for a file that the chosen ordering has no place for.
+The fallback puts another episode's details on the file.
+* Place specials inside regular seasons where the chosen ordering does.
+Specials belong in their own category.
 
 == References
 

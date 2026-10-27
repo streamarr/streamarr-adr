@@ -450,6 +450,7 @@ _Avoid_: display order, sort order, episode order (unqualified)
 
 **Numbering correction**:
 A ServerAdmin's rule that sends one parsed season to a TMDB season, or one parsed episode to a TMDB episode, for a series in one library.
+An episode correction attaches to a parsed season and episode number, a parsed air date or a parsed absolute episode number.
 An episode correction comes first, then a season correction, then the series' episode ordering (ADR 0047).
 _Avoid_: metadata edit (a value on the catalog entry), override (reserved for administrative overrides in ADR 0024), mapping, remap
 

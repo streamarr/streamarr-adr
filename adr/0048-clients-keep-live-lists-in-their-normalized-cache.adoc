@@ -1,0 +1,98 @@
+= ADR 0048: Clients Keep Live Lists in Their Normalized Cache
+
+== Status
+
+Proposed
+
+== Context
+
+link:0042-graphql-subscriptions-run-over-websocket-until-token-expiry.adoc[ADR 0042] requires clients to keep queried lists current from subscription events.
+ADR 0042 sets the list rules.
+An insertion within the loaded range grows the list.
+A removal shrinks the list.
+Pagination stays usable when membership changes.
+
+Entity normalization does not maintain list membership, so each client must place list changes itself.
+The web client uses Apollo Client field policies.
+A field policy tells the cache how to key a field, how to merge an incoming value, and how to read the stored value.
+The web client merges fetched pages and live changes inside the cache in one synchronous step.
+
+Apollo iOS has no merge or read policies.
+The tvOS client kept a second copy of each list's pages outside the Apollo store.
+That copy held page bounds, membership, page splits and an ordered queue of writes.
+The client decided a change from one copy, waited for the store, and then updated the other copy.
+Most races found in the live Library feed came from that wait between the two copies.
+
+Apollo iOS 2.4.0 adds a second problem.
+The store's internal read-write lock can let two write transactions run at the same time.
+apollographql/apollo-ios-dev#1093 fixes the lock, but no release includes the fix yet.
+
+Apollo iOS also does not tell watchers when records are removed.
+A watcher can keep showing a removed item until another change touches the same keys.
+
+Apollo is planning a rewrite of the Apollo iOS cache.
+The rewrite plan covers storage and expiry.
+The plan does not include merge or read policies.
+Work on the rewrite stalled in mid-2026.
+
+== Decision
+
+Each client keeps the membership of a live list in its normalized cache.
+The cache merges fetched pages and live changes into the stored list.
+A client does not keep a second copy of a list's pages or membership outside the cache.
+
+The cache stores each list once per query.
+The cache key for a list leaves out the paging arguments.
+Paging arguments choose a position in the list, not the list's membership.
+The web client follows this rule with `keyArgs`.
+
+Each merge reads the stored list, decides the change, and writes the result in one step.
+The cache holds its own lock for that step.
+Lists stay correct even when the Apollo iOS store lock lets two transactions overlap.
+A store transaction can still read and write through the cache, but the cache does not assume that transactions run one at a time.
+
+Every change to the cache reports the keys that the change touched.
+Removals and cache sweeps report their keys too.
+Watchers re-read the data for every reported key.
+
+The Apple client builds its cache policies in three parts.
+
+* A policy configuration names each policy by type and field.
+  The configuration uses the Apollo Client web terms: `keyArgs`, `merge` and `read`.
+* A policy engine applies the configuration.
+  The engine makes every list decision while it holds the cache's lock.
+* A thin adapter connects the engine to the Apollo iOS `NormalizedCache` protocol.
+  Only the adapter depends on Apollo iOS record formats and cache protocols.
+
+List code uses the configuration and the engine.
+List code never reads or writes Apollo iOS records directly.
+A move to a later Apollo iOS cache replaces the adapter, not the policies or the list code.
+
+== Consequences
+
+* The web and Apple clients describe list behavior with the same concepts.
+  A list rule from ADR 0042 maps to a `merge` or `read` policy on both clients.
+* The Apple client owns a cache engine that Apollo iOS does not provide.
+  The project maintains the engine, and contract tests pin every Apollo iOS behavior that the adapter relies on.
+* The Apple client no longer depends on Apollo iOS transactions for list correctness.
+  The client still uses Apollo iOS for fetching, normalization, watchers and subscriptions.
+* A watcher re-reads a whole list after each change to that list.
+  Long lists make each re-read more expensive, so the Apple client must measure the cost on Apple TV hardware.
+* A future Apollo iOS cache with merge policies can replace the engine.
+  That replacement is optional, because the configuration already uses the web terms.
+
+== Rejected Alternatives
+
+* Keep a second copy of each list's pages outside the store — deciding on one copy and writing the other across an `await` caused most live-list races.
+* Split a cached page when a live change falls inside the page — a single stored list per query removes any need for page splits.
+* Give each list one main-actor owner and use Apollo only for fetching and normalization — the owner would duplicate list state that the cache already holds, and the web client would use a different model.
+* Wait for the Apollo iOS cache rewrite — the rewrite plan has no merge or read policies, and work on the rewrite stalled.
+
+== References
+
+* link:0042-graphql-subscriptions-run-over-websocket-until-token-expiry.adoc[ADR 0042: GraphQL Subscriptions Keep Queried Screens Current over WebSocket until Token Expiry]
+* https://www.apollographql.com/docs/react/caching/cache-field-behavior[Apollo Client — Customizing the behavior of cached fields]
+* https://www.apollographql.com/docs/react/pagination/key-args[Apollo Client — Key arguments in Apollo Client]
+* https://github.com/apollographql/apollo-ios-dev/pull/1093[apollographql/apollo-ios-dev#1093 — AsyncReadWriteLock fix]
+* https://github.com/apollographql/apollo-ios/issues/3493[apollographql/apollo-ios#3493 — Removing records does not notify watchers]
+* https://github.com/apollographql/apollo-ios-dev/blob/design/rfc-caching/apollo-ios/Design/rfc-caching-rewrite.md[Apollo iOS caching rewrite RFC]

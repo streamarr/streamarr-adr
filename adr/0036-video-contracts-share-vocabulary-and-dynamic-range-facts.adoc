@@ -178,7 +178,7 @@ The probe derives it when it runs, from the base layer's signaled transfer chara
 The signaled transfer decides the value: `SDR` for a standard-dynamic-range transfer, `PQ` for SMPTE ST 2084, and `HLG` for ARIB STD-B67.
 `PQ` covers both HDR10 and PQ10; whether the static HDR metadata is present is a separate stream property.
 `NONE` means the stream has no standard compatible base: Dolby Vision declares none, or the signaled transfer is unspecified while Dolby Vision is present, as in Profile 5.
-From probe version 5 on, a Dolby Vision profile 5 stream's `compatibleBase` is `NONE` whatever the signaled transfer says (<<decision-probe-version-5>>).
+From probe version 5 on, the `compatibleBase` of a Dolby Vision profile 5 or profile 10.0 stream is `NONE` whatever the signaled transfer says (<<decision-probe-version-5>>).
 `UNSPECIFIED` means the probe could not read the transfer and found no Dolby Vision claim.
 When the Dolby Vision compatibility identifier disagrees with the signaled transfer, the signaled transfer wins.
 The server then derives a `MediaFileProbePropertyIssue` that names both claims (<<decision-property-issues>>).
@@ -192,7 +192,7 @@ Both `hdr10Plus` and Dolby Vision may be `PRESENT` in the same stream.
 `PRESENT` means the probe found any of a configuration record, a Dolby Vision sample entry, or an RPU in the samples; `ABSENT` means the probe checked all three and found none; `UNSPECIFIED` means the probe could not check.
 Inside `PRESENT`, `declared` holds the configuration record whole or not at all, because the record carries its profile, level, base-layer compatibility identifier and layer flags together, and every value in it is a claim.
 `observedRpu` records whether the samples contain the Dolby Vision picture-adjustment instructions, and it is `UNSPECIFIED` when the probe read no frames.
-A record that claims RPUs over samples that contain none keeps both facts, and the server derives a `MediaFileProbePropertyIssue` from those facts.
+A record that claims RPUs over samples that contain none keeps both facts, and the mismatch is not a `MediaFileProbePropertyIssue` (<<decision-property-issues>>).
 A `PRESENT` stream with no record and no observed RPU still counts as Dolby Vision.
 The Dolby Vision profile of such a stream could be one with no compatible base.
 <<decision-undeclared-client>> decides which playback paths such a stream permits for a client that declares no dynamic range.
@@ -269,34 +269,42 @@ This section decides how those facts use this ADR's vocabulary.
 The probe reads fewer frames when the stream holds fewer than 3.
 The probe reads no frame of any other stream.
 Each video stream reports whether the probe read its first frames.
-* For the chosen video stream, `hdr10Plus` and `observedRpu` are `PRESENT` or `ABSENT` when the probe can see the feature in the frames that the probe read.
-`ABSENT` means that the frames the probe read carry no such information.
+* For the chosen video stream, `hdr10Plus` and `observedRpu` are `PRESENT` or `ABSENT` when the probe can see the feature in what the probe read.
+`ABSENT` means that what the probe read carries no such information.
 A feature that the probe cannot see in a codec stays `UNSPECIFIED`.
 A video stream whose frames the probe did not read reports `ABSENT` for no feature.
 * For HEVC and AV1, the probe finds HDR10+ information and RPUs in the side data that ffprobe reports for each frame.
-* FFmpeg's H.264 decoder drops the NAL (network abstraction layer) units of type 28.
-Those NAL units carry the RPUs of Dolby Vision profile 9.
-For H.264, the probe therefore parses the NAL units of the stream's packets itself.
-* For the chosen video stream, `dolbyVision` is `ABSENT` when the probe found no configuration record, no Dolby Vision sample entry and no RPU in the frames that the probe read.
+* FFmpeg's decoders lose some RPUs before ffprobe reports a frame.
+FFmpeg's H.264 decoder drops the NAL (network abstraction layer) units of type 28, which carry the RPUs of Dolby Vision profile 9.
+FFmpeg's HEVC decoder ignores an RPU that is not the last NAL unit of its sample, and an RPU that it cannot parse.
+For H.264 and HEVC, the probe therefore also parses the NAL units of the packets that hold the frames it read.
+`observedRpu` is `PRESENT` when either the frames or those packets hold an RPU.
+`observedRpu` is `ABSENT` only when the probe could delimit every NAL unit of those packets and found no RPU.
+* For the chosen video stream, `dolbyVision` is `ABSENT` when the probe found no configuration record, no Dolby Vision sample entry and no RPU in what the probe read.
 * Every other video stream keeps the dynamic-range facts of probe version 4.
 For every other video stream, `hdr10Plus` and `observedRpu` stay `UNSPECIFIED`, and `dolbyVision` is never `ABSENT`.
 * When the probe finds an RPU, `dolbyVision` keeps the fields of the first RPU's header that tell the Dolby Vision profile.
+The probe takes that header from the frames, or from the packets when the frames show no RPU.
 For a stream without a configuration record, the probe derives the Dolby Vision profile from those header fields, the way FFmpeg 8.1 guesses the profile.
 For HEVC, an RPU header with `vdr_rpu_profile` 0 and `bl_video_full_range_flag` 1 means profile 5.
+For AV1, the same header fields mean profile 10.0.
 The worker contract spells out the rule for each codec.
 An RPU header does not carry the compatibility identifier of profile 8.
 The signaled transfer therefore still decides the compatible base of a profile 8 stream without a configuration record.
-* Dolby Vision profile 5 has no compatible base.
-A profile 5 picture is correct only after the player reshapes the picture with the stream's RPUs.
-From probe version 5 on, a profile 5 stream's `compatibleBase` is `NONE` whatever the signaled transfer says.
+* Dolby Vision profiles 5 and 10.0 have no compatible base.
+Profile 5 is HEVC, and profile 10.0 is AV1.
+A picture of either profile is correct only after the player reshapes the picture with the stream's RPUs.
+From probe version 5 on, the `compatibleBase` of a profile 5 or profile 10.0 stream is `NONE` whatever the signaled transfer says.
 The probe knows profile 5 from the configuration record, or from the first RPU header when the stream has no configuration record.
+The probe knows profile 10.0 from a configuration record with profile 10 and compatibility identifier 0, or from the first RPU header when the stream has no configuration record.
 This rule covers a profile 5 stream tagged BT.709.
 This rule also covers a profile 5 stream in MPEG-TS without the Dolby Vision descriptor.
 * When `dolbyVision` is `PRESENT`, the probe also reports whether a sample that the probe read starts with an RPU ahead of the sample's picture.
 The RPU of a picture belongs after that picture, in the same sample.
 At least one muxer starts a new sample at each RPU, so each RPU sits in the next picture's sample.
 The last sample of such a file holds an RPU and no picture.
-The probe reports this fact as `UNSPECIFIED` when the probe could not see where the RPUs sit.
+The probe reads where the RPUs sit from the NAL units of the packets, for H.264 and HEVC.
+The probe reports this fact as `UNSPECIFIED` when the probe could not delimit the samples that hold the RPUs, and always for AV1.
 * Each video stream reports its codec profile, codec level and codec tier as typed values.
 The probe reads those values from the stream's decoder configuration record or sequence header.
 The probe never maps ffprobe's profile name.
@@ -315,14 +323,19 @@ When the container declares no content light level, the probe takes the content 
 Some streams carry the static metadata only in the SEI messages of their HEVC bitstream.
 Every HEVC stream in MPEG-TS or in a raw HEVC file works this way.
 The probe marks a value as omitted when the stream carries the value but the probe could not read the value.
+FFmpeg's Matroska demuxer drops a MasteringMetadata element when neither its primaries nor its luminance are complete.
+When ffprobe reports no mastering display for the chosen video stream of a Matroska file, the probe checks the track for that element itself.
+The probe marks the mastering display as omitted when the track holds the element.
 A PQ stream is PQ10 when the probe read its first frames and found neither a mastering display nor a content light level, and the probe omitted neither value.
-A stream with an omitted value carries static metadata, so that stream is not PQ10.
+A stream with an omitted value carries static metadata, so that stream is never PQ10.
 Probe version 5 therefore tells HDR10 from PQ10.
 
 *Why:* A probe that reads no frames cannot report a per-frame feature as `ABSENT`.
 A malformed profile 9 file's first sample holds no RPU, because the muxer moved that RPU into the next sample.
 A probe that read only the first frame would report that file's RPUs as `ABSENT`, and could not see where the RPUs sit.
 ffprobe cannot observe a profile 9 stream's RPUs when it reads frames, because FFmpeg's H.264 decoder drops the NAL units that carry those RPUs.
+ffprobe also misses the RPUs of an HEVC stream whose RPU is not the last NAL unit of its sample, such as a malformed profile 5 stream.
+Such a profile 5 stream without a configuration record would read as Dolby Vision `ABSENT`, and the server could copy it with teal colors.
 FFmpeg guesses the Dolby Vision profile from the first RPU header when the configuration record is missing.
 The pinned ffprobe reports the fields of that header.
 ffprobe reports static metadata that only the bitstream carries as side data of the first frame.
@@ -352,15 +365,13 @@ The server never copies such a stream, whatever the client declares.
 The server encodes such a stream.
 The encode interprets the signaled transfer.
 So the stream's `compatibleBase` follows the signaled transfer, and ADR 0013 decides from that compatible base whether the worker tone-maps.
-From probe version 5 on, a Dolby Vision profile 5 stream never has this issue, because its `compatibleBase` is `NONE` whatever its signaled transfer says (<<decision-probe-version-5>>).
+From probe version 5 on, a Dolby Vision profile 5 or profile 10.0 stream never has this issue, because its `compatibleBase` is `NONE` whatever its signaled transfer says (<<decision-probe-version-5>>).
 * An RPU that starts a sample.
 The malformed profile 9 files of <<decision-probe-version-5>> have this issue.
 The server never copies such a stream.
 The server encodes such a stream.
-* A configuration record that claims RPUs over frames that hold none.
-The issue applies when the record's `rpu` flag is set and `observedRpu` is `ABSENT`.
-This issue rules out no playback path.
-Playback follows the stream's `compatibleBase`.
+
+A configuration record that claims RPUs over frames that hold none is not a `MediaFileProbePropertyIssue`.
 
 *Why:* The probe facts record what the source holds.
 A property issue records the server's judgment of those facts.
@@ -430,7 +441,7 @@ Every other source permits only an encode to 8-bit 4:2:0 SDR.
 The planned output of that encode has `compatibleBase` set to `SDR`.
 The planned output also has `hdr10Plus` and `dolbyVision` set to `ABSENT`.
 Apart from those property issues, the answer depends on `compatibleBase` alone.
-The source's Dolby Vision profile changes the answer only through `compatibleBase`, as for profile 5.
+The source's Dolby Vision profile changes the answer only through `compatibleBase`, as for profiles 5 and 10.0.
 The source's HDR10+ presence does not change the answer.
 A PQ or HLG source without Dolby Vision or HDR10+ also permits only the SDR encode.
 A `PRESENT` Dolby Vision stream whose profile is unknown follows the same `compatibleBase` rule.
@@ -649,6 +660,11 @@ This ADR keeps probe version 4 at stream-level facts instead, and probe version 
 Probe version 5 identifies profile 5 from the first RPU header instead.
 * Letting the signaled transfer decide the `compatibleBase` of a profile 5 stream would give a profile 5 stream tagged BT.709 an SDR compatible base.
 The server would then copy that stream, and the copy plays with teal colors.
+A profile 10.0 stream has no compatible base either, so the same rule covers it.
+* Reading an HEVC stream's RPUs only from the frames that ffprobe decodes would miss an RPU that is not the last NAL unit of its sample.
+A malformed profile 5 stream without a configuration record would then read as Dolby Vision `ABSENT`.
+* Deriving a `MediaFileProbePropertyIssue` from a configuration record that claims RPUs over frames that hold none.
+That issue would rule out no playback path.
 * Reading only the first frame, as Jellyfin does, would miss the RPUs of a malformed profile 9 file.
 That file's first sample holds no RPU.
 * Reading an H.264 stream's RPUs from the frames that ffprobe decodes would report every profile 9 stream's RPUs as `ABSENT`.

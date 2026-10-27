@@ -99,8 +99,48 @@ For each ordering, Streamarr shows three counts:
 Streamarr explains each ordering with these counts.
 Streamarr never shows an invented confidence percentage.
 
+An episode title in a file's name can match a different TMDB episode than the one that an ordering assigns.
+That match is the strongest evidence that the ordering is wrong.
+Parsing episode titles from file names is separate work, and this decision doesn't design it.
+
 When an ordering other than the current one fits better, Streamarr marks the series for a ServerAdmin to review.
 The ServerAdmin then chooses an ordering or keeps the current one.
+
+=== Streamarr compares orderings in a background job, and only when something it compared changes
+
+Streamarr must check every series, because the main case shows no visible mismatch.
+A series in DVD order can have the same number of episodes in each season as TMDB's default order.
+Every file then lands on a listed episode, but the episode has the wrong content.
+A check that covers only series with a visible mismatch would miss that series.
+So the check must be cheap enough to run for every series.
+
+Streamarr already requests each series' details from TMDB.
+Streamarr adds the list of the series' episode groups to that request with TMDB's `append_to_response` parameter.
+So the list costs no extra request.
+Streamarr fetches each episode group's details once and stores them.
+Every library that holds the series shares the stored orderings.
+Each library keeps its own comparison result, numbering corrections and chosen ordering.
+
+Streamarr compares a series' orderings again only when something that it compared changes:
+
+* the parsed episode numbers or the file names of the series' files;
+* the series' TMDB match;
+* a numbering correction;
+* the chosen ordering;
+* a stored episode group that a refresh changed;
+* the comparison rules.
+
+A rescan that changes none of these sends no TMDB request and doesn't compare again.
+
+A durable background job compares the orderings at low priority.
+The job shares the TMDB rate limit with the rest of Streamarr.
+The scan itself never compares orderings.
+So a failed comparison never fails a scan.
+The job retries a failed comparison later.
+
+Streamarr refreshes the stored orderings occasionally.
+So Streamarr notices episode groups that TMDB adds or edits.
+A ServerAdmin can ask Streamarr to refresh them at any time.
 
 === Each library keeps its own numbering for a series
 
@@ -179,8 +219,9 @@ A ServerAdmin doesn't have to fix each file.
 * When two libraries' numbering leads to the same TMDB episodes, their files reach the same episode catalog entries.
 Those files then share metadata edits and watch state, as ADR 0039 decides.
 * A file-to-episode link is fragile, so it stays a last resort.
-* Streamarr must fetch each series' episode groups from TMDB to compare orderings.
-That adds TMDB requests to a scan.
+* A rescan that changes nothing costs no TMDB requests.
+* A series without episode groups costs no extra TMDB requests.
+* A series with episode groups costs one TMDB request for each group, once, plus the occasional refresh.
 * A ServerAdmin's ordering choice can move files to other episodes, including episodes that a Profile already watched.
 The ServerAdmin sees the counts before choosing.
 
@@ -196,6 +237,11 @@ Equal counts don't identify an ordering, because two orderings can have the same
 An automatic switch can also move episodes that a Profile already watched.
 * Let Streamarr choose the ordering and ask the ServerAdmin before switching.
 A ServerAdmin should choose the ordering explicitly, not approve Streamarr's pick.
+* Compare orderings only for series that show a visible mismatch.
+A series in DVD order can have the same number of episodes in each season as TMDB's default order.
+Its files then land on listed episodes with the wrong content, and the check never sees them.
+* Compare orderings on every scan.
+An unchanged rescan would repeat the same TMDB requests and the same comparison.
 * Store numbering corrections on the catalog entry, which every library shares.
 Two libraries can number one show differently.
 * Offer a per-series ordering setting that doesn't show how well each ordering fits.

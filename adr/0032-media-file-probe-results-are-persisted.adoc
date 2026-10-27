@@ -31,6 +31,12 @@ The server's cancel command tells the worker that a probe reached the timeout.
 Where the host provides Linux pressure stall information, high IO pressure also halves the capacity.
 That brake acts before probes reach the timeout.
 
+Another amendment stops retrying a probe whose worker replies keep breaking the worker contract (<<probe-contract-violations>>).
+After three consecutive contract violations for the same probe inputs, the server stores a terminal `probe_error`.
+Other temporary failures still retry without a limit.
+A scan probes a file with that terminal error again.
+A scan does not probe a file again for any other terminal error.
+
 == Context
 
 Streamarr learns a media file's technical properties by running ffprobe.
@@ -94,7 +100,9 @@ The media file reference, source size, modification time, and `probe_version` ar
 
 A missing container row means the database holds no completed probe outcome.
 A row without `probe_error` records a successful probe, even when some properties are unknown.
-A row with `probe_error` records a terminal media error.
+A row with `probe_error` records a terminal error.
+A terminal error is usually a media error.
+A terminal error can also record that the worker's replies broke the contract three times in a row (<<probe-contract-violations>>).
 The database stores no stream rows or container properties for that outcome.
 Both outcomes retain the source snapshot and `probe_version`.
 The server continues to use `media_file.status` when it matches and enriches files.
@@ -142,6 +150,7 @@ A scan records the source snapshot and probe version that it requests for each f
 Together, the snapshot and version are the requested inputs.
 If a file's stored outcome already matches those inputs, the scan counts that outcome at once.
 In that case, the file needs no new probe request.
+A terminal error from contract violations is the exception, as <<probe-contract-violations>> describes.
 If the source is removed before the scan reads its snapshot, the scan requests no probe task for that file.
 If the scan cannot enqueue a probe, the scan fails as link:0027-library-operations-are-durable-jobs.adoc[ADR 0027] describes.
 
@@ -150,7 +159,7 @@ The scan must also finish attempting to match and enrich each file.
 Each probe that the scan requested must also have one of these results:
 
 * The database holds a successful probe result for the requested inputs.
-* The database holds a terminal media error for the requested inputs.
+* The database holds a terminal error for the requested inputs.
 * The dispatcher has recorded why an attempt at the requested inputs failed.
 The attempt must have finished after the scan requested the probe.
 
@@ -205,7 +214,7 @@ The server then restores the status that the library had before the scan began.
 The server does not wait for probes or background artwork when it stops the scan.
 That work keeps running.
 Even after a scan completes, some files may not be ready for playback.
-The scan log counts ready files, terminal media errors, recorded failures, and probes that later work replaced.
+The scan log counts ready files, terminal errors, recorded failures, and probes that later work replaced.
 
 === The probe step
 
@@ -510,7 +519,8 @@ The migration must delete the affected container and stream rows.
 The migration must also document that playback remains restricted until the server rebuilds those rows.
 Apply the same rule when correcting codec data or data that determines which streams the server selects, even if no column is added.
 Increase `probe_version` whenever a probe column is added so the server can detect outdated outcomes when it processes files.
-Skip probing while the stored success or terminal media error matches the source snapshot and requested version.
+Skip probing while the stored success or terminal error matches the source snapshot and requested version.
+A scan still probes a file whose terminal error comes from contract violations (<<probe-contract-violations>>).
 Use the same scheduling path to refresh older terminal errors and older successful results.
 
 [[upgrade-rescan]]
@@ -638,7 +648,8 @@ For example, the worker reports `PROBE_FAILURE_SOURCE_UNAVAILABLE` when a share 
 Also use this reason when no connected worker can read the source namespace at the requested version.
 * Store `TEMPORARY` when the worker reports `PROBE_FAILURE_EXECUTION_FAILED`.
 Use the same reason when a worker is lost, unreachable or missing.
-Also use `TEMPORARY` when a reply breaks the contract or an unexpected exception occurs.
+Also use `TEMPORARY` when a reply breaks the worker contract or an unexpected exception occurs.
+After three consecutive contract violations, the server stops retrying the probe, as <<probe-contract-violations>> describes.
 
 A canceled attempt, including `PROBE_FAILURE_CANCELLED`, did not finish.
 Retry the probe with backoff and do not record a failure reason, just as when the probe waits for a busy worker.
@@ -647,6 +658,8 @@ The server treats that refusal as a wait for a busy worker and records no failur
 Do not store a retryable failure as a terminal `probe_error`.
 The server does not retry a terminal error while the source and probe version stay the same.
 An unreadable source may become readable again.
+The one exception is a probe whose replies broke the contract three times in a row (<<probe-contract-violations>>).
+A scan still probes a file with that terminal error again.
 Do not store the failure reason in `item_result`, because that table keys results by movie or series rather than by media file.
 Clear the failure reason when the server stores an outcome for the requested inputs or a request replaces those inputs.
 Keep the reason when a request specifies the same inputs again.
@@ -656,6 +669,61 @@ db-scheduler picks the execution again when the retry is due.
 Use capped backoff without requiring a file change or version bump.
 Keep one execution per media file during retries.
 Schedule retries without holding a database transaction across the delay.
+
+[[probe-contract-violations]]
+=== Three consecutive contract violations stop a probe's retries
+
+A contract violation is a worker reply that breaks the worker contract.
+For example, a reply can carry a result without an outcome.
+A reply can also list keyframe decode times that do not increase.
+
+After three consecutive contract violations for the same probe inputs, the server stops retrying the probe.
+The server then stores a terminal `probe_error` that names the contract violation.
+The terminal error tells a ServerAdmin that the worker, not the file, is at fault.
+After the first and the second contract violation, the probe retries with capped backoff, as the section on transient failures describes.
+The count covers only attempts at the same probe inputs.
+A request that replaces those inputs starts the count again.
+Any other recorded failure between two contract violations also starts the count again.
+
+Other `TEMPORARY` failures keep retrying with capped backoff and no limit.
+For example, the server keeps retrying when a worker is lost, unreachable or missing.
+An unrecognized failure value from a newer worker is not a contract violation.
+That failure value stays retryable and has no limit.
+
+Some contract violations break the worker session rather than one reply.
+An oversized message for one probe's result is an example.
+When the server can tie such a violation to one probe, the violation counts toward that probe's limit.
+When the server cannot tie the violation to one probe, the server ends the worker session.
+The probe then fails as an ordinary retryable failure, as when a worker is lost.
+
+A changed source and a new probe version retry a stopped file, as they retry every terminal error.
+Unlike other terminal errors, a scan also retries a file that contract violations stopped.
+A ServerAdmin's scan retries the file.
+Scheduled scans also retry the file once https://github.com/streamarr/streamarr-server/issues/480[streamarr/streamarr-server#480] ships.
+The scan deletes the terminal error in the transaction that saves the scan's probe request.
+The scan then waits for a result, as for any probe that the scan requests.
+The new attempts start the count of contract violations again.
+A playback request does not retry a stopped file, as <<playback>> describes.
+
+The server counts every contract violation in a metric tagged by cause.
+A ServerAdmin can therefore see contract violations before any file stops.
+
+*Why:* The same file and the same worker give the same broken reply on every attempt.
+A retry therefore cannot fix a contract violation.
+Only a worker fix can.
+Before this amendment, the server retried a contract violation forever.
+The backoff started at 5 s and doubled up to 300 s.
+Once the backoff reached 300 s, each retry cost a worker probe and a database write every five minutes.
+The broken reply never succeeded.
+A keyframe packet scan on a real library reached 17 consecutive identical failures.
+Keyframe packet scans already stop after three failed scans.
+https://github.com/streamarr/streamarr-server/pull/646[streamarr/streamarr-server#646] counts contract violations toward that limit.
+Probes use the same limit of three.
+A rare transient corruption breaks only one reply.
+The next attempt then succeeds.
+Three attempts therefore stop only a reply that keeps breaking.
+A worker fix that keeps the probe version changes neither the source nor the version.
+A scan is therefore how a worker fix reaches a stopped file.
 
 [[probe-capacity]]
 === Each worker grants a separate capacity for each kind of work, and playback comes first
@@ -1048,7 +1116,7 @@ After ADR 0033, a worker produces the media.
 * The server adds two entities: `MediaFileContainerInfo` and `MediaFileStreamInfo`.
 The server maps the complete probe result to rows in those tables.
 * Playback waits, within a configured bound, for a probe that the playback request moved to the front of the queue.
-Playback exposes typed errors for unavailable probe data and recorded terminal media failures.
+Playback exposes typed errors for unavailable probe data and recorded terminal errors.
 The server continues to retry transient failures in the background.
 db-scheduler runs the probe executions and stores when each execution should retry.
 Before the server publishes a result or ends an execution, the server rejects an attempt whose inputs a newer request replaced.
@@ -1110,6 +1178,12 @@ An operator who runs such a service on the host can still hold the background pr
 Keyframe packet scans wait until playback ends.
 * The worker contract carries a production time with each media segment's upload.
 ADR 0044's headroom takes production speed from those reports instead of from arrival times at the server.
+* A file whose worker replies keep breaking the contract stops after three attempts with a terminal error.
+The file stays unplayable until a scan, a changed source or a new probe version retries the file.
+A worker fix that keeps the probe version reaches such a file only through a scan.
+A transient corruption that repeats three times in a row also stops a file.
+The next scan then retries that file.
+* The server no longer spends a worker probe and a database write every five minutes on a reply that never succeeds.
 
 == Rejected Alternatives
 
@@ -1146,6 +1220,14 @@ Deployments keep the starter on.
 The two clients could differ in how they join the transaction that requests a probe.
 * Store retryable probe failures as a terminal `probe_error`.
 The server would not retry those failures while the source and probe version stayed the same.
+* Keep retrying a contract violation forever.
+Each retry costs a worker probe and a database write every five minutes.
+A broken reply never succeeds.
+* Store a terminal `probe_error` on the first contract violation.
+A rare transient corruption would then stop a file that a retry would fix.
+* Retry a file that contract violations stopped when a different worker build connects.
+The worker reports no build identity.
+A scan already lets a worker fix reach the file.
 * Count an attempt that waits for a busy worker or has been canceled as a failure.
 The scan would count files that no worker had finished probing.
 * Wait for every retry after an attempt fails.
@@ -1458,3 +1540,6 @@ Its 95 % intervals come from bootstrap resampling.
 * https://github.com/streamarr/streamarr-transcode-worker/issues/93[streamarr/streamarr-transcode-worker#93: Advertise probe capacity from the worker's cores, apart from playback slots]
 * https://github.com/streamarr/streamarr-transcode-worker/issues/104[streamarr/streamarr-transcode-worker#104: Slow background probes on every host when the host is busy and nothing plays]
 * https://github.com/streamarr/streamarr-server/issues/632[streamarr/streamarr-server#632: Tell the worker when a probe ends at the probe timeout]
+* https://github.com/streamarr/streamarr-server/issues/480[streamarr/streamarr-server#480: Scan every library on a server-wide schedule, on by default every 24 hours at 00:00]
+* https://github.com/streamarr/streamarr-server/pull/646[streamarr/streamarr-server#646: Stop retrying a keyframe scan forever when the worker's reply breaks the contract]
+* https://github.com/streamarr/streamarr-server/issues/649[streamarr/streamarr-server#649: Stop probing a file forever when the worker's probe reply breaks the contract]

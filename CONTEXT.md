@@ -436,6 +436,29 @@ Moving an item to a different catalog entry because it matched the wrong media t
 The ServerAdmin chooses which metadata edits to copy, and watch state attributable to that item is copied automatically.
 _Avoid_: rematch (unqualified), identify, unmatch
 
+**Parsed episode numbers**:
+The season number, episode number, absolute episode number or air date that Streamarr parses from a file's name or its season folder.
+Sonarr calls the same parsed fields `ParsedEpisodeInfo`.
+Numbering corrections attach to a file's parsed season and episode numbers, never to its file path (ADR 0047).
+_Avoid_: disk coordinates, file path, TMDB numbers (the numbers that TMDB uses for the same episode), episode number (unqualified)
+
+**Episode ordering**:
+The way TMDB arranges a series' episodes into seasons.
+It is TMDB's default order or one of the series' episode groups.
+A ServerAdmin chooses each series' episode ordering in each library, and Streamarr never chooses it (ADR 0047).
+_Avoid_: display order, sort order, episode order (unqualified)
+
+**Numbering correction**:
+A ServerAdmin's rule that sends one parsed season to a TMDB season, or one parsed episode to a TMDB episode, for a series in one library.
+An episode correction attaches to a parsed season and episode number, a parsed air date or a parsed absolute episode number.
+An episode correction comes first, then a season correction, then the series' episode ordering (ADR 0047).
+_Avoid_: metadata edit (a value on the catalog entry), override (reserved for administrative overrides in ADR 0024), mapping, remap
+
+**File-to-episode link**:
+A ServerAdmin's last-resort link from one file to one TMDB episode, for a file that its parsed episode numbers can't place.
+A rename or a replacement of the file loses the link (ADR 0047).
+_Avoid_: numbering correction, fix match (moving an item to another catalog entry), pin
+
 ### Watch state
 
 **Watch state**:

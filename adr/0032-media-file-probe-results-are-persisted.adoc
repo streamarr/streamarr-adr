@@ -426,7 +426,7 @@ FFmpeg's HEVC decoder ignores an RPU that is not the last NAL unit of its sample
 FFmpeg also loses the HDR10+ and static metadata messages that follow a rejected SEI message, so the frames alone can make an HDR10 stream look like PQ10.
 FFmpeg's AV1 decoders lose metadata OBUs in the same way, so the frames alone can also hide an AV1 stream's HDR10+, RPUs and static metadata.
 https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] compares the codec profile and level with what a client declares, so streamarr/streamarr-server#395 needs typed values.
-The measurements are in <<evidence-frame-facts>> and <<evidence-static-hdr>>.
+The measurements are in <<evidence-frame-facts>>, <<evidence-static-hdr>> and <<evidence-fate-sweep>>.
 
 [[output-frame-rate]]
 === The probe job chooses the output frame rate once per file
@@ -1629,6 +1629,68 @@ The recorded samples that carry HDR10+ or static metadata, in MPEG-TS and in raw
 On 2026-10-28, from the same recorded ffprobe output, the probe reported that stream as `STARTS_SAMPLE`, as it reports every stream whose packets with RPUs each start with their RPU.
 * On 2026-10-28, a local build of the worker image with the same FFmpeg 8.1.3 binary reported `STARTS_SAMPLE` for the profile 5 excerpt in the shifted and the own-first layouts, raw and in MP4, and `AFTER_OWN_PICTURE` for the excerpt in the conforming layout in MP4.
 * In a local build of the worker image with the same FFmpeg 8.1.3 binary, FFmpeg's MP4 and Matroska remuxes kept that own-picture layout in 100 of 100 samples.
+
+[[evidence-fate-sweep]]
+=== A sweep of FFmpeg's FATE samples
+
+These measurements ran on 2026-10-28 against a local build of the worker image with the same FFmpeg and ffprobe 8.1.3 binary as the pinned image.
+FATE is FFmpeg's automated test suite, and its samples are public test files.
+A separate script served as the oracle for each probe result.
+The oracle read the same packets with ffprobe, parsed their NAL units, SEI messages and OBUs itself, and read the side data of the decoded frames.
+The oracle counted a probe result as wrong in three cases.
+In the first case, the probe reported HDR10+, the observed RPU or Dolby Vision as `ABSENT`, and the oracle found that feature.
+In the second case, the probe reported a PQ10 stream, and the oracle found static metadata.
+In the third case, the probe's RPU placement disagreed with the oracle's reading of the packets.
+
+* The sweep ran the probe 508 times.
+** The sweep probed each of 472 FATE files once.
+Those files are the 383 H.264 and HEVC conformance streams, and 89 other samples whose first video stream is H.264, HEVC, AV1, VP9 or ProRes.
+The 89 samples include every FATE sample under 200 MB whose stream or first 30 frames carry HDR10+, HDR Vivid, a mastering display, a content light level or Dolby Vision metadata.
+** The sweep probed each of 28 rewraps once.
+The rewraps copied 10 of those samples, without a new encode, into raw streams, MP4, Matroska and MPEG-TS.
+** The sweep probed each of 8 crafted variants once.
+Six variants repeat a single-picture FATE sample, so that a read holds 3 frames: the HDR10+ sample and the HDR Vivid sample 6 times each, and a profile 7 sample 4 times, each as a raw stream and in Matroska.
+Two of those Matroska files held no media, and the probe failed both as invalid media.
+The other two variants start from the raw rewrap of the FATE profile 5 sample `mov/dovi-p5.mp4`.
+One variant changes the NAL unit header of each RPU to TemporalId 1, and the other changes it to layer 1.
+* The oracle counted no probe result as wrong.
+No feature read `ABSENT` where the oracle found that feature.
+No stream read as PQ10 where the oracle found static metadata.
+No RPU placement disagreed with the oracle.
+* 17 runs on FATE files and rewraps reported Dolby Vision `PRESENT` with an observed RPU.
+12 of those runs reported `AFTER_OWN_PICTURE`, as the oracle read their packets.
+The other 5 runs were the single-picture profile 7 samples in MP4 and Matroska and their rewraps.
+Their reads were cut short, and those runs reported `UNSPECIFIED`.
+The profile 7 variant that repeats the picture 4 times reported `AFTER_OWN_PICTURE`.
+* The sweep found one wrong fact that the oracle does not check.
+The probe reported the HDR10+ of the FATE VP9 sample in WebM as `UNSPECIFIED`, although FFmpeg's Matroska demuxer gives the frame the HDR10+ metadata of its BlockAdditional element.
+The probe ignored the frames of every codec other than HEVC and AV1.
+Once the frames of every codec counted, the probe reported that stream's HDR10+ as `PRESENT`.
+* Before the probe counted an HEVC NAL unit of type 62 as an RPU only on layer 0 with TemporalId 0, the probe reported both RPU header variants as Dolby Vision `PRESENT`.
+Each of those results held an observed RPU, the RPU header of profile 5 and a compatible base of `NONE`.
+FFmpeg attached no RPU to any frame of either variant.
+After the change, both variants report HDR10+ and Dolby Vision as `ABSENT`.
+Every other Dolby Vision sample, rewrap and variant kept its observed RPU and its RPU placement.
+* The contract accepts results that rule out less than the oracle's reading of the same packets.
+In each of the following runs, the probe reported HDR10+ or Dolby Vision as `UNSPECIFIED`, or marked a static metadata value as omitted.
+The counts come from the 500 runs on FATE files and rewraps before the two changes above, and neither change affects these runs.
+** 54 runs were cut short.
+In 50 of them, the stream held fewer packets than the kept read asked for, as the single-picture HDR10+ and HDR Vivid samples do.
+In the other 4, no read decoded more than 1 frame.
+** In 6 runs, no read decoded a frame, and the stream kept the dynamic-range facts of probe version 4.
+Five of those streams are conformance streams, and one of the five decoded no frame from 192 packets.
+The sixth stream is the single-picture HDR Vivid sample rewrapped into MP4.
+** 3 runs were of `h264/sei-1.h264`, raw and rewrapped into Matroska and MPEG-TS.
+The stream's mastering display SEI message holds a maximum luminance above 100,000,000, which FFmpeg drops, so the first frame carries only the primaries.
+The probe takes the first frame's incomplete value ahead of the SEI message, which holds every field.
+The probe therefore reported no mastering display and marked the mastering display as omitted.
+** In 1 run, an SEI NAL unit ended without its RBSP trailing bits, in `h264/brokensps.flv`.
+** In 3 runs, the walk could not delimit the packets.
+`h264/mixed-nal-coding.mp4` holds MP4 samples that also contain start codes.
+`h264/ref_10.avi` holds AVI extradata that is neither a configuration record nor Annex B.
+`h264/crew_cif.nal` is a raw H.264 stream whose first packet holds 2 bytes ahead of its first start code.
+** In 2 runs, the packets switched to another sample description and carried new extradata side data, in `h264/extradata-reload-multi-stsd.mov` and `hevc/extradata-reload-multi-stsd.mov`.
+* The FATE ProRes HDR10 sample in MXF kept the dynamic-range facts of probe version 4, and the probe took its static metadata from the container, because the probe walks no ProRes packets.
 
 [[evidence-stream-titles]]
 === Stream titles

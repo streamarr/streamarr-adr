@@ -405,21 +405,23 @@ The first picture packet is the first packet that holds a slice.
 The placement takes one of three values:
 ** `AFTER_OWN_PICTURE`: every RPU follows a slice of its own packet and is the last NAL unit of that packet, as Dolby Vision requires.
 FFmpeg's HEVC decoder reads an RPU only from the last NAL unit of a packet, so an RPU that a suffix SEI NAL unit follows matches no value.
-** `BEFORE_NEXT_PICTURE`: the first picture packet holds no RPU, and every packet with an RPU starts with it.
-Each picture's RPU then starts the next picture's sample, and the last sample holds an RPU and no picture.
-This is the shifted layout.
+An RPU that starts its packet counts toward `STARTS_SAMPLE`, whatever NAL units follow it.
+** `STARTS_SAMPLE`: at least one packet holds an RPU, and every packet that holds an RPU starts with it, whether or not the first picture packet holds one.
+** `UNSPECIFIED`: the probe could not tell the placement.
+The probe reports `UNSPECIFIED` unless `observedRpu` is `PRESENT`, the probe delimited every NAL unit of every packet that the walk covers, no packet holds two RPUs, and no packet ahead of the first picture packet holds an RPU.
+The probe also reports `UNSPECIFIED` when the packets meet the rule of neither other value, as when they mix layouts.
+* Two layouts start samples with RPUs, and both report `STARTS_SAMPLE`:
+** The shifted layout: each picture's RPU starts the next picture's sample, and the last sample holds an RPU and no picture.
 mkvmerge wrote this layout before version 57, released in 2021, whose release notes record the fix for NAL units of types 62 and 63 that it stored with the following frame.
 The malformed profile 9 files of <<decision-property-issues>> place their RPUs this way.
-** `UNSPECIFIED`: the probe could not decide, or the packets fit neither of the other values.
-The probe reports `UNSPECIFIED` unless `observedRpu` is `PRESENT`, the probe delimited every NAL unit of every packet that the walk covers, no packet holds two RPUs, and no packet ahead of the first picture packet holds an RPU.
-* When the first picture packet starts with an RPU, and every packet with an RPU starts with it, the placement is `UNSPECIFIED`.
-The first packets cannot tell the two layouts that start this way apart:
-** A file in the shifted layout whose start was cut away.
-Its first picture packet starts with the RPU of a picture that the cut removed.
-** A file whose RPUs each start their own picture's sample, in the own-first layout.
+A shifted file whose start was cut away keeps this layout, and its first picture packet starts with the RPU of a picture that the cut removed.
+** The own-first layout: each picture's sample starts with that picture's own RPU.
 This layout does not conform, and no known muxer writes it, but FFmpeg's MP4 and Matroska remuxes keep it.
-* When the worker moves a stream's RPUs before an encode (ADR 0013), it repairs an `UNSPECIFIED` placement as `BEFORE_NEXT_PICTURE`, because the shifted layout is the one that a known muxer wrote.
+* The two layouts share one value, because the first packets of a cut shifted file and of an own-first file look the same, and because both take the same repair.
+When the worker moves a stream's RPUs before an encode (ADR 0013), it repairs `STARTS_SAMPLE` as the shifted layout, because the shifted layout is the one that a known muxer wrote.
 An own-first file then shows each picture with the next picture's RPU.
+The server copies neither layout (<<decision-property-issues>>).
+* The worker also moves the RPUs of an `UNSPECIFIED` stream before such an encode, because the move leaves in place every RPU that already ends its sample (ADR 0013).
 * An AV1 stream always reports its RPU placement as `UNSPECIFIED`.
 FFmpeg's AV1 decoders attach an RPU to the next shown frame whose OBUs follow it, so an RPU ahead of its frame is the layout that AV1 expects.
 * The placement rests on the first packets alone.
@@ -462,7 +464,7 @@ A stream with an omitted value carries, or may carry, static metadata, so that s
 Probe version 5 therefore tells HDR10 from PQ10.
 
 *Why:* A probe that reads no frames cannot report a per-frame feature as `ABSENT`.
-A malformed profile 9 file's first sample holds no RPU, because the muxer moved that RPU into the next sample.
+When a malformed profile 9 file's start is intact, its first sample holds no RPU, because the muxer moved that RPU into the next sample.
 A probe that read only the first frame would report that file's RPUs as `ABSENT`, and could not see where the RPUs sit.
 ffprobe cannot observe a profile 9 stream's RPUs when it reads frames, because FFmpeg's H.264 decoder drops the NAL units that carry those RPUs.
 ffprobe also misses the RPUs of an HEVC stream whose RPU is not the last NAL unit of its sample, such as a malformed profile 5 stream.
@@ -486,10 +488,11 @@ A probe that left those forms unread could rule nothing out for any HEVC stream 
 FFmpeg's Matroska demuxer drops an incomplete MasteringMetadata element, so a Matroska track that the probe cannot read may still hold static metadata.
 FFmpeg's HEVC decoder reads an RPU only from the last NAL unit of a packet.
 An RPU that starts a sample belongs either to the picture before it or to the picture after it, and only the layout tells which.
-The probe therefore reports the layout that it saw, so that the worker can move each RPU behind the picture that it belongs to (ADR 0013).
-The first packets show the layout only when the first picture's sample holds no RPU.
-When it starts with one, a cut shifted file and an own-first file look the same, so the probe reports no layout rather than guess one.
+The probe therefore reports that the RPUs start their samples, so that the worker can move each RPU behind a picture (ADR 0013), and so that the server never copies the misplaced RPUs.
+The first packets tell the shifted layout from the own-first layout only when the first picture's sample holds no RPU.
+When it starts with one, a cut shifted file and an own-first file look the same, so one value covers both layouts, and the value claims only what the packets show.
 Either reading of that pattern gives each picture of the other layout a neighbour's RPU, and the worker's repair follows the layout that mkvmerge wrote.
+A cut shifted file still ends with a sample that holds an RPU and no picture, so a placement that left it unspecified would let the server copy it.
 A probe that reported a value it cannot rule out as missing would also call a stream PQ10 when the stream may be HDR10.
 For comparison, Jellyfin reads only the first video frame, and sets only a nullable HDR10+ flag from that frame.
 ADR 0032 gives the measurements behind the new facts.
@@ -518,13 +521,12 @@ The server encodes such a stream.
 The encode interprets the signaled transfer.
 So the stream's `compatibleBase` follows the signaled transfer, and ADR 0013 decides from that compatible base whether the worker tone-maps.
 From probe version 5 on, a Dolby Vision profile 5 or profile 10.0 stream never has this issue, because its `compatibleBase` is `NONE` whatever its signaled transfer says (<<decision-probe-version-5>>).
-* An RPU that starts a sample: an RPU placement of `BEFORE_NEXT_PICTURE` (<<decision-probe-version-5>>).
-The malformed profile 9 files of <<decision-probe-version-5>> have this issue when their start is intact.
+* An RPU that starts a sample: an RPU placement of `STARTS_SAMPLE` (<<decision-probe-version-5>>).
+The malformed profile 9 files of <<decision-probe-version-5>> have this issue whether or not their start was cut away, and so does a file in the own-first layout.
 The server never copies such a stream.
 The server encodes such a stream.
 When such an HEVC stream has no compatible base, as in profile 5, the worker moves its RPUs before the encode, so that the encode reshapes each picture (ADR 0013).
 An `UNSPECIFIED` or `AFTER_OWN_PICTURE` placement derives no issue.
-So a shifted file whose start was cut away, which reports `UNSPECIFIED`, derives none, and the server can copy it, although its last sample still holds an RPU and no picture.
 
 A configuration record that claims RPUs over frames that hold none is not a `MediaFileProbePropertyIssue`.
 
@@ -609,8 +611,7 @@ link:0013-stream-decision-architecture.adoc[ADR 0013] records the copy rule, the
 https://github.com/streamarr/streamarr-server/issues/66[streamarr/streamarr-server#66] adds a probe version that stores keyframe positions.
 From that probe version on, link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032] lets the server offer a stream copy only after the server knows the source's keyframe positions.
 Under this answer, the server copies Dolby Vision profile 8.2 and 9 sources, whose `compatibleBase` is `SDR`.
-The server encodes a profile 9 source whose RPU placement is `BEFORE_NEXT_PICTURE` (<<decision-property-issues>>).
-A profile 9 source whose RPUs start their samples but whose placement is `UNSPECIFIED`, such as a shifted file whose start was cut away, can be copied.
+The server encodes a profile 8.2 or 9 source whose RPU placement is `STARTS_SAMPLE`, such as a shifted file whose start was cut away (<<decision-property-issues>>).
 ADR 0013 records the player evidence for those copies.
 
 *Why:* No playlist can yet describe an HDR copy truthfully to a player that declared nothing.
@@ -789,7 +790,8 @@ An AV1 stream without extradata can, because its walk delimits the OBUs of its p
 * A Matroska file whose track the probe cannot read is never PQ10.
 * A stream whose layout changes after its first packets gets the move that its first packets call for (ADR 0013).
 * An encode of a file whose RPUs each start their own picture's sample gives each picture the next picture's RPU.
-A shifted file whose start was cut away derives no `MediaFileProbePropertyIssue`, so the server can copy it.
+* The server encodes every Dolby Vision file whose placement is `STARTS_SAMPLE`, so an own-first profile 8.2 or 9 file is encoded although each of its samples holds its own picture's RPU.
+* An `UNSPECIFIED` placement rules out no copy, so the server can copy a profile 8.2 or 9 file whose first packets mix layouts.
 * The server stores no probe version 5 result whose compatible base breaks the listed rule.
 A worker that derives the base differently stops the file's probe after three such results, as ADR 0032 decides for every contract violation.
 * When the server chooses SDR output, the source description keeps the HDR facts that the probe found.
@@ -858,11 +860,14 @@ FFmpeg ignores the nested message, so no frame shows it.
 * Telling a stream of fewer than 3 frames from a cut-short read by counting the stream's packets: ffprobe ends a count, like a read, without an error when the file fails.
 An earlier draft of this amendment trusted the count, so a file that failed partway would have read as a short stream with nothing to find.
 * Reporting only whether a sample starts with an RPU, as an earlier draft of this amendment did: such a flag cannot say that the probe could not decide, as when it could not delimit a packet's NAL units, so an unchecked stream would read as one whose RPUs follow their pictures.
-* A fourth value, `BEFORE_OWN_PICTURE`, for a stream whose first picture packet starts with an RPU, as a later draft of this amendment had: the first packets cannot tell that layout from a shifted file whose start was cut away.
+* A value of its own for the own-first layout, `BEFORE_OWN_PICTURE`, for a stream whose first picture packet starts with an RPU, as a later draft of this amendment had: the first packets cannot tell that layout from a shifted file whose start was cut away.
 The value would claim a layout that the probe cannot see, and the worker's own-picture move would give each picture of the cut shifted file the previous picture's RPU (ADR 0013).
 * Reading the end of the file to tell those two layouts apart: a shifted file ends with a sample that holds an RPU and no picture, and an own-first file does not.
 A file whose end was also cut away ends with a picture in both layouts, and the probe would read the end of every Dolby Vision file on the re-scan, where probe version 5 reads only the first frames.
 * Deciding the RPU placement from the whole stream: the probe would read every file whole on the re-scan, where probe version 5 reads only the first frames.
+* Reporting a stream whose first picture packet starts with an RPU as `UNSPECIFIED`, beside a `BEFORE_NEXT_PICTURE` value for a shifted file whose start is intact, as the next draft of this amendment did: a shifted file whose start was cut away then derived no `MediaFileProbePropertyIssue`.
+The server could then copy a profile 8.2 or 9 file whose last sample holds an RPU and no picture, and copies of that layout failed at the end of the stream in Chromium and Firefox (ADR 0013).
+`UNSPECIFIED` would also have meant both that the probe could not tell and that it saw every RPU start its sample.
 * Leaving Annex B extradata and bare-OBU extradata unread, as an earlier draft of this amendment did: no PQ stream in MPEG-TS, in a raw HEVC file, in IVF or in a raw OBU file could then be PQ10, and none could report HDR10+ or Dolby Vision as `ABSENT`.
 * Accepting `SDR` or `UNSPECIFIED` for every transfer that names neither PQ nor HLG: a Dolby Vision stream with a linear or logarithmic transfer could then be stored with an `SDR` base and copied.
 * Taking a Matroska track that the probe cannot read as holding no static metadata: FFmpeg drops an incomplete MasteringMetadata element, so the stream could read as PQ10 while it carries HDR10 metadata.

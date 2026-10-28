@@ -134,19 +134,21 @@ An RPU anywhere else reshapes no picture, so the encode of a profile 5 picture k
 Probe version 5 reports where the samples place the RPUs, as the stream's RPU placement (link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036]):
 
 * `AFTER_OWN_PICTURE`: each RPU is the last NAL unit of its own picture's sample, as Dolby Vision requires.
-* `BEFORE_NEXT_PICTURE`: each picture's RPU starts the next picture's sample, and the last sample holds an RPU and no picture.
-This is the shifted layout.
-mkvmerge wrote it before version 57, released in 2021.
-* `UNSPECIFIED`: the probe could not decide, or the first packets fit neither of the other layouts.
+* `STARTS_SAMPLE`: every sample that holds an RPU starts with it.
+* `UNSPECIFIED`: the probe could not tell the placement, as when it cannot delimit the packets, a packet holds two RPUs, the packets mix layouts, or the stream is AV1.
 
 The probe decides the placement from the first packets, and the worker assumes that the rest of the stream keeps that layout.
-When the first picture's sample starts with an RPU, and every sample that holds an RPU starts with it, the placement is `UNSPECIFIED`.
-Two layouts start that way, and their first packets look the same:
+Two layouts start samples with RPUs, and both report `STARTS_SAMPLE`:
 
-* A file in the shifted layout whose start was cut away.
-Its first picture's sample starts with the RPU of a picture that the cut removed.
-* A file whose RPUs each start their own picture's sample, in the own-first layout.
+* The shifted layout: each picture's RPU starts the next picture's sample, and the last sample holds an RPU and no picture.
+mkvmerge wrote it before version 57, released in 2021.
+A shifted file whose start was cut away keeps this layout, and its first picture's sample starts with the RPU of a picture that the cut removed.
+* The own-first layout: each picture's sample starts with that picture's own RPU.
 No known muxer writes this layout, but FFmpeg's MP4 and Matroska remuxes keep it.
+
+The two layouts share one value for two reasons.
+The first packets of a cut shifted file and of an own-first file look the same.
+Both layouts also take the same repair before an encode, and the server copies neither.
 
 The transcode job's video decision carries the source's codec family, from the codec that the probe stored.
 Every job carries it, whether it copies or encodes.
@@ -191,11 +193,15 @@ No timestamp and no other track changes.
 * The second FFmpeg encodes the rewritten copy with the usual filters.
 * The second FFmpeg trims the video at the attempt's start, because the copy keeps every packet from the keyframe at or before the seek.
 
-The worker repairs an `UNSPECIFIED` placement as `BEFORE_NEXT_PICTURE`.
-The shifted layout is the one that a known muxer wrote, and a cut of such a file leaves the pattern that the probe cannot decide.
-A stream whose RPUs already follow their pictures passes through the move unchanged.
-The cost falls on a file whose RPUs each start their own picture's sample: the repair gets each of its pictures the next picture's RPU.
-Reading the same pattern as that own-first layout would instead get each picture of a cut shifted file the previous picture's RPU.
+The worker repairs `STARTS_SAMPLE` as the shifted layout, because the shifted layout is the one that a known muxer wrote.
+The cost falls on a file in the own-first layout: the repair gets each of its pictures the next picture's RPU.
+Reading every RPU that starts a sample as its own picture's would instead get each picture of a shifted file, cut or not, the previous picture's RPU.
+
+The worker also moves the RPUs of a stream whose placement is `UNSPECIFIED`.
+The move changes only the samples that hold an RPU which FFmpeg's decoder ignores, and the samples that such RPUs move behind.
+A stream whose RPUs already end their samples therefore passes through the move unchanged.
+A profile 5 picture has no compatible base, so it shows correctly only when the decoder reads its RPU.
+The in-sample move also repairs an `UNSPECIFIED` stream whose RPU follows a slice but is not the last NAL unit of its sample.
 
 The worker accepts only the fragmented MP4 that FFmpeg writes with the copy's settings.
 It fails the attempt as malformed output for any other copy.
@@ -228,12 +234,12 @@ The attempt's outcome follows this order:
 Neither process writes media to a temporary file.
 The socket for the video timing is the attempt's only file, and the worker removes it.
 
-*Why:* On the pinned worker image, the shifted layout of a profile 5 excerpt encoded through the move gave a mean Cr of 122.3 over the first 3 frames, with the placement `BEFORE_NEXT_PICTURE` and with `UNSPECIFIED`.
+*Why:* On the pinned worker image, the shifted layout of a profile 5 excerpt encoded through the move gave a mean Cr of 122.3 over the first 3 frames, with the placement `STARTS_SAMPLE` and with `UNSPECIFIED`.
 The same excerpt muxed correctly, encoded by one FFmpeg, also gave 122.3, and the output packets were identical.
 128 is neutral on that 8-bit scale.
 The shifted excerpt through one FFmpeg, without the move, gave 62.7.
 A move in the wrong direction shows: on a fixture whose pictures carry RPUs of two different sources, the previous-picture move gave 99 of 100 frames of the own-first layout the wrong reshape.
-Either reading of the undecided pattern gives each picture of the other layout a neighbour's RPU, so the repair follows the layout that a known muxer wrote.
+Either reading of an RPU that starts a sample gives each picture of the other layout a neighbour's RPU, so the repair follows the layout that a known muxer wrote.
 On a variable-frame-rate HEVC source with B-frames, the pipe showed all 48 source pictures in the same sequence as one FFmpeg, and every output packet matched.
 With the durations that the copy's muxer wrote, it showed 43 of the 48.
 Across 108 audio cases, 106 matched the single FFmpeg packet for packet, and the other 2 failed on both paths.
@@ -403,7 +409,7 @@ Issue https://github.com/streamarr/streamarr-server/issues/396[streamarr/streama
 The Dolby Vision compatibility identifier is the value in the Dolby Vision configuration record that names the base format that the stream claims.
 ** The source's video stream has no other `MediaFileProbePropertyIssue` that rules out a copy.
 link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] decides which issues rule out a copy.
-A Dolby Vision profile 9 stream whose RPU placement is `BEFORE_NEXT_PICTURE` has such an issue.
+A Dolby Vision stream whose RPU placement is `STARTS_SAMPLE` has such an issue, as a malformed profile 9 file does.
 ** The source's codec profile is not `UNSPECIFIED`.
 This condition applies to a stored outcome of probe version 5 or later.
 A probe version 4 outcome stores no codec profile.
@@ -457,8 +463,7 @@ When the stream's RPUs do not follow their pictures, the worker moves the RPUs b
 Dolby Vision profile 10.0, which is AV1 with no compatible base, follows the same rule, so the server encodes a profile 10.0 stream.
 Probe version 5 also finds the Dolby Vision profile 9 files from a known faulty muxer, in which an RPU starts a sample.
 Such a file ends with a sample that holds no picture.
-The server encodes such a file when its first packets show the layout.
-When the file's start was cut away, its placement is `UNSPECIFIED`, which rules out no copy, so the interim copy rule can copy the file.
+Its placement is `STARTS_SAMPLE` whether or not its start was cut away, so the server encodes it.
 A file whose stored outcome comes from probe version 4 keeps the version 4 decisions until the server stores the file's probe version 5 outcome (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]).
 
 *Why:* No playlist can yet describe an HDR copy truthfully to a client that declares no range.
@@ -511,11 +516,12 @@ The container's rotation and cropping also survive.
 * An attempt that copies AC-3 or E-AC-3 audio and starts after the end of that audio fails as malformed output, from one FFmpeg as from two.
 The pinned build's MP4 muxer writes no valid description of an AC-3 or E-AC-3 track that holds no packet.
 Issue https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511] removes this case: it pads audio that ends early, so that an attempt that starts after the end of the audio encodes silence instead of copying an empty track.
-* An `UNSPECIFIED` placement takes the previous-picture move.
-A file whose RPUs each start their own picture's sample therefore gets each picture the next picture's RPU.
-* A Dolby Vision file whose RPUs start the next picture's sample, and whose start was cut away, has an `UNSPECIFIED` placement and derives no `MediaFileProbePropertyIssue`.
-The interim copy rule can therefore copy such a profile 9 file, although its last sample holds no picture.
-A copy of a generated profile 9 stream in that layout failed at the end of the stream in Chromium and Firefox (<<evidence-dolby-vision-copies>>).
+* A `STARTS_SAMPLE` placement, like an `UNSPECIFIED` one, takes the previous-picture move.
+A file in the own-first layout therefore gets each picture the next picture's RPU.
+* The server never copies a Dolby Vision file whose placement is `STARTS_SAMPLE`, whether it is a shifted file, a shifted file whose start was cut away, or an own-first file.
+A copy of a generated profile 9 stream in the shifted layout failed at the end of the stream in Chromium and Firefox (<<evidence-dolby-vision-copies>>).
+An own-first profile 8.2 or 9 file is encoded as well, although no player was measured on a copy of that layout.
+* An `UNSPECIFIED` placement rules out no copy, so the interim copy rule can copy a profile 8.2 or 9 file whose first packets mix layouts.
 * A stream whose RPU layout changes after the packets that the probe read gets the move that those packets call for.
 In a stream that mixes the conforming and the shifted layouts, a picture whose sample already ends with its RPU also takes the next sample's leading RPU, and the decoder reads the moved one.
 * A variable-frame-rate source keeps its pictures on the path that moves RPUs: the encode repeats and drops the same pictures as from one FFmpeg.
@@ -581,7 +587,7 @@ Written as `hvc1`, the same copy played in 3 of 3 runs in every player that deco
 The `avc1` copy played in 18 of 18 runs across the six player setups.
 * Choosing the HEVC tag of a Dolby Vision copy with an SDR compatible base from the client's declaration, after a tvOS check: the tag is settled now.
 Every client receives `hvc1`.
-* Encoding every Dolby Vision profile 9 source while the interim copy rule applies, or having the worker drop a trailing sample that holds no picture: probe version 5 finds the malformed files whose start is intact.
+* Encoding every Dolby Vision profile 9 source while the interim copy rule applies, or having the worker drop a trailing sample that holds no picture: probe version 5 finds the malformed files from their first packets, whether or not their start was cut away.
 The server encodes only those files.
 * Getting the pinned build's validity check for the configuration record relaxed upstream, building FFmpeg ourselves, or re-inserting the configuration record in the worker: for profile 8.2, the record changed nothing measured.
 With the record restored, and even with `SUPPLEMENTAL-CODECS`, AVPlayer, Safari and an iPhone Air still showed SDR.
@@ -708,11 +714,12 @@ The mean Cr of the rewritten stream's output was 62.6, the same as for the strea
 === Moving the RPUs of a profile 5 stream
 
 These measurements ran on 2026-10-27 through the worker's own job attempts, with FFmpeg 8.1.3 from the pinned worker image, unless they name another setup.
-The measurements of 2026-10-28 ran the same way, with the worker that gives each video sample its duration in the source and repairs an `UNSPECIFIED` placement as shifted.
+The measurements of 2026-10-28 ran the same way, with the worker that gives each video sample its duration in the source and moves the RPUs of every placement other than `AFTER_OWN_PICTURE`.
+Where the measurements of 2026-10-27 gave the value `BEFORE_NEXT_PICTURE`, they appear here as `STARTS_SAMPLE`, the value that replaced it with the same move.
 
 * The source was a 4-second, 1920x1080, 24 fps excerpt of a Dolby Vision profile 5 film, 100 pictures long, with AAC audio.
 A copy of the excerpt was remuxed so that each RPU started the next picture's sample, in MP4 and in Matroska.
-The probe reported the excerpt as `AFTER_OWN_PICTURE` and the remuxed copies as `BEFORE_NEXT_PICTURE` (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]).
+The probe reported the excerpt as `AFTER_OWN_PICTURE` and the remuxed copies as `STARTS_SAMPLE` (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]).
 * The worker encoded each file to 640x360 H.264 with tone mapping, in 1-second segments.
 * Mean Cr is the mean of the Cr (red-difference chroma) samples on an 8-bit scale whose neutral value is 128.
 A profile 5 picture that is not reshaped comes out teal, which pulls the mean Cr far below 128.
@@ -729,12 +736,12 @@ A profile 5 picture that is not reshaped comes out teal, which pulls the mean Cr
 |62.7
 |63.3
 
-|RPUs starting the next picture's sample, two FFmpegs, `BEFORE_NEXT_PICTURE`
+|RPUs starting the next picture's sample, two FFmpegs, `STARTS_SAMPLE`
 |122.3
 |122.7
 |===
 
-* With the placement `BEFORE_NEXT_PICTURE` and with `UNSPECIFIED`, the encode of the shifted copy held the same output packets as the single FFmpeg's encode of the correctly muxed excerpt.
+* With the placement `STARTS_SAMPLE` and with `UNSPECIFIED`, the encode of the shifted copy held the same output packets as the single FFmpeg's encode of the correctly muxed excerpt.
 On 2026-10-28, both placements again gave a mean Cr of 122.3 over the first 3 frames and 122.7 over all frames, and 0 of 100 frames differed from the correctly muxed excerpt's encode.
 * The own-first fixture was the same excerpt, rewritten so that each RPU started its own picture's sample.
 Every second picture in decode order carried the RPU of another profile 5 source, with other reshaping, so that an RPU given to the wrong picture changes that picture.
@@ -748,7 +755,7 @@ The own-picture move was the move that this amendment first built for a `BEFORE_
 |Two FFmpegs, the own-picture move
 |All 297 packets and all 100 decoded frames identical
 
-|Two FFmpegs, the previous-picture move, as for `UNSPECIFIED`
+|Two FFmpegs, the previous-picture move, as for `STARTS_SAMPLE` and `UNSPECIFIED`
 |99 of 100 frames differ
 
 |One FFmpeg without the move
@@ -756,6 +763,11 @@ The own-picture move was the move that this amendment first built for a `BEFORE_
 |===
 +
 The same fixture in the shifted layout, through the previous-picture move, differed in 12 of 297 packets at the end, because the fixture leaves out the last picture's RPU.
+* On 2026-10-28, a local build of the worker image from this amendment, with the same FFmpeg 8.1.3 binary, probed the excerpt in the conforming, the shifted and the own-first layouts, raw and in MP4.
+The probe reported the shifted and the own-first layouts as `STARTS_SAMPLE`, and the conforming layout as `AFTER_OWN_PICTURE`.
+Through the move, the shifted and the own-first MP4 files each gave a mean Cr of 122.3 over the first 3 frames and 122.7 over all 103 frames, the same as the conforming file through one FFmpeg.
+The shifted file gave the same with the placement `UNSPECIFIED`.
+Without the move, the shifted and the own-first files each gave 62.7 over the first 3 frames.
 * The audio cases crossed six source audio codecs (AAC, AC-3, E-AC-3, FLAC, ALAC and Opus), three outputs (a copy of the source audio, AAC and Opus), three audio timings and two seeks.
 The audio timings were audio over the whole video, audio that starts 1.5 s late, and 0.5 s of audio that ends before the mid-file seek.
 The seeks were at 0 and at 3 s.
@@ -794,7 +806,7 @@ With AAC copied from the source, every output packet also matched one FFmpeg's, 
 After a seek to 2 s, every packet matched, and 0 of 72 frames differed.
 With `setpts=PTS:strip_fps=1` in the second FFmpeg instead, all 48 pictures showed, but each of two constant-frame-rate sources came out one frame short with every frame different.
 * The worker's smoke tests generate a profile 5 stand-in from FFmpeg's test sources, in the conforming and the shifted layouts.
-A third layout also puts an RPU ahead of the first picture, as a shifted file whose start was cut away does, and the smoke tests give it the placement `UNSPECIFIED`.
+A third layout also puts an RPU ahead of the first picture, as a shifted file whose start was cut away and an own-first file do, and the smoke tests give it, as the shifted layout, the placement `STARTS_SAMPLE`.
 Through the pinned image, the shifted layouts uploaded the same packets as the conforming one, with AAC, AC-3, E-AC-3, FLAC, ALAC and Opus source audio, from the start and after a seek.
 The smoke tests also compare the variable-frame-rate source through the pipe with one FFmpeg, packet for packet.
 

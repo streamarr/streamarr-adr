@@ -319,11 +319,23 @@ An H.264 RPU is a NAL unit of type 28.
 The H.264 NAL unit header names no layer and no TemporalId, so the type and the prefix alone decide an H.264 RPU.
 An HEVC RPU is a NAL unit of type 62 on layer 0 with TemporalId 0: its `nuh_layer_id` is 0 and its `nuh_temporal_id_plus1` is 1.
 FFmpeg's HEVC decoder reads a NAL unit of type 62 as an RPU only on layer 0 with TemporalId 0.
+* The walk reads only the NAL units that reach FFmpeg's decoders.
+FFmpeg 8.1 splits each packet, and the extradata, into NAL units with `ff_h2645_packet_split`, which drops these NAL units before any decoder sees them:
+** a NAL unit whose `forbidden_zero_bit` is 1;
+** for HEVC, a NAL unit shorter than its 2-byte header, and one whose `nuh_temporal_id_plus1` is 0 or whose `nuh_layer_id` is 63;
+** for H.264, a NAL unit whose bytes are all 0, an empty one included;
+** the last NAL unit of a packet whose NAL units follow lengths, when its length and its bytes take fewer than 4 bytes together.
+* The walk skips each of these NAL units, as if the packet or the extradata did not hold it.
+Such a NAL unit is no RPU and no SEI NAL unit, so it is no evidence of any feature.
+The RPU placement and the worker's RPU move (ADR 0013) do not count it either: it is never a slice, never makes a packet start with an RPU, and never keeps an RPU from being the last NAL unit of its sample.
+FFmpeg keeps the trailing zero bytes of a NAL unit that the 4 bytes 0x000001E0 follow, so there FFmpeg can keep an H.264 NAL unit whose bytes are all 0, as one of type 0 that its decoder ignores.
+The walk skips that NAL unit too, because no RPU move rests on an H.264 stream.
+`ff_h2645_packet_split` rejects a whole packet that holds a length of 0, so no decoder sees any of that packet's NAL units, and the probe counts such a packet as one that it could not delimit.
 * An HEVC NAL unit of type 62 on another layer or with another TemporalId is not an RPU, whatever its payload holds.
 FFmpeg attaches nothing from such a NAL unit to the frames, so such a NAL unit is no evidence of Dolby Vision.
 Such a NAL unit makes neither `observedRpu` nor `dolbyVision` `PRESENT`.
 Such a NAL unit gives no RPU header and does not decide the RPU placement.
-The walk counts such a NAL unit as an ordinary NAL unit, and the worker's RPU move (ADR 0013) leaves such a NAL unit in place.
+When the walk keeps such a NAL unit, the walk counts it as an ordinary NAL unit, and the worker's RPU move (ADR 0013) leaves it in place.
 Such a NAL unit also does not keep `observedRpu` from reading `ABSENT`.
 An AV1 metadata OBU that names a layer in an extension byte does keep its feature from reading `ABSENT`, as a later rule decides, because FFmpeg's AV1 decoders read that OBU whenever they decode its layer.
 FFmpeg's HEVC decoder never reads an HEVC NAL unit of type 62 on another layer or with another TemporalId as an RPU, whatever layers the decoder decodes.
@@ -427,6 +439,7 @@ The RPU of a picture belongs after the slices of that picture, as the last NAL u
 The probe decides the placement from the NAL units of the packets that the walk covers, in their order.
 A slice is a NAL unit of type 1 to 5 for H.264, or of type 0 to 31 for HEVC.
 An RPU is an H.264 NAL unit of type 28, or an HEVC NAL unit of type 62 on layer 0 with TemporalId 0, whose payload starts with the RPU prefix 25.
+The placement counts only the NAL units that the walk keeps.
 A packet starts with an RPU when an RPU comes ahead of its first slice, or when it holds an RPU and no slice.
 The first picture packet is the first packet that holds a slice.
 The placement takes one of three values:
@@ -889,6 +902,9 @@ FFmpeg's H.264 decoder drops the NAL units that carry those RPUs.
 * Counting every HEVC NAL unit of type 62 whose payload starts with the RPU prefix as an RPU, whatever its layer and TemporalId, as an earlier draft of this amendment did.
 FFmpeg's HEVC decoder ignores such a NAL unit on another layer or with another TemporalId.
 The probe would then report Dolby Vision `PRESENT`, an RPU header and an RPU placement from NAL units that reach no frame, and the worker would move those NAL units.
+* Walking every NAL unit that the start codes or the lengths delimit, including the NAL units that `ff_h2645_packet_split` drops, as an earlier draft of this amendment did.
+A dropped NAL unit of type 62 with the RPU prefix, such as one whose `forbidden_zero_bit` is 1, would make Dolby Vision `PRESENT` although FFmpeg attaches nothing from it to any frame.
+A dropped NAL unit after an RPU would make the placement `UNSPECIFIED`, and the worker would move that RPU behind it, although FFmpeg's decoder reads the RPU where it is.
 * Letting an HEVC NAL unit of type 62 on another layer or with another TemporalId keep `observedRpu` from reading `ABSENT`, as an AV1 metadata OBU with an extension byte keeps its feature from reading `ABSENT`.
 FFmpeg's AV1 decoders read such an OBU when they decode its layer, so the OBU can reach a frame.
 FFmpeg's HEVC decoder never reads such an HEVC NAL unit as an RPU, so the NAL unit can reach no frame.

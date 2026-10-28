@@ -179,7 +179,14 @@ The worker drops such an RPU when it has no previous picture, as for the first R
 ** A sample that holds RPUs and no slice decodes no picture, so its RPUs move behind the previous picture.
 ** An RPU that moves behind the previous picture from a later sample ends that picture's sample, after any RPU that the sample already held.
 Of several RPUs that move behind one picture, the worker keeps only the last.
-* The worker rewrites only the sample sizes and data offsets of a fragment whose samples change, and passes every other byte unchanged.
+* The worker gives each video sample of the copy the duration that its packet had in the source.
+The copy's MP4 muxer writes each video sample's duration as the gap to the next sample's decoding time, not the source's duration, such as a Matroska track's default duration.
+The decoder gives each picture its packet's duration, and the second FFmpeg's frame-rate conversion repeats and drops pictures by that duration.
+* The first FFmpeg therefore also writes the timing of each video packet that it copies, as FFmpeg's `framecrc` output, to a Unix socket that the worker opens for the attempt.
+The worker pairs those packets with the copy's video samples in order and checks that their keyframe flags agree.
+It does not compare timestamps, because FFmpeg repairs bad timestamps separately for each output, and the two outputs repair them differently after a Matroska seek with B-frames.
+* In a fragment whose video samples change, each video sample gets a track fragment of its own that states its decoding time, so that a changed duration moves no later sample.
+The worker rewrites only those track fragments, the sample sizes and the data offsets, and passes every other byte unchanged.
 No timestamp and no other track changes.
 * The second FFmpeg encodes the rewritten copy with the usual filters.
 * The second FFmpeg trims the video at the attempt's start, because the copy keeps every packet from the keyframe at or before the seek.
@@ -202,6 +209,14 @@ The next sample's leading RPU then has no previous picture either, and the worke
 
 A picture whose RPU the worker drops keeps the color cast of an unreshaped picture.
 
+The worker refuses a copy whose video timing it cannot use, and the attempt fails:
+
+* When the timing ends before a video sample's packet arrives, the attempt fails as truncated output.
+* When the worker cannot read the timing, a packet's keyframe flag disagrees with its sample's, or a duration does not convert exactly into the video track's timescale, the attempt fails as malformed output.
+So does a timing that runs more than 65,536 packets ahead of the copy.
+
+A sample whose packet has no duration keeps the duration that the muxer wrote.
+
 A stop asks the first FFmpeg to quit, and the second FFmpeg then ends at the end of its input.
 A stall, a failure or a forced end ends both processes.
 The attempt's outcome follows this order:
@@ -210,7 +225,8 @@ The attempt's outcome follows this order:
 . The second FFmpeg's exit, as a single FFmpeg's exit would decide.
 . A copy that did not reach the second FFmpeg whole, or a first FFmpeg that exited with an error, when the second FFmpeg exited cleanly.
 
-Neither process writes a temporary file.
+Neither process writes media to a temporary file.
+The socket for the video timing is the attempt's only file, and the worker removes it.
 
 *Why:* On the pinned worker image, the shifted layout of a profile 5 excerpt encoded through the move gave a mean Cr of 122.3 over the first 3 frames, with the placement `BEFORE_NEXT_PICTURE` and with `UNSPECIFIED`.
 The same excerpt muxed correctly, encoded by one FFmpeg, also gave 122.3, and the output packets were identical.
@@ -218,8 +234,10 @@ The same excerpt muxed correctly, encoded by one FFmpeg, also gave 122.3, and th
 The shifted excerpt through one FFmpeg, without the move, gave 62.7.
 A move in the wrong direction shows: on a fixture whose pictures carry RPUs of two different sources, the previous-picture move gave 99 of 100 frames of the own-first layout the wrong reshape.
 Either reading of the undecided pattern gives each picture of the other layout a neighbour's RPU, so the repair follows the layout that a known muxer wrote.
+On a variable-frame-rate HEVC source with B-frames, the pipe showed all 48 source pictures in the same sequence as one FFmpeg, and every output packet matched.
+With the durations that the copy's muxer wrote, it showed 43 of the 48.
 Across 108 audio cases, 106 matched the single FFmpeg packet for packet, and the other 2 failed on both paths.
-The first media segment arrived about 100 ms later than from one FFmpeg.
+The first media segment arrived about 100 to 120 ms later than from one FFmpeg.
 Evidence: <<evidence-reshape>>.
 
 [[gpu-stages]]
@@ -461,9 +479,6 @@ HDR copies end the interim copy rule.
 * Dolby Vision copies with a PQ or HLG compatible base, and the playlist attributes of those copies, including `SUPPLEMENTAL-CODECS`.
 Issue https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] decides when such a copy carries those attributes.
 Issue https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396] builds those attributes.
-* Keeping a variable-frame-rate source's packet durations on the path that moves RPUs (<<reshape-rpus-starting-samples>>).
-The fragmented MP4 copy loses them, and the encode then repeats and drops other pictures than a single FFmpeg does.
-An intermediate container that keeps packet durations, or a frame-rate rule that keeps constant-frame-rate sources identical, needs a design decision first.
 * Copies of a Dolby Vision profile 5 source under `hev1` for clients that declare Dolby Vision (https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395]).
 Such a copy becomes a `dvhe` copy once a measurement shows that the `dvhe` copy plays.
 Otherwise the server encodes such a source.
@@ -489,7 +504,7 @@ The playlist therefore never advertises a false codec string for an encode.
 * A libx265 encode whose forced level is too low fails the job attempt, because libx265 refuses to start.
 * A full-length Dolby Vision profile 5 encode grows each FFmpeg process's memory until the job attempt ends.
 * An encode of an HEVC Dolby Vision source with no compatible base runs two FFmpeg processes, unless its RPUs follow their pictures.
-When the source is read at real time, the first media segment arrives about 100 ms later than from one FFmpeg process.
+When the source is read at real time, the first media segment arrives about 100 to 120 ms later than from one FFmpeg process.
 * On that path, the job's audio comes out as from one FFmpeg for every audio codec that the job copies or encodes, including in an attempt that starts after the end of the source's audio and with audio that starts late.
 The container's rotation and cropping also survive.
 * An attempt that copies AC-3 or E-AC-3 audio and starts after the end of that audio fails as malformed output, from one FFmpeg as from two.
@@ -501,8 +516,8 @@ A file whose RPUs each start their own picture's sample therefore gets each pict
 The interim copy rule can therefore copy such a profile 9 file, although its last sample holds no picture.
 * A stream whose RPU layout changes after the packets that the probe read gets the move that those packets call for.
 In a stream that mixes the conforming and the shifted layouts, a picture whose sample already ends with its RPU also takes the next sample's leading RPU, and the decoder reads the moved one.
-* A variable-frame-rate source with B-frames can repeat and drop other pictures on the path that moves RPUs than from one FFmpeg.
-Constant-frame-rate sources are unaffected.
+* A variable-frame-rate source keeps its pictures on the path that moves RPUs: the encode repeats and drops the same pictures as from one FFmpeg.
+A copy whose video timing the worker cannot use fails the attempt rather than play with other pictures.
 * An H.264 or AV1 Dolby Vision source with no compatible base runs one FFmpeg process.
 FFmpeg's H.264 decoder reads no RPU, and its AV1 decoders attach an RPU to the next frame, so moving the RPUs would change nothing.
 * An encode of a profile 5 stream whose RPUs FFmpeg's HEVC decoder ignores for another reason, such as an RPU that it cannot parse, still keeps the color cast of an unreshaped picture.
@@ -612,6 +627,12 @@ A source of 80 Mb/s on network storage would then be read at about 160 Mb/s.
 * Carrying the source audio's sample rate and channel layout in the transcode job, so that the second FFmpeg could declare an MPEG-TS audio track before its first packet: the pinned build refused the sample rate as an MPEG-TS input option, and an audio copy still failed with `sample rate not set`.
 The job also cannot restore a codec's configuration, such as FLAC's or ALAC's, its packet durations or its padding.
 * Clearing the copy's frame rate with `setpts=PTS:strip_fps=1`, so that a variable-frame-rate source keeps its pictures: on the pinned build, each constant-frame-rate source then came out one frame short, with every frame different from a single FFmpeg's.
+* Leaving the copy's video durations as the MP4 muxer writes them: on a variable-frame-rate source with B-frames, the encode showed 43 of 48 source pictures, where one FFmpeg showed all 48.
+* Reading the video timing from the first FFmpeg's standard error: FFmpeg's log writes one line in up to five separate writes, and the `framecrc` output does not take the log's lock, so a timing record could land inside a log line.
+A socket of its own carries nothing else.
+* Changing the durations in place inside a fragment's single track run: the first fragment of a copy with audio holds two video samples, so a changed duration would move the next sample's decoding time.
+* Pairing each timing with its sample by timestamp: FFmpeg repairs bad timestamps separately for each output, and the `framecrc` output allows timestamps that MP4 does not.
+After a Matroska seek with B-frames, the leading packets carried different timestamps in the two outputs, so a timestamp check refused every such seek.
 * Seeking in the second FFmpeg with an output `-ss` option: FFmpeg subtracts that time from every output timestamp, so the attempt's timeline would no longer match a single FFmpeg's timeline.
 The second FFmpeg trims instead.
 An input seek cannot run on a pipe.
@@ -685,7 +706,7 @@ The mean Cr of the rewritten stream's output was 62.6, the same as for the strea
 === Moving the RPUs of a profile 5 stream
 
 These measurements ran on 2026-10-27 through the worker's own job attempts, with FFmpeg 8.1.3 from the pinned worker image, unless they name another setup.
-The measurements of 2026-10-28 ran the same way, with the worker that repairs an `UNSPECIFIED` placement as shifted.
+The measurements of 2026-10-28 ran the same way, with the worker that gives each video sample its duration in the source and repairs an `UNSPECIFIED` placement as shifted.
 
 * The source was a 4-second, 1920x1080, 24 fps excerpt of a Dolby Vision profile 5 film, 100 pictures long, with AAC audio.
 A copy of the excerpt was remuxed so that each RPU started the next picture's sample, in MP4 and in Matroska.
@@ -740,21 +761,40 @@ The encodes used single-threaded x264.
 106 of the 108 cases matched the single FFmpeg packet for packet: presentation and decoding timestamps, duration, size, flags and the SHA-256 of each packet.
 The other 2 cases copied short AC-3 and E-AC-3 audio past the 3 s seek.
 Both paths failed them as malformed output, with an initialization segment whose `moov` box ran to the end of the output, and delivered nothing.
+On 2026-10-28, the same 108 cases, with seeks at 0 and at 2 s, again matched in 106, and the same 2 AC-3 and E-AC-3 cases failed on both paths.
 * A 90° rotation, a container crop, and both together, in MP4 and in Matroska, gave the same packets as the single FFmpeg.
 The outputs kept the rotated and cropped sizes, 202x360, 748x360 and 174x360, against 640x360 for the plain source.
-* With the source read at real time, AAC encoding and 1-second segments, the first segment arrived after 3,376 to 3,388 ms from one FFmpeg and after 3,476 to 3,480 ms from two, in 3 runs each.
+* The first segment's latency was measured with the source read at real time, AAC audio, 640x360 x264 at the `faster` preset and 1-second segments, in 3 runs each.
+On 2026-10-27, before the worker read the video timing, the first segment arrived after 3,376 to 3,388 ms from one FFmpeg and after 3,476 to 3,480 ms from two.
+On 2026-10-28, with the video timing, it arrived after 3,372 to 3,392 ms from one FFmpeg and after 3,489 to 3,498 ms from two, about 10 ms later than before.
 * A stop ended the attempt as stopped.
 A failure of either FFmpeg, a copy that is not MP4, and a stall of either FFmpeg each failed the attempt, and no FFmpeg process remained.
 A stall failed it as an encoder stall after the 3 s stall limit that the test set.
-* A variable-frame-rate source with B-frames lost pictures on the pipe.
-The source was a generated 48-picture HEVC stream in Matroska, encoded at 24 fps.
-One FFmpeg showed all 48 source pictures.
-Two FFmpegs showed 43, and held some pictures for 6 frames.
-The fragmented MP4 copy gives each sample the gap to the next decoding time as its duration, so the copy loses the source's packet durations, and the second FFmpeg's frame-rate conversion repeats and drops other pictures.
-With `setpts=PTS:strip_fps=1` in the second FFmpeg, all 48 pictures showed, but each of two constant-frame-rate sources came out one frame short with every frame different.
+* The variable-frame-rate source was a generated HEVC stream in Matroska with B-frames, 48 pictures long, which the encode converted to 24 fps, 120 frames from the start.
+The encodes used single-threaded x264.
+The copy's MP4 muxer wrote each video sample's duration as the gap to the next decoding time, while the Matroska demuxer gives each packet the track's default duration.
++
+[cols="3,2",options="header"]
+|===
+|Encode of the variable-frame-rate source |Result
+
+|One FFmpeg
+|48 of 48 source pictures shown
+
+|Two FFmpegs, with the durations that the copy's muxer wrote
+|43 of 48 source pictures shown, and 39 of 120 frames showing another source picture than one FFmpeg
+
+|Two FFmpegs, each video sample with its duration in the source
+|48 of 48 source pictures shown in the same sequence as one FFmpeg, every output packet identical, 0 of 120 frames different
+|===
++
+With AAC copied from the source, every output packet also matched one FFmpeg's, and 0 of 120 frames differed.
+After a seek to 2 s, every packet matched, and 0 of 72 frames differed.
+With `setpts=PTS:strip_fps=1` in the second FFmpeg instead, all 48 pictures showed, but each of two constant-frame-rate sources came out one frame short with every frame different.
 * The worker's smoke tests generate a profile 5 stand-in from FFmpeg's test sources, in the conforming and the shifted layouts.
 A third layout also puts an RPU ahead of the first picture, as a shifted file whose start was cut away does, and the smoke tests give it the placement `UNSPECIFIED`.
 Through the pinned image, the shifted layouts uploaded the same packets as the conforming one, with AAC, AC-3, E-AC-3, FLAC, ALAC and Opus source audio, from the start and after a seek.
+The smoke tests also compare the variable-frame-rate source through the pipe with one FFmpeg, packet for packet.
 
 The containers between the two FFmpegs were compared on 2026-10-27.
 The MPEG-TS pipe ran through the worker's job attempts on the pinned worker image.

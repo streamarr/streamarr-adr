@@ -305,8 +305,21 @@ A feature that the frames, the extradata or the packets show stays `PRESENT`, wi
 The probe still reports the first frame's static metadata.
 A cut-short read leaves packets unread that can hold any SEI message or OBU, so the probe marks each static metadata value that no source gives as omitted.
 * The probe finds HDR10+ information and RPUs in the side data that ffprobe reports for each frame.
+* For H.264 and HEVC, an RPU is a NAL (network abstraction layer) unit whose payload starts with the RPU prefix 25.
+An H.264 RPU is a NAL unit of type 28.
+The H.264 NAL unit header names no layer and no TemporalId, so the type and the prefix alone decide an H.264 RPU.
+An HEVC RPU is a NAL unit of type 62 on layer 0 with TemporalId 0: its `nuh_layer_id` is 0 and its `nuh_temporal_id_plus1` is 1.
+FFmpeg's HEVC decoder reads a NAL unit of type 62 as an RPU only on layer 0 with TemporalId 0.
+* An HEVC NAL unit of type 62 on another layer or with another TemporalId is not an RPU, whatever its payload holds.
+FFmpeg attaches nothing from such a NAL unit to the frames, so such a NAL unit is no evidence of Dolby Vision.
+Such a NAL unit makes neither `observedRpu` nor `dolbyVision` `PRESENT`.
+Such a NAL unit gives no RPU header and does not decide the RPU placement.
+The walk counts such a NAL unit as an ordinary NAL unit, and the worker's RPU move (ADR 0013) leaves such a NAL unit in place.
+Such a NAL unit also does not keep `observedRpu` from reading `ABSENT`.
+An AV1 metadata OBU that names a layer in an extension byte does keep its feature from reading `ABSENT`, as a later rule decides, because FFmpeg's AV1 decoders read that OBU whenever they decode its layer.
+FFmpeg's HEVC decoder never reads an HEVC NAL unit of type 62 on another layer or with another TemporalId as an RPU, whatever layers the decoder decodes.
 * FFmpeg's decoders lose some RPUs before ffprobe reports a frame.
-FFmpeg's H.264 decoder drops the NAL (network abstraction layer) units of type 28, which carry the RPUs of Dolby Vision profile 9.
+FFmpeg's H.264 decoder drops every NAL unit of type 28, so the decoder drops the RPUs of Dolby Vision profile 9.
 FFmpeg's HEVC decoder ignores an RPU that is not the last NAL unit of its sample, and an RPU that it cannot parse.
 For H.264 and HEVC, the probe therefore also parses the NAL units of every packet that the kept read asked for.
 That walk also covers the packets that an edit list makes the decoder discard.
@@ -399,7 +412,7 @@ This rule also covers a profile 5 stream in MPEG-TS without the Dolby Vision des
 The RPU of a picture belongs after the slices of that picture, as the last NAL unit of the same sample.
 The probe decides the placement from the NAL units of the packets that the walk covers, in their order.
 A slice is a NAL unit of type 1 to 5 for H.264, or of type 0 to 31 for HEVC.
-An RPU is a NAL unit of type 28 for H.264, or of type 62 for HEVC, whose payload starts with the RPU prefix 25.
+An RPU is an H.264 NAL unit of type 28, or an HEVC NAL unit of type 62 on layer 0 with TemporalId 0, whose payload starts with the RPU prefix 25.
 A packet starts with an RPU when an RPU comes ahead of its first slice, or when it holds an RPU and no slice.
 The first picture packet is the first packet that holds a slice.
 The placement takes one of three values:
@@ -469,6 +482,9 @@ A probe that read only the first frame would report that file's RPUs as `ABSENT`
 ffprobe cannot observe a profile 9 stream's RPUs when it reads frames, because FFmpeg's H.264 decoder drops the NAL units that carry those RPUs.
 ffprobe also misses the RPUs of an HEVC stream whose RPU is not the last NAL unit of its sample, such as a malformed profile 5 stream.
 Such a profile 5 stream without a configuration record would read as Dolby Vision `ABSENT`, and the server could copy it with teal colors.
+FFmpeg's HEVC decoder reads a NAL unit of type 62 as an RPU only on layer 0 with TemporalId 0.
+A probe that counted every NAL unit of type 62 with the RPU prefix would report Dolby Vision `PRESENT` for a stream whose frames FFmpeg gives no RPU.
+That probe could also derive profile 5 from such a NAL unit's header, and so report a compatible base of `NONE` for a stream that holds no RPU that FFmpeg reads.
 AV1 frames alone do not prove that the stream lacks an RPU, HDR10+ or static metadata.
 FFmpeg's AV1 decoders drop the frames and the OBUs that they cannot parse, and never apply the metadata OBUs of the extradata.
 The probe reads those OBUs itself, so AV1 sources get facts as precise as those of HEVC sources: an AV1 PQ stream can be PQ10, and an AV1 stream can report Dolby Vision as `ABSENT`.
@@ -788,6 +804,7 @@ A stream whose extradata matches no form or cannot be delimited cannot, and neit
 An AV1 stream without extradata can, because its walk delimits the OBUs of its packets alone.
 * A stream of fewer than 3 frames never reports HDR10+, the observed RPU or Dolby Vision as `ABSENT`, and is never PQ10, because the probe cannot tell it from a cut-short read.
 * A Matroska file whose track the probe cannot read is never PQ10.
+* An HEVC NAL unit of type 62 on another layer or with another TemporalId never makes a stream Dolby Vision, and the worker never moves such a NAL unit.
 * A stream whose layout changes after its first packets gets the move that its first packets call for (ADR 0013).
 * An encode of a file whose RPUs each start their own picture's sample gives each picture the next picture's RPU.
 * The server encodes every Dolby Vision file whose placement is `STARTS_SAMPLE`, so an own-first profile 8.2 or 9 file is encoded although each of its samples holds its own picture's RPU.
@@ -849,6 +866,12 @@ That issue would rule out no playback path.
 That file's first sample holds no RPU.
 * Reading an H.264 stream's RPUs from the frames that ffprobe decodes would report every profile 9 stream's RPUs as `ABSENT`.
 FFmpeg's H.264 decoder drops the NAL units that carry those RPUs.
+* Counting every HEVC NAL unit of type 62 whose payload starts with the RPU prefix as an RPU, whatever its layer and TemporalId, as an earlier draft of this amendment did.
+FFmpeg's HEVC decoder ignores such a NAL unit on another layer or with another TemporalId.
+The probe would then report Dolby Vision `PRESENT`, an RPU header and an RPU placement from NAL units that reach no frame, and the worker would move those NAL units.
+* Letting an HEVC NAL unit of type 62 on another layer or with another TemporalId keep `observedRpu` from reading `ABSENT`, as an AV1 metadata OBU with an extension byte keeps its feature from reading `ABSENT`.
+FFmpeg's AV1 decoders read such an OBU when they decode its layer, so the OBU can reach a frame.
+FFmpeg's HEVC decoder never reads such an HEVC NAL unit as an RPU, so the NAL unit can reach no frame.
 * Reading HDR10+ and the static metadata only from the frames that ffprobe decodes would report HDR10+ as `ABSENT`, or a PQ stream as PQ10, whenever FFmpeg lost the message.
 FFmpeg loses the messages after a rejected SEI message, every nested message, and every HDR10+ message of an H.264 stream.
 * Keeping H.264 HDR10+ `UNSPECIFIED` would leave a fact unreported that the probe's own SEI walk can now observe.

@@ -19,6 +19,8 @@ A second amendment adds the facts that probe version 5 reports under this vocabu
 Probe version 5 reads the first frames of the chosen video stream before it reports HDR10+ or a Dolby Vision RPU as `ABSENT`.
 For H.264 and HEVC, probe version 5 also reads the NAL units and the SEI messages of the packets behind those frames, because FFmpeg loses some RPUs and HDR messages before it reports a frame.
 For AV1, probe version 5 reads the metadata OBUs of those packets for the same reason.
+Probe version 5 also reports where the samples place each Dolby Vision RPU, so that the worker can move the RPUs that FFmpeg's HEVC decoder would ignore (ADR 0013).
+The second amendment also lists the signaled transfers that give each compatible base, and the server rejects a probe result whose compatible base does not follow that list.
 The second amendment also decides where `MediaFileProbePropertyIssue` lives and which playback paths each issue rules out (<<decision-property-issues>>).
 The server derives each issue from the stored probe facts and stores no issue.
 The second amendment also decides that the server never copies a Dolby Vision stream whose compatibility identifier disagrees with its signaled transfer.
@@ -177,16 +179,30 @@ type VideoDynamicRange = {
 
 `compatibleBase` names the standard picture format that a player could use without the advanced HDR information.
 The probe derives it when it runs, from the base layer's signaled transfer characteristic and the Dolby Vision claim, and stores it with the probe version so a newer probe can derive it again.
-The signaled transfer decides the value: `SDR` for a standard-dynamic-range transfer, `PQ` for SMPTE ST 2084, and `HLG` for ARIB STD-B67.
+The signaled transfer decides the value:
+
+* `SDR` for a standard-dynamic-range transfer: BT.709, BT.470M, BT.470BG, SMPTE 170M, SMPTE 240M, IEC 61966-2-4, BT.1361, IEC 61966-2-1, and the BT.2020 10-bit and 12-bit transfers.
+* `PQ` for SMPTE ST 2084, and `HLG` for ARIB STD-B67.
+* Every other transfer names none of these formats: an unspecified or reserved value, linear, the two logarithmic transfers and SMPTE ST 428.
+The value is then `NONE` when Dolby Vision is present, and `UNSPECIFIED` otherwise.
+
 `PQ` covers both HDR10 and PQ10; whether the static HDR metadata is present is a separate stream property.
-`NONE` means the stream has no standard compatible base: Dolby Vision declares none, or the signaled transfer is unspecified while Dolby Vision is present, as in Profile 5.
+`NONE` means the stream has no standard compatible base: Dolby Vision is present and the signaled transfer names no standard format, as in profile 5.
 From probe version 5 on, the `compatibleBase` of a Dolby Vision profile 5 or profile 10.0 stream is `NONE` whatever the signaled transfer says (<<decision-probe-version-5>>).
-`UNSPECIFIED` means the probe could not read the transfer and found no Dolby Vision claim.
+`UNSPECIFIED` means that the signaled transfer names no standard format and Dolby Vision is not present.
 When the Dolby Vision compatibility identifier disagrees with the signaled transfer, the signaled transfer wins.
 The server then derives a `MediaFileProbePropertyIssue` that names both claims (<<decision-property-issues>>).
+The server checks the compatible base of every probe result that it receives against these rules.
+A result whose compatible base differs from the one that its signaled transfer and its Dolby Vision facts give breaks the worker contract.
+The server counts that result as a contract violation, as link:0032-media-file-probe-results-are-persisted.adoc#probe-contract-violations[ADR 0032] decides, and stores none of its facts.
 The `compatibleBase` value does not guarantee that a device can play the source bytes unchanged.
 The worker may need to transform the source before the player can use the compatible base.
 The server must explicitly choose that change, and the worker must support the change.
+
+*Why the transfers are listed:* A rule that names only PQ, HLG and the standard-dynamic-range transfers in general leaves the base of every other transfer to each implementation.
+An earlier draft of the server check accepted `SDR` or `UNSPECIFIED` for every transfer other than PQ, HLG and an unspecified one.
+A Dolby Vision stream with a linear or logarithmic transfer could then be stored with an `SDR` compatible base, and the interim copy rule of ADR 0013 would copy it.
+One list in the worker contract, which the server checks, keeps the stored compatible base from drifting from the stored transfer.
 
 `hdr10Plus` records whether HDR10+ information is present, independently of Dolby Vision.
 Both `hdr10Plus` and Dolby Vision may be `PRESENT` in the same stream.
@@ -267,40 +283,52 @@ link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032] lists every fact
 ADR 0032 also governs how probe version 5 results replace probe version 4 results.
 This section decides how those facts use this ADR's vocabulary.
 
-* The probe reads the first 3 frames of the chosen video stream.
-The probe reads fewer frames when the stream holds fewer than 3.
+* The probe reads the first 3 frames of the chosen video stream, or fewer when it finds fewer.
 The probe reads no frame of any other stream.
 Each video stream reports whether the probe read its first frames.
 * For the chosen video stream, `hdr10Plus` and `observedRpu` are `PRESENT` or `ABSENT` when the probe can see the feature in what the probe read.
 `ABSENT` means that what the probe read carries no such information.
 A feature that the probe cannot see in a codec stays `UNSPECIFIED`.
 A video stream whose frames the probe did not read reports `ABSENT` for no feature.
-* The probe widens its read past packets that decode to no frame, such as the packets that an MP4 edit list discards, up to 192 packets.
-The probe keeps the frames of a narrower read when a wider read fails.
-The read is cut short when such a failure leaves fewer than 3 frames.
-The read is also cut short when the widest read keeps fewer than 3 frames and the stream holds more packets than that read took, or the probe cannot count the stream's packets.
+* The probe widens its read past packets that decode to no frame, such as the packets that an MP4 edit list discards.
+It reads the first 3, 12, 48 and then 192 packets of the stream, and stops at the first read that decodes 3 frames.
+The kept read is the narrowest read that decodes the most frames, so the probe keeps the frames of a narrower read when a wider read fails.
+The read is cut short whenever the kept read holds fewer than 3 frames.
+The probe does not tell a stream of fewer than 3 frames from a cut-short read.
+ffprobe ends a read without an error when the demuxer or the file fails, such as on a read error from a network share.
+Neither a read nor a count of the stream's packets that ends early therefore shows that the stream ends there.
 After a cut-short read, the stream can hold frames that the probe did not read.
 `hdr10Plus`, `observedRpu` and `dolbyVision` are then never `ABSENT`.
-A feature that the probe saw stays `PRESENT`, and the probe still reports the first frame's static metadata.
+A cut-short read only keeps a feature from reading `ABSENT`.
+A feature that the frames, the extradata or the packets show stays `PRESENT`, with its first RPU header and the compatible base that the header decides.
+The probe still reports the first frame's static metadata.
+A cut-short read leaves packets unread that can hold any SEI message or OBU, so the probe marks each static metadata value that no source gives as omitted.
 * The probe finds HDR10+ information and RPUs in the side data that ffprobe reports for each frame.
 * FFmpeg's decoders lose some RPUs before ffprobe reports a frame.
 FFmpeg's H.264 decoder drops the NAL (network abstraction layer) units of type 28, which carry the RPUs of Dolby Vision profile 9.
 FFmpeg's HEVC decoder ignores an RPU that is not the last NAL unit of its sample, and an RPU that it cannot parse.
-For H.264 and HEVC, the probe therefore also parses the NAL units of the packets that hold the frames it read.
+For H.264 and HEVC, the probe therefore also parses the NAL units of every packet that the kept read asked for.
+That walk also covers the packets that an edit list makes the decoder discard.
+The probe reads those packets in a separate read of the same count.
+When that read returns fewer packets than the kept read asked for, the probe has not read every packet that the walk covers.
+The stream's extradata tells how a packet delimits its NAL units.
+After an H.264 or HEVC configuration record (`avcC` or `hvcC`), a length prefix leads each NAL unit.
+After any other extradata, start codes delimit the NAL units, as in Annex B of H.264 and HEVC.
+A stream without extradata gives the probe no way to delimit its packets.
 `observedRpu` is `PRESENT` when either the frames or those packets hold an RPU.
 `observedRpu` is `ABSENT` only when the probe could delimit every NAL unit of those packets and found no RPU.
 * FFmpeg's decoders also lose HDR10+ messages before ffprobe reports a frame.
 FFmpeg's H.264 decoder drops every HDR10+ message.
 FFmpeg stops reading an SEI NAL unit at the first message that it rejects, such as a user data message shorter than 16 bytes, so the messages after that one never reach the frames.
-FFmpeg's HEVC decoder applies the SEI messages of the HEVC configuration record (`hvcC`) to the frames, and also ignores its errors there.
+FFmpeg's HEVC decoder applies the SEI messages of the stream's extradata to the frames, whether an `hvcC` record or Annex B extradata holds them, and also ignores its errors there.
 FFmpeg ignores the messages inside a nesting SEI message.
-* For H.264 and HEVC, the probe therefore also reads every SEI message of the configuration record and of the packets that it parses, one message at a time.
+* For H.264 and HEVC, the probe therefore also reads every SEI message of the extradata and of the packets that it parses, one message at a time.
 The probe also reads the messages inside the scalable nesting messages: scalable nesting (payload type 30), MVC scalable nesting (payload type 37) and MVCD scalable nesting (payload type 48) for H.264, and scalable nesting (payload type 133) for HEVC.
 Other nesting messages can also hold messages that FFmpeg ignores: regional nesting (payload type 157), MCTS extraction information nesting (payload type 159) and bitstream partition nesting (payload type 162) for HEVC, and the SEI processing order nesting of ITU-T H.274 (payload type 214) for both codecs.
 The probe does not read inside those other nesting messages.
 An SEI NAL unit is delimited when every message ends inside the NAL unit, every nested message ends inside its nesting message, no nesting message holds another nesting message, no message is a nesting message that the probe does not read, and only the RBSP trailing bits follow the last message.
-The probe read all of the SEI when it could delimit every NAL unit that the walk covers, and every SEI NAL unit among them.
-`hdr10Plus` is `PRESENT` when the frames, the configuration record or the packets hold an HDR10+ message that is not nested.
+The probe read all of the SEI when the read is not cut short and the probe could delimit every NAL unit that the walk covers, and every SEI NAL unit among them.
+`hdr10Plus` is `PRESENT` when the frames, the extradata or the packets hold an HDR10+ message that is not nested.
 `hdr10Plus` is `ABSENT` only when the frames show none, the probe read all of the SEI, and no nesting message holds an HDR10+ message.
 Otherwise `hdr10Plus` is `UNSPECIFIED`.
 H.264 streams therefore report HDR10+ as `PRESENT` or `ABSENT`, as HEVC streams do.
@@ -310,31 +338,36 @@ A nested HDR message only stops the probe from reporting that feature as `ABSENT
 * FFmpeg's AV1 decoders lose metadata OBUs (open bitstream units) before ffprobe reports a frame.
 They drop an RPU that they cannot parse, and a whole frame whose HDR10+ OBU they cannot parse, and ffprobe goes on to the next frame without failing.
 They drop the rest of a packet from an OBU that they cannot parse, such as a mastering display OBU that is too short.
-They never apply the metadata OBUs of the AV1 configuration record (`av1C`) to the frames.
+They never apply the metadata OBUs of the stream's extradata to the frames, whether the AV1 configuration record (`av1C`) or bare OBUs hold them.
 They attach a metadata OBU to the next shown frame after it, so a metadata OBU after the last frame that the probe keeps reaches no frame.
-* For AV1, the probe therefore walks every OBU of the `av1C` record's configOBUs, then every OBU of the packets that hold the frames it read, in their order.
+* For AV1, the probe therefore walks every OBU of the extradata, then every OBU of every packet that the walk covers, in their order.
 The walk steps from OBU to OBU by their sizes, whatever each OBU holds.
-An OBU is delimited when it ends inside its packet or record.
+An OBU is delimited when it ends inside its packet or the extradata.
 A metadata OBU is delimited only when its metadata type also ends inside the OBU and, for each type that the probe reads, the OBU ends with its trailing bits.
 The probe reads the HDR10+ and RPU metadata OBUs, which are ITU-T T.35 messages, and the mastering display (HDR_MDCV) and content light level (HDR_CLL) metadata OBUs.
-The probe read all of the OBUs when it could delimit every OBU that the walk covers.
+The probe read all of the OBUs when the read is not cut short and the probe could delimit every OBU that the walk covers.
 * An AV1 metadata OBU with an extension byte names a temporal and a spatial layer.
 FFmpeg's AV1 decoders skip such an OBU when they do not decode that layer.
 The probe therefore treats such an OBU as it treats a nested SEI message.
 The OBU never proves a feature and is never a static metadata value, and it stops the probe from reporting its feature as `ABSENT`, or the stream as PQ10.
-* For AV1, `hdr10Plus` is `PRESENT` when the frames, the `av1C` record or the packets hold an HDR10+ OBU without an extension byte.
+* For AV1, `hdr10Plus` is `PRESENT` when the frames, the extradata or the packets hold an HDR10+ OBU without an extension byte.
 `observedRpu` is `PRESENT` when they hold an RPU OBU without an extension byte.
 Each is `ABSENT` only when the frames show none, the probe read all of the OBUs, and no OBU with an extension byte holds one.
 Otherwise each is `UNSPECIFIED`.
-* The probe reads only two kinds of extradata beside the packets: an HEVC configuration record (`hvcC`) and an `av1C` record.
-An H.264 configuration record (`avcC`) holds only parameter sets.
-Any other extradata can hold units that the probe does not read.
-Such extradata includes the Annex B extradata of an H.264 or HEVC stream, and the bare OBUs that FFmpeg gives an AV1 stream in IVF.
-FFmpeg's HEVC decoder applies the SEI messages of Annex B extradata to the frames.
+* The probe reads the stream's extradata in each form that FFmpeg's demuxers give it, and tells the forms apart by the first byte:
+** For H.264 and HEVC, extradata whose first byte is 1 is an `avcC` or an `hvcC` record.
+An `avcC` record holds only parameter sets, so the walk reads none of its NAL units.
+The walk reads the NAL units of every array of an `hvcC` record.
+** Any other H.264 or HEVC extradata is Annex B extradata, as MPEG-TS and raw H.264 and HEVC files give it.
+Start codes delimit its NAL units, as they delimit those of a packet.
+** For AV1, extradata whose first byte is 0x81 is an `av1C` record, and the walk reads the OBUs of its configOBUs.
+** AV1 extradata whose first byte has its high bit clear holds bare OBUs, as FFmpeg gives an AV1 stream in IVF or in a raw OBU file.
+The walk reads those OBUs from the first byte.
+* Extradata that matches no form, and extradata that the walk cannot delimit, can hold units that the probe does not read.
 A packet can also carry a replacement record, which FFmpeg's MP4 demuxer attaches when a sample switches to another sample description.
 FFmpeg's decoders apply that record, and ffprobe prints only that the packet carries one, never its bytes.
-A stream with any other extradata, or a read in which a packet carries a replacement record, therefore counts as one whose units the probe could not all delimit.
-The probe then has not read all of the stream's SEI or OBUs.
+A stream with such extradata, or a read in which a packet carries a replacement record, therefore counts as one whose units the probe could not all delimit.
+The probe then has not read all of the stream's SEI or OBUs, and rules nothing out.
 * For the chosen video stream, `dolbyVision` is `ABSENT` when the probe found no configuration record and no Dolby Vision sample entry, and `observedRpu` is `ABSENT`.
 This rule holds for H.264, HEVC and AV1 alike.
 * Every other video stream keeps the dynamic-range facts of probe version 4.
@@ -361,13 +394,29 @@ The probe knows profile 5 from the configuration record, or from the first RPU h
 The probe knows profile 10.0 from a configuration record with profile 10 and compatibility identifier 0, or from the first RPU header when no configuration record names a profile.
 This rule covers a profile 5 stream tagged BT.709.
 This rule also covers a profile 5 stream in MPEG-TS without the Dolby Vision descriptor.
-* When `dolbyVision` is `PRESENT`, the probe also reports whether a sample that the probe read starts with an RPU ahead of the sample's picture.
-The RPU of a picture belongs after that picture, in the same sample.
-At least one muxer starts a new sample at each RPU, so each RPU sits in the next picture's sample.
-The last sample of such a file holds an RPU and no picture.
-The probe reads where the RPUs sit from the NAL units of the packets, for H.264 and HEVC.
-The probe reports this fact as `UNSPECIFIED` when the probe could not delimit the samples that hold the RPUs, and always for AV1.
-FFmpeg's AV1 decoders attach an RPU to the next shown frame after it, so an AV1 RPU belongs ahead of its picture, and an AV1 sample that starts with an RPU has the expected layout.
+* When `dolbyVision` is `PRESENT`, the probe also reports the RPU placement: where the samples place each picture's RPU.
+The RPU of a picture belongs after the slices of that picture, as the last NAL unit of the same sample.
+The probe decides the placement from the NAL units of the packets that the walk covers, in their order.
+A slice is a NAL unit of type 1 to 5 for H.264, or of type 0 to 31 for HEVC.
+An RPU is a NAL unit of type 28 for H.264, or of type 62 for HEVC, whose payload starts with the RPU prefix 25.
+A packet starts with an RPU when an RPU comes ahead of its first slice, or when it holds an RPU and no slice.
+The first picture packet is the first packet that holds a slice.
+The placement takes one of four values:
+** `AFTER_OWN_PICTURE`: every RPU follows a slice of its own packet and is the last NAL unit of that packet, as Dolby Vision requires.
+FFmpeg's HEVC decoder reads an RPU only from the last NAL unit of a packet, so an RPU that a suffix SEI NAL unit follows matches no value.
+** `BEFORE_NEXT_PICTURE`: the first picture packet holds no RPU, and every packet with an RPU starts with it.
+Each picture's RPU then starts the next picture's sample, and the last sample holds an RPU and no picture.
+mkvmerge wrote this layout before version 57, released in 2021, whose release notes record the fix for NAL units of types 62 and 63 that it stored with the following frame.
+The malformed profile 9 files of <<decision-property-issues>> place their RPUs this way.
+** `BEFORE_OWN_PICTURE`: the first picture packet starts with an RPU, and every packet with an RPU starts with it.
+Each picture's RPU then starts its own picture's sample.
+This layout does not conform, and no known muxer writes it, but FFmpeg's MP4 and Matroska remuxes keep it.
+** `UNSPECIFIED`: the probe could not decide, or the packets fit none of the other values.
+The probe reports `UNSPECIFIED` unless `observedRpu` is `PRESENT`, the probe delimited every NAL unit of every packet that the walk covers, no packet holds two RPUs, and no packet ahead of the first picture packet holds an RPU.
+* An AV1 stream always reports its RPU placement as `UNSPECIFIED`.
+FFmpeg's AV1 decoders attach an RPU to the next shown frame whose OBUs follow it, so an RPU ahead of its frame is the layout that AV1 expects.
+* The placement rests on the first packets alone.
+The worker assumes that the rest of the stream keeps that layout.
 * Each video stream reports its codec profile, codec level and codec tier as typed values.
 The probe reads those values from the stream's decoder configuration record or sequence header.
 The probe never maps ffprobe's profile name.
@@ -396,7 +445,11 @@ For AV1, the probe cannot rule a value out when it did not read all of the OBUs,
 FFmpeg's Matroska demuxer drops a MasteringMetadata element when neither its primaries nor its luminance are complete.
 When ffprobe reports no mastering display for the chosen video stream of a Matroska file, the probe checks the track for that element itself.
 The probe marks the mastering display as omitted when the track holds the element.
-When the probe cannot read the track's Colour element, the probe cannot rule that element out, so it marks each value that no source gives as omitted.
+The probe reads the track as FFmpeg's Matroska demuxer reads it: only the tracks that FFmpeg turns into video streams count, a Colour element counts in any of the track's Video elements, and the last copy of a repeated element counts.
+The probe cannot read the Colour element when it cannot read the file, cannot find the Tracks element or the stream's track entry, or cannot parse an element on the way to the Colour element.
+The probe then cannot rule out a MasteringMetadata element or the MaxCLL and MaxFALL elements, so it marks each static metadata value that no source gives as omitted.
+This rule applies to the chosen video stream of every codec, whether or not the probe read its first frames.
+A track entry without a Video element or a Colour element holds neither value.
 A PQ stream is PQ10 when the probe read its first frames and found neither a mastering display nor a content light level, and the probe omitted neither value.
 A stream with an omitted value carries, or may carry, static metadata, so that stream is never PQ10.
 Probe version 5 therefore tells HDR10 from PQ10.
@@ -408,16 +461,25 @@ ffprobe cannot observe a profile 9 stream's RPUs when it reads frames, because F
 ffprobe also misses the RPUs of an HEVC stream whose RPU is not the last NAL unit of its sample, such as a malformed profile 5 stream.
 Such a profile 5 stream without a configuration record would read as Dolby Vision `ABSENT`, and the server could copy it with teal colors.
 AV1 frames alone do not prove that the stream lacks an RPU, HDR10+ or static metadata.
-FFmpeg's AV1 decoders drop the frames and the OBUs that they cannot parse, and never apply the metadata OBUs of the `av1C` record.
+FFmpeg's AV1 decoders drop the frames and the OBUs that they cannot parse, and never apply the metadata OBUs of the extradata.
 The probe reads those OBUs itself, so AV1 sources get facts as precise as those of HEVC sources: an AV1 PQ stream can be PQ10, and an AV1 stream can report Dolby Vision as `ABSENT`.
 An MP4 edit list can discard most of the widest read's packets.
 In one such file, the first 192 of its 288 packets decoded to 1 frame, so a probe that trusted that read would have ruled out features of frames that it never read.
+The pinned ffprobe also exits with status 0 when a read ends early.
+A Matroska file cut to a third of its length printed 13 of its 40 packets, with exit status 0.
+A probe that took a short read, or a short count of packets, as the end of the stream would rule out features of frames that the file holds.
 FFmpeg guesses the Dolby Vision profile from the first RPU header when the configuration record is missing.
 The pinned ffprobe reports the fields of that header.
 ffprobe reports static metadata that only the bitstream carries as side data of the first frame.
 A single malformed SEI message ahead of the static metadata or HDR10+ message, in the packets or in the configuration record, hid that message from every frame.
 A probe that trusted the frames alone would then report HDR10+ as `ABSENT`, or a PQ stream as PQ10.
-The same happened when an HDR10+ message sat inside a nesting message that the walk did not read, when a PQ stream in MPEG-TS carried Annex B extradata, and when an MP4 sample switched to another sample description.
+The same happened when an HDR10+ message sat inside a nesting message that the walk did not read, and when an MP4 sample switched to another sample description.
+FFmpeg's HEVC decoder applies the SEI messages of Annex B extradata, and FFmpeg gives an AV1 stream in IVF or in a raw OBU file its sequence header and leading metadata OBUs as bare extradata.
+A probe that left those forms unread could rule nothing out for any HEVC stream in MPEG-TS or a raw file, or any AV1 stream in IVF or a raw OBU file, so none of those PQ streams could be PQ10.
+FFmpeg's Matroska demuxer drops an incomplete MasteringMetadata element, so a Matroska track that the probe cannot read may still hold static metadata.
+FFmpeg's HEVC decoder reads an RPU only from the last NAL unit of a packet.
+An RPU that starts a sample belongs either to the picture before it or to the picture after it, and only the layout tells which.
+The probe therefore reports the layout that it saw, so that the worker can move each RPU behind the picture that it belongs to (ADR 0013).
 A probe that reported a value it cannot rule out as missing would also call a stream PQ10 when the stream may be HDR10.
 For comparison, Jellyfin reads only the first video frame, and sets only a nullable HDR10+ flag from that frame.
 ADR 0032 gives the measurements behind the new facts.
@@ -446,11 +508,12 @@ The server encodes such a stream.
 The encode interprets the signaled transfer.
 So the stream's `compatibleBase` follows the signaled transfer, and ADR 0013 decides from that compatible base whether the worker tone-maps.
 From probe version 5 on, a Dolby Vision profile 5 or profile 10.0 stream never has this issue, because its `compatibleBase` is `NONE` whatever its signaled transfer says (<<decision-probe-version-5>>).
-* An RPU that starts a sample.
+* An RPU that starts a sample: an RPU placement of `BEFORE_NEXT_PICTURE` or `BEFORE_OWN_PICTURE` (<<decision-probe-version-5>>).
 The malformed profile 9 files of <<decision-probe-version-5>> have this issue.
 The server never copies such a stream.
 The server encodes such a stream.
-When such a stream has no compatible base, as in profile 5, the worker reorders its RPUs before the encode, so that the encode reshapes each picture (ADR 0013).
+When such an HEVC stream has no compatible base, as in profile 5, the worker moves its RPUs before the encode, so that the encode reshapes each picture (ADR 0013).
+An `UNSPECIFIED` or `AFTER_OWN_PICTURE` placement derives no issue.
 
 A configuration record that claims RPUs over frames that hold none is not a `MediaFileProbePropertyIssue`.
 
@@ -535,7 +598,7 @@ link:0013-stream-decision-architecture.adoc[ADR 0013] records the copy rule, the
 https://github.com/streamarr/streamarr-server/issues/66[streamarr/streamarr-server#66] adds a probe version that stores keyframe positions.
 From that probe version on, link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032] lets the server offer a stream copy only after the server knows the source's keyframe positions.
 Under this answer, the server copies Dolby Vision profile 8.2 and 9 sources, whose `compatibleBase` is `SDR`.
-The server encodes a profile 9 source in which an RPU starts a sample (<<decision-property-issues>>).
+The server encodes a profile 9 source whose RPUs start their samples (<<decision-property-issues>>).
 ADR 0013 records the player evidence for those copies.
 
 *Why:* No playlist can yet describe an HDR copy truthfully to a player that declared nothing.
@@ -665,8 +728,9 @@ Recognizing Dolby Vision and HDR10+ in source files stays in scope.
 Every other video stream keeps the dynamic-range facts of probe version 4.
 * Defer reading inside regional nesting, MCTS extraction information nesting, bitstream partition nesting and SEI processing order nesting messages.
 An SEI NAL unit that holds one counts as one that the probe could not delimit.
-* Defer reading extradata other than an `hvcC` or `av1C` record, such as Annex B extradata or the bare OBUs of an AV1 stream in IVF.
+* Defer reading extradata in any form other than an `avcC` or `hvcC` record, Annex B extradata, an `av1C` record or bare OBUs.
 A stream with such extradata counts as one whose units the probe could not all delimit.
+* Defer deciding the RPU placement from more than the first packets.
 * Defer deciding whether a `MediaFileProbePropertyIssue` rules out direct play.
 Direct play waits for client capability declarations (link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045]), and https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] decides that question.
 * Defer showing a `MediaFileProbePropertyIssue` to clients.
@@ -706,8 +770,13 @@ The server derives each problem from the stored facts when the server decides, s
 That rule still holds after clients can declare Dolby Vision.
 * The upgrade to probe version 5 probes every library again, and each of those probes reads the first frames of the chosen video stream.
 * An H.264, HEVC or AV1 stream can report HDR10+, the observed RPU and Dolby Vision as `ABSENT`, and a PQ stream of any of those codecs can be PQ10.
-A stream with extradata that the probe does not read cannot.
-The HEVC stream of the measured MPEG-TS file and every AV1 stream in IVF are such streams.
+That includes HEVC in MPEG-TS and raw files, and AV1 in IVF and raw OBU files.
+A stream whose extradata matches no form or cannot be delimited cannot, and neither can a stream without extradata.
+* A stream of fewer than 3 frames never reports HDR10+, the observed RPU or Dolby Vision as `ABSENT`, and is never PQ10, because the probe cannot tell it from a cut-short read.
+* A Matroska file whose track the probe cannot read is never PQ10.
+* A stream whose layout changes after its first packets gets the move that its first packets call for (ADR 0013).
+* The server stores no probe result whose compatible base breaks the listed rule.
+A worker that derives the base differently stops the file's probe after three such results, as ADR 0032 decides for every contract violation.
 * When the server chooses SDR output, the source description keeps the HDR facts that the probe found.
 The server cannot silently change a manual choice, and the playlist must describe the actual output that the server selected.
 * A stream copy of a Dolby Vision or HDR10+ source delivers the HDR10+ information and the Dolby Vision RPUs unchanged.
@@ -771,6 +840,14 @@ Ignoring a nested message would instead report the feature as `ABSENT` when the 
 * Stepping over a nesting message that the walk does not read, as if it were an ordinary message, would report HDR10+ as `ABSENT` when that nesting message holds an HDR10+ message.
 FFmpeg ignores the nested message, so no frame shows it.
 * Trusting a widest read that keeps fewer than 3 frames of a longer stream would report HDR10+ and Dolby Vision as `ABSENT` for frames that the probe never read.
+* Telling a stream of fewer than 3 frames from a cut-short read by counting the stream's packets: ffprobe ends a count, like a read, without an error when the file fails.
+An earlier draft of this amendment trusted the count, so a file that failed partway would have read as a short stream with nothing to find.
+* Reporting only whether a sample starts with an RPU, as an earlier draft of this amendment did: such an RPU belongs to the picture before it in one layout and to the picture after it in the other.
+A worker that moved every such RPU behind the previous picture gave 99 of 100 frames of a stream in the other layout the wrong reshape (ADR 0013).
+* Deciding the RPU placement from the whole stream: the probe would read every file whole on the re-scan, where probe version 5 reads only the first frames.
+* Leaving Annex B extradata and bare-OBU extradata unread, as an earlier draft of this amendment did: no PQ stream in MPEG-TS, in a raw HEVC file, in IVF or in a raw OBU file could then be PQ10, and none could report HDR10+ or Dolby Vision as `ABSENT`.
+* Accepting `SDR` or `UNSPECIFIED` for every transfer that names neither PQ nor HLG: a Dolby Vision stream with a linear or logarithmic transfer could then be stored with an `SDR` base and copied.
+* Taking a Matroska track that the probe cannot read as holding no static metadata: FFmpeg drops an incomplete MasteringMetadata element, so the stream could read as PQ10 while it carries HDR10 metadata.
 * Reporting an AV1 stream's HDR10+ as `ABSENT` when its frames show none, without reading its OBUs, would miss an HDR10+ message in a frame that FFmpeg dropped.
 * Marking a static value as omitted only when the probe found the value and could not read it would make an unread value look missing.
 The stream would then read as PQ10 when the stream may be HDR10.
@@ -800,3 +877,4 @@ The narrower answer would still copy PQ and HLG sources to a client that declare
 * https://netflixtechblog.com/rebuilding-netflix-video-processing-pipeline-with-microservices-4e5e6310e359[Netflix explains how to describe sources, encode media, and check the output]
 * https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] (probe version 5, which reads the first frames of the chosen video stream) and https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] (typed client capability declarations)
 * https://github.com/streamarr/streamarr-transcode-worker/issues/24[streamarr/streamarr-transcode-worker#24] (the worker's part of probe version 4)
+* https://mkvtoolnix.download/doc/NEWS.md[MKVToolNix release notes]: version 57.0.0, released on 2021-05-22, stores the HEVC NAL units of types 62 and 63 and the suffix SEI NAL units with the frame that they belong to instead of with the next frame

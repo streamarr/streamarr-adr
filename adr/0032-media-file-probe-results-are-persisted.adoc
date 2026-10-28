@@ -377,16 +377,17 @@ A value that the worker contract does not name is `UNSPECIFIED`.
 * Whether the probe read the first frames of each video stream.
 The probe reads the first 3 frames of the chosen video stream, or fewer when the stream holds fewer.
 The probe reads no frame of any other stream.
-A read that keeps fewer than 3 frames of a stream that may hold more reports no frame feature as `ABSENT`, as ADR 0036 decides.
+A read that keeps fewer than 3 frames counts as cut short, even when the stream holds no more, and reports no frame feature as `ABSENT`, as ADR 0036 decides.
 * The HDR10+ and Dolby Vision RPU facts that the first frames show, as the probe version 5 section of ADR 0036 decides.
 For H.264 and HEVC, the probe also parses the NAL units of the packets that hold those frames, because FFmpeg's decoders drop or ignore some RPUs.
-The probe also reads the SEI messages of those packets and of the HEVC configuration record, because FFmpeg loses some HDR10+ and static metadata messages.
+The probe also reads the SEI messages of those packets and of the stream's extradata, because FFmpeg loses some HDR10+ and static metadata messages.
 H.264 streams therefore report HDR10+ as present or absent, as HEVC streams do.
-FFmpeg's AV1 decoders drop the RPUs, the frames and the rest of the packets whose metadata OBUs they cannot parse, and never apply the metadata OBUs of the `av1C` record.
-For AV1, the probe therefore reads the metadata OBUs of the `av1C` record and of those packets.
+FFmpeg's AV1 decoders drop the RPUs, the frames and the rest of the packets whose metadata OBUs they cannot parse, and never apply the metadata OBUs of the extradata.
+For AV1, the probe therefore reads the metadata OBUs of the extradata and of those packets.
+The probe reads extradata in each form that FFmpeg's demuxers give: an `avcC`, `hvcC` or `av1C` record, Annex B extradata, and the bare OBUs of AV1 in IVF or a raw OBU file.
 AV1 streams therefore report HDR10+, RPUs and Dolby Vision as present or absent, as H.264 and HEVC streams do.
 Those facts include the fields of the first RPU header that tell the Dolby Vision profile.
-Those facts also include whether a sample that the probe read starts with an RPU.
+Those facts also include the RPU placement: whether each RPU follows its own picture, starts the next picture's sample or starts its own picture's sample, as ADR 0036 decides.
 * The mastering display of the first frame of the chosen video stream, when the container declares no mastering display.
 The content light level of that first frame, when the container declares no content light level.
 For H.264 and HEVC, when the first frame carries no value either, the value of the first SEI message that carries it and is not nested.
@@ -394,6 +395,7 @@ For AV1, when the first frame carries no value either, the value of the first ma
 The values keep the units of the probe version 4 static metadata.
 * Whether each video stream carries, or may carry, a static metadata value that the probe left absent.
 That includes a Matroska MasteringMetadata element that FFmpeg's Matroska demuxer drops because neither its primaries nor its luminance are complete.
+That also includes each value that no source gives when the probe cannot read the Matroska track's Colour element, for every codec.
 That also includes a value that the probe cannot rule out, as ADR 0036 decides, such as a value that an SEI NAL unit or an OBU that the probe could not delimit may hold.
 A stream with such an omitted value is never PQ10.
 * The content light level of the chosen video stream's Matroska track when the track's MaxCLL or MaxFALL element is 0 or missing.
@@ -1571,6 +1573,7 @@ Before the walk, the probe ruled nothing out for AV1.
 |===
 +
 An AV1 PQ stream in IVF, and an AV1 MP4 file whose samples switch to another sample description, reported HDR10+ and Dolby Vision as `UNSPECIFIED` and both static values as omitted, before and after.
+The IVF stream changed once the probe walked bare-OBU extradata, as the extradata measurements below show.
 * An HEVC MP4 file with an edit list held 288 packets and 97 frames, and its first 192 packets decoded to 1 frame.
 Before the probe counted a capped read of a longer stream as cut short, it reported HDR10+ and Dolby Vision as `ABSENT`.
 After, both are `UNSPECIFIED`.
@@ -1578,13 +1581,50 @@ After, both are `UNSPECIFIED`.
 Before the probe treated an unread nesting message as undelimited, it reported HDR10+ as `ABSENT`.
 After, HDR10+ is `UNSPECIFIED`.
 * A PQ HEVC stream in MPEG-TS, without static metadata, carried Annex B extradata.
-Before the probe treated such extradata as unread, it reported HDR10+ and Dolby Vision as `ABSENT` and the stream as PQ10.
-After, HDR10+ and Dolby Vision are `UNSPECIFIED`, both static values are omitted, and the stream is not PQ10.
+While the probe trusted the frames alone, it reported HDR10+ and Dolby Vision as `ABSENT` and the stream as PQ10, without reading the extradata that FFmpeg's HEVC decoder applies.
+While the probe treated such extradata as unread, HDR10+ and Dolby Vision were `UNSPECIFIED`, both static values were omitted, and the stream was not PQ10.
+Once the probe walked Annex B extradata, the stream reported HDR10+ and Dolby Vision as `ABSENT` and the stream as PQ10, because neither the extradata nor the packets hold an HDR message.
 * A PQ HEVC MP4 file's second sample switched to another `hvcC` record.
 ffprobe printed that the packet carried new extradata, but not the record's bytes.
 Before the probe counted a read with a replacement record as one whose units it could not all delimit, it reported the stream as PQ10, with HDR10+ and Dolby Vision `ABSENT`.
 After, HDR10+ and Dolby Vision are `UNSPECIFIED`, and both static values are omitted.
 The same file without the switch still reports HDR10+ and Dolby Vision as `ABSENT`.
+* The pinned ffprobe exited with status 0 when a read ended early.
+A Matroska file cut to a third of its length printed 13 of its 40 packets, with exit status 0.
+* The worker's recorded first packets of H.264, HEVC and AV1 samples changed as follows when the probe began to walk Annex B extradata and bare-OBU extradata.
+Before, the probe treated both forms as unread.
++
+[cols="2,2,2"]
+|===
+|Sample |Treating the extradata as unread |Walking the extradata
+
+|PQ HEVC in MPEG-TS, without static metadata
+|HDR10+ and Dolby Vision `UNSPECIFIED`, both static values omitted
+|HDR10+ and Dolby Vision `ABSENT`, no value omitted, so PQ10
+
+|HEVC in MPEG-TS with an unspecified transfer, and the base layer of a two-layer profile 7 file in MPEG-TS
+|HDR10+ and Dolby Vision `UNSPECIFIED`
+|HDR10+ and Dolby Vision `ABSENT`
+
+|10-bit AV1 in IVF, and the same in a raw OBU file
+|HDR10+ and Dolby Vision `UNSPECIFIED`, both static values omitted
+|HDR10+ and Dolby Vision `ABSENT`, no value omitted
+
+|PQ AV1 in IVF, without static metadata
+|HDR10+ and Dolby Vision `UNSPECIFIED`, both static values omitted
+|HDR10+ and Dolby Vision `ABSENT`, no value omitted, so PQ10
+
+|Raw PQ H.264 with a mastering display, no light level, and a rejected SEI message
+|Light level omitted
+|Light level not omitted, HDR10+ and Dolby Vision `ABSENT`
+|===
++
+The recorded samples that carry HDR10+ or static metadata, in MPEG-TS and in raw HEVC files, kept those facts.
+* The probe reported these RPU placements, against ffprobe 8.1.3 in the pinned worker image:
+** `AFTER_OWN_PICTURE` for a conforming raw profile 5 HEVC stream, for a 4-second Matroska excerpt of a profile 5 film, and for the profile 5 and profile 9 streams of the recorded MPEG-TS samples.
+** `BEFORE_NEXT_PICTURE` for the raw stream rewritten so that each RPU sat ahead of the next picture, and for the excerpt remuxed into MP4 and into Matroska so that each RPU started the next picture's sample.
+** `BEFORE_OWN_PICTURE` for a raw stream rewritten so that each RPU started its own picture's sample.
+* In a local build of the worker image with the same FFmpeg 8.1.3 binary, FFmpeg's MP4 and Matroska remuxes kept that own-picture layout in 100 of 100 samples.
 
 [[evidence-stream-titles]]
 === Stream titles

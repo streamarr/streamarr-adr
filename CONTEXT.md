@@ -115,8 +115,10 @@ _Avoid_: profile (unqualified), DV profile
 
 **RPU placement**:
 Where the samples of an H.264 or HEVC Dolby Vision video stream put each picture's RPU, the unit that holds the picture's Dolby Vision reshaping instructions.
-The probe reports it from the first packets: each RPU follows its own picture, each RPU starts the next picture's sample, or unspecified when the first packets cannot tell.
-The placement rules out a copy only when the probe reports that each RPU starts the next picture's sample, not when it reports unspecified.
+The probe reports it from the first packets: each RPU follows its own picture, every RPU starts its sample, or unspecified when the probe cannot tell.
+Every RPU starts its sample in two layouts: the shifted layout, where each picture's RPU starts the next picture's sample, and the own-first layout, where it starts its own picture's sample.
+One value covers both, because the first packets of a shifted file whose start was cut away look like an own-first file's, and both take the same repair.
+The placement rules out a copy when every RPU starts its sample, and never when it is unspecified.
 The worker reads the placement before an encode that must reshape the pictures, to move each RPU behind the picture that it belongs to.
 _Avoid_: RPU order, RPU position, RPU offset, RPU layout for the reported value (a layout is the arrangement in a file that the placement reports)
 

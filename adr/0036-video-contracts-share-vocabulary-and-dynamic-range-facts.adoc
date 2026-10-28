@@ -324,7 +324,8 @@ FFmpeg 8.1 splits each packet, and the extradata, into NAL units with `ff_h2645_
 ** a NAL unit whose `forbidden_zero_bit` is 1;
 ** for HEVC, a NAL unit shorter than its 2-byte header, and one whose `nuh_temporal_id_plus1` is 0 or whose `nuh_layer_id` is 63;
 ** for H.264, a NAL unit whose bytes are all 0, an empty one included;
-** the last NAL unit of a packet whose NAL units follow lengths, when its length and its bytes take fewer than 4 bytes together.
+** a NAL unit of a packet whose NAL units follow lengths, when fewer than 4 bytes of the packet remain where its length starts.
+A NAL unit whose length and bytes take fewer than 4 bytes still reaches the decoders when at least 4 bytes remain there, as when a dropped tail of 1 to 3 bytes follows it.
 * The walk skips each of these NAL units, as if the packet or the extradata did not hold it.
 Such a NAL unit is no RPU and no SEI NAL unit, so it is no evidence of any feature.
 The RPU placement and the worker's RPU move (ADR 0013) do not count it either: it is never a slice, never makes a packet start with an RPU, and never keeps an RPU from being the last NAL unit of its sample.
@@ -332,6 +333,7 @@ FFmpeg keeps the trailing zero bytes of a NAL unit that the 4 bytes 0x000001E0 f
 The walk skips that NAL unit too, because no RPU move rests on an H.264 stream.
 `ff_h2645_packet_split` reads a length only while at least 4 bytes of the packet remain: when 1 to 3 bytes remain where the next length would start, it drops them, whatever they hold.
 When it reads a length of 0, or a length that runs past the end of the packet, it rejects the whole packet, so no decoder sees any of that packet's NAL units, and the probe counts such a packet as one that it could not delimit.
+With 4-byte lengths, exactly 4 bytes left where the next length starts therefore reject the packet: whatever length they hold is 0 or runs past the end, and `get_nalsize` rejects it without reading it.
 A length within those 1 to 3 bytes, which a length of 1 or 2 bytes allows, therefore rejects nothing, even when it is 0 or runs past the end: the walk drops those bytes, as the splitter does, and the NAL units ahead of them still count.
 * An HEVC NAL unit of type 62 on another layer or with another TemporalId is not an RPU, whatever its payload holds.
 FFmpeg attaches nothing from such a NAL unit to the frames, so such a NAL unit is no evidence of Dolby Vision.
@@ -350,6 +352,7 @@ The probe reads those packets in a separate read of the same count.
 When that read returns fewer packets than the kept read asked for, the probe has not read every packet that the walk covers.
 The stream's extradata tells how a packet delimits its NAL units.
 After an H.264 or HEVC configuration record (`avcC` or `hvcC`), a length prefix leads each NAL unit.
+Such a packet is delimited when no length that starts where at least 4 bytes of the packet remain is 0 or runs past the end of the packet, the packet holds at least one NAL unit, and no NAL unit holds a start code (0x000001).
 After any other extradata, start codes delimit the NAL units, as in Annex B of H.264 and HEVC.
 A stream without extradata gives the probe no way to delimit its packets.
 `observedRpu` is `PRESENT` when either the frames or those packets hold an RPU.

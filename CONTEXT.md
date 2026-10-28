@@ -113,6 +113,12 @@ Its values are claims that the probe checks against the picture signaling and th
 When no configuration record names a profile, the probe derives the profile from the first RPU header, as FFmpeg does.
 _Avoid_: profile (unqualified), DV profile
 
+**RPU placement**:
+Where the samples of an H.264 or HEVC Dolby Vision video stream put each picture's RPU, the unit that holds the picture's Dolby Vision reshaping instructions.
+The probe reports it from the first packets: each RPU follows its own picture, each RPU starts the next picture's sample, or unspecified when the first packets cannot tell.
+The server refuses a copy when each RPU starts the next picture's sample, and the worker reads the placement before an encode that must reshape the pictures, to move each RPU behind the picture that it belongs to.
+_Avoid_: RPU order, RPU position, RPU offset, RPU layout for the reported value (a layout is the arrangement in a file that the placement reports)
+
 **Output frame rate**:
 The frame rate at which every encode of a chosen video stream runs.
 The probe outcome, the transcode job and the worker's FFmpeg argument carry the output frame rate as an exact fraction, never as a decimal.

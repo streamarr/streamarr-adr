@@ -30,8 +30,9 @@ From probe version 5 on, the server never copies a video stream whose codec prof
 The server also never copies a video stream that has a `MediaFileProbePropertyIssue` that rules out a copy.
 Probe version 5 identifies a Dolby Vision profile 5 or profile 10.0 stream without a configuration record, and finds the malformed samples of some Dolby Vision profile 9 files.
 The second amendment therefore removes the known Dolby Vision gaps that this ADR listed.
-The second amendment also has the worker reshape a profile 5 stream whose RPUs start their samples (<<reshape-rpus-starting-samples>>).
+The second amendment also has the worker move the RPUs of an HEVC Dolby Vision source with no compatible base, such as profile 5, when the RPUs do not follow their pictures (<<reshape-rpus-starting-samples>>).
 FFmpeg's HEVC decoder ignores such RPUs, so before this amendment the encode of such a stream kept the color cast of an unreshaped picture.
+The worker moves them in a fragmented MP4 copy of the source, as probe version 5's RPU placement directs.
 
 == Context
 
@@ -106,7 +107,7 @@ The worker tone-maps with the `tonemapx` filter of the pinned FFmpeg build that 
 <<gpu-stages>> decides when a GPU tone mapper replaces `tonemapx`.
 A reference processing unit (RPU) holds the per-frame Dolby Vision picture-adjustment instructions.
 Before tone mapping, the worker reshapes a Dolby Vision profile 5 source with the source's RPUs.
-When such a source's RPUs start their samples, the worker first reorders the RPUs (<<reshape-rpus-starting-samples>>).
+When such a source's RPUs do not follow their pictures, the worker first moves the RPUs (<<reshape-rpus-starting-samples>>).
 An encode of a Dolby Vision profile 7 or 8.x source reads only the Dolby Vision base layer and ignores the source's RPUs.
 `tonemapx` leaks memory on every reshaped Dolby Vision profile 5 frame.
 Streamarr accepts that leak.
@@ -124,49 +125,84 @@ The filter therefore darkened an untagged SDR source to a mean luma of 41 instea
 Evidence: <<evidence-sdr-output>>, <<evidence-tone-mapping>>.
 
 [[reshape-rpus-starting-samples]]
-=== The worker reorders the RPUs of a profile 5 stream whose RPUs start their samples, so that the encode reshapes it
+=== Before an encode of an HEVC Dolby Vision source with no compatible base, the worker moves each RPU behind the picture that it belongs to
 
-The RPU of a picture belongs after that picture, in the same sample.
-Some muxers start a new sample at each RPU, so each RPU sits at the start of the next picture's sample.
-Probe version 5 reports such a stream with `rpu_starts_sample` set to `PRESENT` (link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036]).
+The RPU of a picture belongs after the slices of that picture, as the last NAL unit of the same sample.
 FFmpeg's HEVC decoder reads an RPU only when the RPU is the last NAL unit of the packet that it decodes.
-For such a stream, the decoder therefore hands `tonemapx` no RPUs, and the encode keeps the color cast of an unreshaped profile 5 picture.
+An RPU anywhere else reshapes no picture, so the encode of a profile 5 picture keeps the color cast of an unreshaped picture.
 
-The worker reshapes such a stream with the stream's own RPUs.
-The job attempt runs two FFmpeg processes, joined by a pipe:
+Probe version 5 reports where the samples place the RPUs, as the stream's RPU placement (link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036]):
 
-* The first FFmpeg copies the source into MPEG-TS, with the attempt's seek and the same timestamps as a single FFmpeg.
-* The worker reads that MPEG-TS and moves each RPU that starts a sample to the front of the sample, ahead of the access unit delimiter that the MPEG-TS muxer writes.
-The move keeps every MPEG-TS packet's size and place, so no timestamp and no other stream changes.
-* The second FFmpeg encodes the reordered MPEG-TS with the usual filters.
-Its HEVC parser ends each access unit at a delimiter, so each RPU becomes the last NAL unit of the picture before it, which is the picture that the RPU belongs to.
-* The second FFmpeg trims the video at the attempt's start, because MPEG-TS does not carry an MP4 edit list.
-* When the job encodes audio, the first FFmpeg encodes it, and the second FFmpeg copies it.
-The first FFmpeg's seek then trims the audio as a single FFmpeg's seek does, and every source audio codec works.
+* `AFTER_OWN_PICTURE`: each RPU is the last NAL unit of its own picture's sample, as Dolby Vision requires.
+* `BEFORE_NEXT_PICTURE`: each picture's RPU starts the next picture's sample, and the last sample holds an RPU and no picture.
+mkvmerge wrote this layout before version 57, released in 2021.
+* `BEFORE_OWN_PICTURE`: each picture's RPU starts its own picture's sample.
+No known muxer writes this layout, but FFmpeg's MP4 and Matroska remuxes keep it.
+* `UNSPECIFIED`: the probe could not decide, or the first packets fit none of the other layouts.
 
-The worker takes an RPU that starts a sample to belong to the picture before it, as the muxers that start a sample at each RPU write it.
+The probe decides the placement from the first packets, and the worker assumes that the rest of the stream keeps that layout.
+The transcode job's video decision carries the source's codec family, from the codec that the probe stored.
+Every job carries it, whether it copies or encodes.
+A source codec other than H.264, HEVC and AV1 has an unspecified codec family.
 
-The worker chooses this path from the source dynamic range in the transcode job.
+The worker chooses this path from the source's codec family and dynamic range in the transcode job.
 The server's video decision does not change, and the worker builds the same filters from it.
 The job attempt runs two FFmpeg processes only when all four conditions hold:
 
 * The job encodes the video.
+* The source's codec family is HEVC.
 * The source's compatible base is none.
-* The source's Dolby Vision is present, and its `rpu_starts_sample` is `PRESENT`.
-* The output audio is none, AAC, AC-3 or E-AC-3, which MPEG-TS carries.
+* The source's Dolby Vision is present, and its RPU placement is not `AFTER_OWN_PICTURE`.
 
-Every other job attempt runs one FFmpeg process with the same command as before.
+Every other job attempt runs one FFmpeg process with the same command as before, and FFmpeg reads the source's samples unchanged.
+
+The two FFmpeg processes are joined by a pipe:
+
+* The first FFmpeg copies the source's video into fragmented MP4, with the attempt's seek and the same timestamps as a single FFmpeg.
+The copy writes each packet as soon as it has one, in fragments that start at keyframes, at a movie timescale of one microsecond, so the copy keeps every timestamp that the source's demuxer reads.
+* The first FFmpeg also writes the job's audio into the copy: it copies the source audio, or encodes it, as a single FFmpeg would.
+Its seek then trims the audio as a single FFmpeg's seek does, and every audio codec that the job copies or encodes works.
+The second FFmpeg copies that audio unchanged.
+* The worker reads the copy and moves the RPUs in its video samples:
+** For `BEFORE_OWN_PICTURE`, an RPU that starts a sample moves to the end of its own sample.
+** For `BEFORE_NEXT_PICTURE` and `UNSPECIFIED`, an RPU that starts a sample moves to the end of the previous picture's sample, which can lie in an earlier fragment.
+The worker drops such an RPU when it has no previous picture, as for the first RPU after a seek.
+** In the same jobs, an RPU that follows a slice of its sample but is not the sample's last NAL unit moves to the end of that sample.
+** An RPU that already ends its sample stays last, because the decoder reads the last NAL unit.
+** A sample that holds RPUs and no slice decodes no picture, so its RPUs move behind the previous picture.
+Of several RPUs that move behind one picture this way, the worker keeps only the last.
+* The worker rewrites only the sample sizes and data offsets of a fragment whose samples change, and passes every other byte unchanged.
+No timestamp and no other track changes.
+* The second FFmpeg encodes the rewritten copy with the usual filters.
+* The second FFmpeg trims the video at the attempt's start, because the copy keeps every packet from the keyframe at or before the seek.
+
+The worker treats an `UNSPECIFIED` placement as `BEFORE_NEXT_PICTURE`.
+A stream whose RPUs already follow their pictures then passes through the move unchanged.
+The shifted layout is the one that a known muxer wrote.
+Only the own-picture layout, which no known muxer writes, would get each picture the next picture's RPU.
+
+The worker accepts only the fragmented MP4 that FFmpeg writes with the copy's settings, and it bounds the memory that it holds while a picture waits for the next one.
+It fails the attempt as malformed output for any other copy.
 
 A stop asks the first FFmpeg to quit, and the second FFmpeg then ends at the end of its input.
 A stall, a failure or a forced end ends both processes.
-The attempt reports the second FFmpeg's failure first, then a failure to move the bytes between the two processes, then the first FFmpeg's failure.
+The attempt's outcome follows this order:
+
+. An unexpected failure of the transfer between the two processes, or the worker's refusal of the copy.
+. The second FFmpeg's exit, as a single FFmpeg's exit would decide.
+. A copy that did not reach the second FFmpeg whole, or a first FFmpeg that exited with an error, when the second FFmpeg exited cleanly.
+
 Neither process writes a temporary file.
 
-*Why:* On a profile 5 sample whose RPUs start their samples, the worker's encode without the reorder gave a mean Cr of 62.7 over the first 3 frames.
-With the reorder, the mean Cr was 122.3, the same as the encode of the same sample muxed correctly.
+*Why:* On the pinned worker image, the shifted layout of a profile 5 excerpt encoded through the move gave a mean Cr of 122.3 over the first 3 frames.
+The same excerpt muxed correctly, encoded by one FFmpeg, also gave 122.3, and the output packets were identical.
 128 is neutral on that 8-bit scale.
-After a seek, the reordered encode matched the correctly muxed sample after the same seek.
-Every media segment held the same packets and timestamps as the encode of the correctly muxed sample, except the duration of the stream's last audio frame.
+The shifted excerpt through one FFmpeg, without the move, gave 62.7.
+A layout in which each RPU starts its own picture's sample needs the other direction.
+On a fixture whose pictures carry RPUs of two different sources, so that a wrong move shows, the own-picture move matched the conforming layout in 100 of 100 frames.
+The previous-picture move differed from it in 99 of 100 frames.
+Across 108 audio cases, 106 matched the single FFmpeg packet for packet, and the other 2 failed on both paths.
+The first media segment arrived about 100 ms later than from one FFmpeg.
 Evidence: <<evidence-reshape>>.
 
 [[gpu-stages]]
@@ -332,7 +368,7 @@ Issue https://github.com/streamarr/streamarr-server/issues/396[streamarr/streama
 The Dolby Vision compatibility identifier is the value in the Dolby Vision configuration record that names the base format that the stream claims.
 ** The source's video stream has no other `MediaFileProbePropertyIssue` that rules out a copy.
 link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] decides which issues rule out a copy.
-A Dolby Vision profile 9 stream in which an RPU starts a sample has such an issue.
+A Dolby Vision profile 9 stream whose RPU placement is `BEFORE_NEXT_PICTURE` or `BEFORE_OWN_PICTURE` has such an issue.
 ** The source's codec profile is not `UNSPECIFIED`.
 This condition applies to a stored outcome of probe version 5 or later.
 A probe version 4 outcome stores no codec profile.
@@ -382,7 +418,7 @@ This rule covers a profile 5 stream without a configuration record that signals 
 This rule also covers a profile 5 stream in MPEG-TS without the Dolby Vision descriptor.
 The probe finds such a stream's RPUs even when FFmpeg's HEVC decoder ignores them, because the probe also parses the NAL units of the packets (ADR 0036).
 The interim copy rule therefore encodes each such stream, and the worker tone-maps the encode.
-When the stream's RPUs start their samples, the worker reorders the RPUs before the encode (<<reshape-rpus-starting-samples>>).
+When the stream's RPUs do not follow their pictures, the worker moves the RPUs before the encode (<<reshape-rpus-starting-samples>>).
 Dolby Vision profile 10.0, which is AV1 with no compatible base, follows the same rule, so the server encodes a profile 10.0 stream.
 Probe version 5 also finds the Dolby Vision profile 9 files from a known faulty muxer, in which an RPU starts a sample.
 Such a file ends with a sample that holds no picture.
@@ -408,10 +444,9 @@ HDR copies end the interim copy rule.
 * Dolby Vision copies with a PQ or HLG compatible base, and the playlist attributes of those copies, including `SUPPLEMENTAL-CODECS`.
 Issue https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] decides when such a copy carries those attributes.
 Issue https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396] builds those attributes.
-* How a job attempt on the reshape path plays when the attempt starts after the end of the source's audio (<<reshape-rpus-starting-samples>>).
-Such an attempt fails today.
-* Reshaping a profile 5 stream whose RPUs start their samples when the job copies FLAC, ALAC or Opus audio, names no audio codec, or writes an audio codec that MPEG-TS does not carry.
-Such a job runs one FFmpeg process, and its output keeps the color cast of an unreshaped picture.
+* Keeping a variable-frame-rate source's packet durations on the path that moves RPUs (<<reshape-rpus-starting-samples>>).
+The fragmented MP4 copy loses them, and the encode then repeats and drops other pictures than a single FFmpeg does.
+An intermediate container that keeps packet durations, or a frame-rate rule that keeps constant-frame-rate sources identical, needs a design decision first.
 * Copies of a Dolby Vision profile 5 source under `hev1` for clients that declare Dolby Vision (https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395]).
 Such a copy becomes a `dvhe` copy once a measurement shows that the `dvhe` copy plays.
 Otherwise the server encodes such a source.
@@ -436,18 +471,19 @@ The initialization segment then stays identical across job attempts, as link:003
 The playlist therefore never advertises a false codec string for an encode.
 * A libx265 encode whose forced level is too low fails the job attempt, because libx265 refuses to start.
 * A full-length Dolby Vision profile 5 encode grows each FFmpeg process's memory until the job attempt ends.
-* An encode of a profile 5 stream whose RPUs start their samples runs two FFmpeg processes.
-When the source is read at real time, the first media segment arrives about 1.4 s later than from one FFmpeg process.
-* The last audio frame of a job attempt on the reshape path declares a whole AAC frame, because MPEG-TS drops the encoder's trim of that frame.
-About 9 ms of encoder padding then plays at the very end of the title.
-* An attempt on the reshape path that starts after the end of the source's audio fails.
-MPEG-TS carries the audio's parameters only in the audio's packets, so the encoding FFmpeg finds an audio stream with no parameters.
-Before this amendment, such an attempt played with the color cast.
-* MPEG-TS does not carry the source's container rotation, and the second FFmpeg applies no rotation of its own.
-A rotated source on the reshape path therefore comes out unrotated, at the wrong size.
-* The transcode job names no source codec, so the worker's conditions do not check that the source is HEVC.
-An H.264 Dolby Vision stream whose probe found no transfer, and whose RPUs start their samples, has no compatible base and meets the conditions.
-The worker's reorder leaves such a stream's packets unchanged, so the output is the same, at the cost of the second FFmpeg process.
+* An encode of an HEVC Dolby Vision source with no compatible base runs two FFmpeg processes, unless its RPUs follow their pictures.
+When the source is read at real time, the first media segment arrives about 100 ms later than from one FFmpeg process.
+* On that path, the job's audio comes out as from one FFmpeg for every audio codec that the job copies or encodes, including in an attempt that starts after the end of the source's audio and with audio that starts late.
+The container's rotation and cropping also survive.
+* An attempt that copies AC-3 or E-AC-3 audio and starts after the end of that audio fails as malformed output, from one FFmpeg as from two.
+The pinned build's MP4 muxer writes no valid description of an AC-3 or E-AC-3 track that holds no packet.
+* An `UNSPECIFIED` placement takes the previous-picture move.
+A stream in the own-picture layout whose probe could not decide its placement therefore gets each picture the next picture's RPU.
+* A stream whose RPU layout changes after the packets that the probe read gets the move that those packets call for.
+* A variable-frame-rate source with B-frames can repeat and drop other pictures on the path that moves RPUs than from one FFmpeg.
+Constant-frame-rate sources are unaffected.
+* An H.264 or AV1 Dolby Vision source with no compatible base runs one FFmpeg process.
+FFmpeg's H.264 decoder reads no RPU, and its AV1 decoders attach an RPU to the next frame, so moving the RPUs would change nothing.
 * An encode of a profile 5 stream whose RPUs FFmpeg's HEVC decoder ignores for another reason, such as an RPU that it cannot parse, still keeps the color cast of an unreshaped picture.
 Under the interim copy rule, the server never copies a profile 5 stream.
 * A Dolby Vision copy with an SDR compatible base plays as SDR in every measured player.
@@ -522,19 +558,34 @@ Tone mapping moves to the GPU once the GPU tone mapper matches the CPU output.
 * Having the worker encode a stream whose copy fails the record check: the job's video decision and codec string would then no longer describe the worker's output.
 * Encoding in place in the same stream session and making the player reload its playlist: the old playlist's `CODECS` attribute would no longer match the media until the player reloads.
 * Predicting the failure from probe data: the worker cannot tell in advance which sources yield a record without parameter sets.
-* Reordering a profile 5 stream's RPUs with a bitstream filter of the pinned FFmpeg build: no filter in that build moves a NAL unit.
+* Moving a profile 5 stream's RPUs with a bitstream filter of the pinned FFmpeg build: no filter in that build moves a NAL unit.
 The `dovi_rpu` filter looks only at the last NAL unit of a packet.
 The `filter_units` filter can delete NAL units, but deleting the RPUs removes the reshape.
-* Patching FFmpeg's HEVC decoder so that it reads an RPU anywhere in its sample: Streamarr runs the pinned Jellyfin build unchanged, and link:0029-pin-jellyfin-ffmpeg-releases.adoc[ADR 0029] defers an FFmpeg build pipeline of Streamarr's own.
+* Patching FFmpeg's HEVC decoder so that it reads an RPU anywhere in its sample, or so that its MPEG-TS muxer carries more audio codecs: Streamarr runs the pinned Jellyfin build unchanged, and link:0029-pin-jellyfin-ffmpeg-releases.adoc[ADR 0029] defers an FFmpeg build pipeline of Streamarr's own.
 * Fixing the colors after decoding, with a filter: the decoder has already discarded the RPUs, and nothing after the decoder can rebuild the per-frame reshape.
 The first RPU header that the probe stores tells only the Dolby Vision profile and holds no reshape.
-* Moving each RPU to the end of its own sample in a fragmented MP4 copy: an RPU that starts a sample belongs to the picture before it.
-The move would give each picture the RPU of the picture before it.
-Moving an RPU into the previous sample changes the sizes and offsets of both samples.
-This design was never run in the pinned FFmpeg build.
+* Moving the RPUs in an MPEG-TS copy, as this amendment first built: MPEG-TS carries the audio's parameters only in the audio's packets.
+An attempt that started after the end of the source's audio therefore failed and wrote no bytes, and the second FFmpeg had to read the start of the stream to learn its streams, which cost about 1.4 s before the first segment.
+The move relied on the access unit delimiter that the MPEG-TS muxer writes at the start of each sample, and on the second FFmpeg's HEVC parser, which ends each access unit at a delimiter.
+An RPU moved ahead of the delimiter became the last NAL unit of the picture before only through that parser rule, so the move could give an RPU only to the previous picture.
+The pinned build's MPEG-TS muxer also carries no FLAC or ALAC, the copy lost Opus's pre-skip and the encoder's trim of the last AAC frame, and the copy dropped the container's rotation.
+* Moving every RPU that starts a sample behind the previous picture, as the MPEG-TS design did: a stream in the own-picture layout would get each picture the next picture's RPU.
+On the own-picture fixture, that move gave 99 of 100 frames the wrong reshape.
+* Encoding a stream whose placement is `UNSPECIFIED` with one FFmpeg, or failing its attempt: one FFmpeg loses every RPU that starts a sample, and a failed attempt plays nothing.
+The previous-picture move leaves a conforming stream unchanged.
+* Requiring Dolby Vision profile 5 by number in the worker's conditions: a compatible base of none already means that no player can show the base without the RPUs, whatever the profile number.
 * A raw HEVC stream between the two FFmpeg processes: a raw stream carries neither the source's timestamps nor its audio.
-* A Matroska stream between the two FFmpeg processes: the pinned build's Matroska muxer writes millisecond timestamps and drops the decoding timestamps.
-* A NUT stream between the two FFmpeg processes: the pinned build's NUT demuxer restores neither the decoding timestamps nor the durations, and its muxer refuses a negative presentation timestamp.
+* A Matroska stream between the two FFmpeg processes: the pinned build's Matroska muxer writes millisecond timestamps, and it changed the durations of the last audio packets.
+The last AAC packet declared 1008 samples instead of 272.
+* A NUT stream between the two FFmpeg processes: the pinned build's NUT muxer refuses a negative presentation timestamp, and its demuxer read ALAC back as an unknown codec tag and E-AC-3 as AC-3.
+After some seeks, the demuxer lost video while FFmpeg exited with status 0, in one attempt delivering 2 of 192 video packets.
+The NUT copy also lost the last packets' durations.
+* Reading the audio from a second input of the source in the second FFmpeg, beside a video-only pipe: the worker would read the source twice.
+On the excerpt, one FFmpeg read 1,699,613 bytes, and the pair read 3,399,226 bytes, although the audio packets held 50,412 bytes.
+A source of 80 Mb/s on network storage would then be read at about 160 Mb/s.
+* Carrying the source audio's sample rate and channel layout in the transcode job, so that the second FFmpeg could declare an MPEG-TS audio track before its first packet: the pinned build refused the sample rate as an MPEG-TS input option, and an audio copy still failed with `sample rate not set`.
+The job also cannot restore a codec's configuration, such as FLAC's or ALAC's, its packet durations or its padding.
+* Clearing the copy's frame rate with `setpts=PTS:strip_fps=1`, so that a variable-frame-rate source keeps its pictures: on the pinned build, each constant-frame-rate source then came out one frame short, with every frame different from a single FFmpeg's.
 * Seeking in the second FFmpeg with an output `-ss` option: FFmpeg subtracts that time from every output timestamp, so the attempt's timeline would no longer match a single FFmpeg's timeline.
 The second FFmpeg trims instead.
 An input seek cannot run on a pipe.
@@ -605,13 +656,14 @@ The mean Cr of the unchanged stream's output was 122.4 on an 8-bit scale whose n
 The mean Cr of the rewritten stream's output was 62.6, the same as for the stream with every RPU removed.
 
 [[evidence-reshape]]
-=== Reshaping a profile 5 stream whose RPUs start their samples
+=== Moving the RPUs of a profile 5 stream
 
-These measurements ran on 2026-10-27 through the worker's own job attempts, with FFmpeg 8.1.3 from the pinned worker image.
+These measurements ran on 2026-10-27 through the worker's own job attempts, with FFmpeg 8.1.3 from the pinned worker image, unless they name another setup.
 
-* The source was a 4-second, 1920x1080, 24 fps excerpt of a Dolby Vision profile 5 film with AAC audio.
+* The source was a 4-second, 1920x1080, 24 fps excerpt of a Dolby Vision profile 5 film, 100 pictures long, with AAC audio.
 A copy of the excerpt was remuxed so that each RPU started the next picture's sample, in MP4 and in Matroska.
-The worker encoded each file to 640x360 H.264 with tone mapping, in 1-second segments.
+The probe reported the excerpt as `AFTER_OWN_PICTURE` and the remuxed copies as `BEFORE_NEXT_PICTURE` (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]).
+* The worker encoded each file to 640x360 H.264 with tone mapping, in 1-second segments.
 * Mean Cr is the mean of the Cr (red-difference chroma) samples on an 8-bit scale whose neutral value is 128.
 A profile 5 picture that is not reshaped comes out teal, which pulls the mean Cr far below 128.
 
@@ -619,46 +671,89 @@ A profile 5 picture that is not reshaped comes out teal, which pulls the mean Cr
 |===
 |Encode |Mean Cr, first 3 frames |Mean Cr, all frames
 
-|`tonemapx` straight from the correctly muxed excerpt, at 1920x1080
-|122.3
-|
-
-|The worker, correctly muxed excerpt, one FFmpeg, from the start
+|Correctly muxed excerpt, one FFmpeg
 |122.3
 |122.7
 
-|The worker, RPUs starting samples, one FFmpeg (before this amendment), from the start
+|RPUs starting the next picture's sample, one FFmpeg without the move
 |62.7
 |63.3
 
-|The worker, RPUs starting samples, two FFmpegs and the reorder, from the start
+|RPUs starting the next picture's sample, two FFmpegs, `BEFORE_NEXT_PICTURE`
 |122.3
 |122.7
-
-|The worker, correctly muxed excerpt, one FFmpeg, from the third segment
-|123.0 (Matroska), 122.8 (MP4)
-|122.8
-
-|The worker, RPUs starting samples, two FFmpegs and the reorder, from the third segment
-|123.0 (Matroska), 122.8 (MP4)
-|122.8
 |===
 
-* MP4 and Matroska gave the same values from the start.
-* Each media segment of the reordered encode held the same packets as the encode of the correctly muxed excerpt: stream, presentation and decoding timestamps, duration and flags.
-That held for every segment from the start, and for every segment but the last after the seek.
-In the last segment after the seek, the stream's last AAC frame declared 1024 samples instead of 136 or 128.
-The initialization segments described the same streams.
-* With the source read at real time, the first 1-second segment arrived after 2.67 s from one FFmpeg and after 4.07 s from two.
-Most of the difference is the second FFmpeg reading the start of the MPEG-TS to learn its streams.
-Read from local disk without a limit, a whole 5-segment attempt took 473 ms with one FFmpeg and 669 ms with two.
-* A stop, a failure of either FFmpeg and a stall each ended both processes, and no FFmpeg process remained.
-* An attempt that started after the end of the source's audio failed with `sample rate not set` and wrote no bytes.
-* Run directly in the pinned image, outside the worker, a 64x36 HEVC stream in MP4 with a 90° display rotation came out 36x64 from one FFmpeg.
-Through an MPEG-TS copy, with the same scale filter, it came out 114x64.
+* With the placement `BEFORE_NEXT_PICTURE` and with `UNSPECIFIED`, the encode of the shifted copy held the same output packets as the single FFmpeg's encode of the correctly muxed excerpt.
+* The own-picture fixture was the same excerpt, rewritten so that each RPU started its own picture's sample.
+Every second picture in decode order carried the RPU of another profile 5 source, with other reshaping, so that an RPU given to the wrong picture changes that picture.
+The encodes used single-threaded x264, because x264's output otherwise changes from run to run.
++
+[cols="3,2",options="header"]
+|===
+|Encode of the own-picture fixture |Result against one FFmpeg on the conforming layout
+
+|Two FFmpegs, `BEFORE_OWN_PICTURE`
+|All 297 packets and all 100 decoded frames identical
+
+|Two FFmpegs, `BEFORE_NEXT_PICTURE` (the wrong move)
+|99 of 100 frames differ
+
+|One FFmpeg without the move
+|100 of 100 frames differ, mean Cr 62.8 over the first 6 frames
+|===
++
+The same fixture in the shifted layout, through the previous-picture move, differed in 12 of 297 packets at the end, because the fixture leaves out the last picture's RPU.
+* The audio cases crossed six source audio codecs (AAC, AC-3, E-AC-3, FLAC, ALAC and Opus), three outputs (a copy of the source audio, AAC and Opus), three audio timings and two seeks.
+The audio timings were audio over the whole video, audio that starts 1.5 s late, and 0.5 s of audio that ends before the mid-file seek.
+The seeks were at 0 and at 3 s.
+The encodes used single-threaded x264.
+106 of the 108 cases matched the single FFmpeg packet for packet: presentation and decoding timestamps, duration, size, flags and the SHA-256 of each packet.
+The other 2 cases copied short AC-3 and E-AC-3 audio past the 3 s seek.
+Both paths failed them as malformed output, with an initialization segment whose `moov` box ran to the end of the output, and delivered nothing.
+* A 90° rotation, a container crop, and both together, in MP4 and in Matroska, gave the same packets as the single FFmpeg.
+The outputs kept the rotated and cropped sizes, 202x360, 748x360 and 174x360, against 640x360 for the plain source.
+* With the source read at real time, AAC encoding and 1-second segments, the first segment arrived after 3,376 to 3,388 ms from one FFmpeg and after 3,476 to 3,480 ms from two, in 3 runs each.
+* A stop ended the attempt as stopped.
+A failure of either FFmpeg, a copy that is not MP4, and a stall of either FFmpeg each failed the attempt, and no FFmpeg process remained.
+A stall failed it as an encoder stall after the 3 s stall limit that the test set.
+* A variable-frame-rate source with B-frames lost pictures on the pipe.
+The source was a generated 48-picture HEVC stream in Matroska, encoded at 24 fps.
+One FFmpeg showed all 48 source pictures.
+Two FFmpegs showed 43, and held some pictures for 6 frames.
+The fragmented MP4 copy gives each sample the gap to the next decoding time as its duration, so the copy loses the source's packet durations, and the second FFmpeg's frame-rate conversion repeats and drops other pictures.
+With `setpts=PTS:strip_fps=1` in the second FFmpeg, all 48 pictures showed, but each of two constant-frame-rate sources came out one frame short with every frame different.
+* The worker's smoke tests generate a profile 5 stand-in from FFmpeg's test sources, in the conforming and the shifted layouts.
+Through the pinned image, the two layouts uploaded the same packets, with AAC, AC-3, E-AC-3, FLAC, ALAC and Opus source audio, from the start and after a seek.
+
+The containers between the two FFmpegs were compared on 2026-10-27.
+The MPEG-TS pipe ran through the worker's job attempts on the pinned worker image.
+The other comparisons ran in a local build of the worker image with the same FFmpeg 8.1.3 binary, on the same excerpt and on generated sources, through the worker's segment delivery or FFmpeg alone.
+
+* MPEG-TS, the pipe that this amendment first built: the worker moved each RPU that started a sample ahead of the access unit delimiter that the MPEG-TS muxer writes, and the second FFmpeg's HEVC parser then ended the previous picture at that delimiter.
+** With the source read at real time, the first 1-second segment arrived after 2.67 s from one FFmpeg and after 4.07 s from two.
+Most of the difference was the second FFmpeg reading the start of the MPEG-TS to learn its streams.
+In the local build, probing less (`-analyzeduration 1 -fpsprobesize 0`) brought it to 2.77 s, but then an AAC stream that started 4 s late failed with `sample rate not set` and wrote no bytes.
+** An attempt that started after the end of the source's audio failed with `sample rate not set` and wrote no bytes.
 A single FFmpeg wrote 10,650 bytes for the same attempt.
-* The worker's smoke tests generate a profile 5 stand-in from FFmpeg's test sources, with and without RPUs that start their samples.
-Through the pinned image, the two layouts uploaded the same packets, with AAC and FLAC source audio, from the start and after a seek.
+** In the last segment after a seek, the stream's last AAC frame declared 1024 samples instead of 136 or 128.
+** The pinned build's MPEG-TS muxer carries no FLAC or ALAC, and the copy lost Opus's pre-skip.
+** A 64x36 HEVC stream in MP4 with a 90° display rotation came out 36x64 from one FFmpeg and 114x64 through the MPEG-TS copy.
+* Fragmented MP4, with each packet written at once and the move in a separate process: the first segment arrived after a median of 2.735 s against 2.635 s from one FFmpeg and 4.001 s from the MPEG-TS pipe, in 3 runs each.
+Fragments of 250 ms instead gave 3.074 s.
+In 72 cases that crossed six source audio codecs, late audio, a source that starts at 10 s, two seeks and three audio outputs, every video and audio packet equaled the single FFmpeg's.
+* Matroska: the pinned build's Matroska muxer writes millisecond timestamps and changed the durations of the last audio packets.
+The last AAC packet declared 1008 samples instead of 272, and the last ALAC packet 4080 instead of 1296.
+* NUT: the pinned build's NUT muxer refuses a negative presentation timestamp.
+Its demuxer read ALAC back as an unknown codec tag and E-AC-3 as AC-3, and restored neither the decoding timestamps nor the last durations.
+After some seeks, the demuxer reported `frame size > 2max_distance and no checksum` and lost video while FFmpeg exited with status 0.
+In one such attempt, 2 of the 192 expected video packets arrived.
+* Audio from a second input of the source: the second FFmpeg read the video from the pipe and the audio from the source.
+In 94 readable pairs, every packet equaled the single FFmpeg's, with a recipe that keeps the source's timestamps in the pipe.
+The source was read twice: 1,699,613 bytes for one FFmpeg and 3,399,226 bytes for the pair, although the audio packets held 50,412 bytes.
+At a source bitrate of 80 Mb/s, that is about 160 Mb/s of reads at real time.
+* Audio parameters in the job: the pinned build's MPEG-TS demuxer refused an input sample rate (`Option sample_rate not found`).
+Output audio settings with an audio copy still failed with `sample rate not set` and wrote no bytes.
 
 [[evidence-levels-and-codec-strings]]
 === Levels and codec strings

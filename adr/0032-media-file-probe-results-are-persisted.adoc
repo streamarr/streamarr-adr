@@ -44,6 +44,12 @@ On the upgrade to probe version 5, the server queues a re-scan itself.
 The re-scan runs through the existing scan library operation.
 Playback keeps using each file's probe version 4 outcome until the server stores the file's probe version 5 outcome.
 
+Another amendment adds probe version 6 (<<probe-version-6>>).
+Probe version 6 reports the start time correction that a job attempt's FFmpeg makes, which link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-media-time-zero[ADR 0037] cancels.
+When the worker cannot give an exact correction, the probe reports a fallback reason instead and still succeeds.
+The server sends a job that carries the correction only to a worker that lists probe version 6.
+Playback keeps using each file's probe version 5 outcome until the server stores the file's probe version 6 outcome.
+
 == Context
 
 Streamarr learns a media file's technical properties by running ffprobe.
@@ -438,6 +444,60 @@ FFmpeg's AV1 decoders lose metadata OBUs in the same way, so the frames alone ca
 https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] compares the codec profile and level with what a client declares, so streamarr/streamarr-server#395 needs typed values.
 The measurements are in <<evidence-frame-facts>>, <<evidence-static-hdr>> and <<evidence-fate-sweep>>.
 
+[[probe-version-6]]
+=== Probe version 6 reports the start time correction that a job attempt's FFmpeg makes
+
+Probe version 6 reports every fact of probe version 5.
+https://github.com/streamarr/streamarr-server/issues/664[streamarr/streamarr-server#664] adds probe version 6.
+Probe version 6 adds one container fact to a successful outcome: the start time correction, or the reason why the worker gives none.
+link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-media-time-zero[ADR 0037] defines the start time correction and decides how a job attempt uses it.
+
+The probe reads the start time correction as a job attempt's FFmpeg reads the source.
+A job attempt's FFmpeg keeps FFmpeg's default read limits, and the probe's limits (<<probe-limits>>) change which streams have a start time.
+So probe version 6 runs a second ffprobe with a job attempt's input options and FFmpeg's default limits.
+The worker computes the correction from that run's container start time and stream start times.
+The rule follows FFmpeg's command line in the pinned FFmpeg: its list of demuxers that allow timestamp discontinuities, the earliest start time over every stream, and its rounding to microseconds.
+The worker owns the rule.
+The server stores the correction and passes it on unchanged.
+Media time zero stays the container start time that the probe reads under its limits, so every other stored time keeps its meaning.
+
+The worker reports a fallback reason instead of the correction in four cases:
+
+* The container start time of the second run differs from the probe's, or only one of the two runs has one.
+* The container has a start time, but the worker cannot compute an exact correction that is zero or negative.
+For example, no stream has a start time.
+* The source's timestamps reach more than half a stream's timestamp wrap range past the earliest stream start time.
+FFmpeg measures its wrap check from the corrected start time, so the correction would move such timestamps by a full wrap range.
+* The second run fails while the source stays available.
+A source that becomes unavailable still fails the probe, as it does without the second run.
+
+A fallback never fails the probe.
+The server stores the outcome as a success without a correction, and the file's job attempts read the source as they did before probe version 6.
+The server counts each stored fallback in a metric, tagged with its reason.
+A probe version 6 outcome carries either the correction or one fallback reason.
+An outcome with neither, or with a correction that is positive or finer than a microsecond, is a contract violation (<<probe-contract-violations>>).
+
+The server sends a job that carries the start time correction only to a worker that lists probe version 6.
+Listing probe version 6 tells the server that the worker applies the correction to every FFmpeg that reads the source.
+The check covers the first job attempt and every replacement attempt.
+A job without the correction goes to any worker.
+Before probe version 6, the listed probe versions decided only which worker may run a probe.
+
+The upgrade to probe version 6 keeps every probe version 5 outcome.
+On the upgrade, the server queues a re-scan itself, as <<upgrade-rescan,the section on source changes and probe versions>> describes.
+Playback keeps using each file's probe version 5 outcome until the server stores the file's probe version 6 outcome.
+A probe version 5 outcome carries no correction, so its job attempts read the source as before.
+A probe version 5 outcome and a probe version 6 outcome of the same file share one media time zero.
+
+*Why:* Without the correction, a job attempt on an MPEG-TS source measured media time zero from the streams that the attempt mapped.
+With `-discard none` alone, a data stream that started 12 s early moved media time zero by 11.977 s.
+link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#evidence-timeline[ADR 0037] has the measurements.
+The probe already reads every source once, so the correction adds no work to a job attempt's start.
+The probe's limits give some subtitle streams a start time that FFmpeg's defaults do not (<<evidence-probe-limits>>), so a correction read under those limits could disagree with a job attempt's FFmpeg.
+In each fallback case, the command without the correction behaves as it did before probe version 6.
+When no stream has a start time, FFmpeg 8.1.3 computes the same wrong offset with or without `-discard none`, and no `-itsoffset` value cancels it.
+So a fallback keeps every file at least as playable as before, and failing the probe would stop a file that still plays.
+
 [[output-frame-rate]]
 === The probe job chooses the output frame rate once per file
 
@@ -487,6 +547,7 @@ An MPEG-TS probe can then stop once every stream has its parameters.
 Without this option, an MPEG-TS probe reads to those limits.
 The limits apply to the probe only.
 A job attempt's FFmpeg input keeps FFmpeg's defaults.
+So probe version 6 reads the start time correction in a second run with FFmpeg's defaults (<<probe-version-6>>).
 
 *Why:* By default, ffprobe stops after 5 s of media or 5 MB.
 In the 300-file library sample, the default stop missed the width and height of 334 PGS subtitle streams in 49 files.
@@ -681,6 +742,8 @@ https://github.com/streamarr/streamarr-server/issues/501[streamarr/streamarr-ser
 Probe version 4 also reports the keyframe positions of version 3.
 * Probe version 5 adds the facts that <<probe-version-5,the probe version 5 section>> lists.
 https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] adds those facts.
+* Probe version 6 adds the start time correction that <<probe-version-6,the probe version 6 section>> describes.
+https://github.com/streamarr/streamarr-server/issues/664[streamarr/streamarr-server#664] adds that fact.
 
 Probe version 2 is unused.
 This ADR first gave version 2 to the facts for streamarr/streamarr-server#501.
@@ -689,6 +752,7 @@ No server requests probe version 2, and no worker advertises it.
 
 A change after probe version 4 does not add its facts to probe version 4.
 A change after probe version 5 does not add its facts to probe version 5.
+A change after probe version 6 does not add its facts to probe version 6.
 A later probe version adds caption detection: whether the video carries CEA-608 or CEA-708 captions.
 The probe detects the captions by decoding keyframes.
 https://github.com/streamarr/streamarr-server/issues/505[streamarr/streamarr-server#505] adds the caption detection.
@@ -1290,6 +1354,17 @@ The next scan then retries that file.
 * The server no longer spends a worker probe and a database write every five minutes on a reply that never succeeds.
 
 == Rejected Alternatives
+
+* Fail the probe when a job attempt's FFmpeg reads a different container start time, or when no exact start time correction exists.
+The file would stop playing, although the command without the correction plays it as it did before probe version 6.
+* Have the server compute the start time correction from reported start times.
+The server would encode FFmpeg's command-line behaviour, and each FFmpeg upgrade in the worker would need a server change.
+* Compute the start time correction from the stream start times that the probe reads under its limits.
+The probe's limits change which streams have a start time, so the correction could disagree with a job attempt's FFmpeg.
+* Treat a probe version 5 outcome of a source whose demuxer allows timestamp discontinuities as missing, so that playback waits for the probe version 6 outcome.
+The server would need its own copy of FFmpeg's demuxer list, and those files play during the re-scan as they did before.
+* Add a separate worker capability for the job's start time correction.
+Listing probe version 6 already tells the server that the worker applies the correction.
 
 * Let playback run an ad hoc probe outside the durable queue when no stored outcome exists.
 The ad hoc probe would duplicate the queued probe of the same file.

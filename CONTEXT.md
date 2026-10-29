@@ -188,8 +188,12 @@ The `ftyp` and `moov` boxes a player needs before any media segment of a variant
 _Avoid_: init file, header, init.mp4
 
 **Media time**:
-Presentation time measured from the source container's start time, on the zero-based timeline that every attempt of a stream session shares.
+Presentation time measured from the source container's start time that the probe reports, on the zero-based timeline that every attempt of a stream session shares.
 _Avoid_: PTS, source time, wall-clock time
+
+**Start time correction**:
+How far FFmpeg's command line moves a source's start time when the source's demuxer allows timestamp discontinuities, such as MPEG-TS: the earliest start time over every stream, minus the container's start time. It is zero or negative. The probe reports it, and every FFmpeg that reads the source for a job attempt cancels it, so media time zero stays the container's start time (ADR 0037).
+_Avoid_: start offset, media time zero offset, timestamp offset
 
 **Fragmentation target**:
 The configured maximum media duration of a fragment. The muxer honors it at the next packet, so it is a target, never a hard bound.

@@ -9,9 +9,15 @@ Once the server delivers audio renditions, a variant's media segments carry vide
 Each audio rendition then has its own initialization segment.
 Until then, the server keeps serving multiplexed variants as this decision describes.
 
+NOTE: An amendment cancels FFmpeg's start time correction on every FFmpeg that reads the source (<<decision-media-time-zero>>).
+The probe reports the correction.
+A job attempt passes `-discard none`, plus `-itsoffset` with the correction when the correction is not zero.
+Media time zero then stays the source container's start time, whatever streams the attempt maps.
+A job attempt whose stored probe outcome carries no correction reads the source as before the amendment.
+
 NOTE: Under link:0013-stream-decision-architecture.adoc#reshape-rpus-starting-samples[ADR 0013], a job attempt that encodes an HEVC Dolby Vision source with no compatible base, such as profile 5, runs two FFmpeg processes when ADR 0013's conditions for moving the source's RPUs hold.
 The first FFmpeg copies the source and the job's audio into fragmented MP4, the worker moves the RPUs and gives each video sample its duration in the source, and the second FFmpeg reads the result on its standard input and writes the fMP4 that this decision describes.
-The first FFmpeg reads the source with `-copyts -avoid_negative_ts disabled -start_at_zero`, as a single FFmpeg does, so it places media time zero.
+The first FFmpeg reads the source with the same input flags as a single FFmpeg, including `-start_at_zero` and the start time correction (<<decision-media-time-zero>>), so it places media time zero.
 The second FFmpeg passes `-copyts -avoid_negative_ts disabled` without `-start_at_zero`, so it keeps the copy's timestamps instead of measuring media time zero again from the attempt's first packet.
 A stop writes `q` to the first FFmpeg, and the second FFmpeg ends at the end of its input.
 A stall, a failure or a forced end ends both processes.
@@ -128,21 +134,7 @@ The worker passes `-max_interleave_delta 10000000`, FFmpeg's default of 10 s, ra
 This interleave bound is how long the muxer holds one stream's packets while it waits for another stream's.
 The <<decision-audio,closing rule>> relies on it, so an FFmpeg upgrade cannot change it silently.
 The worker passes `-copyts -avoid_negative_ts disabled` and adds `-start_at_zero`.
-The worker must also pass `-discard none` on every input.
-Together these flags place media time zero at the source container's start time.
-That start time is the first timestamp of the container's earliest stream.
-On an MPEG-TS source, `-start_at_zero` alone measures media time zero from the earliest stream that the job attempt maps.
-Two attempts that map different streams would then disagree on media time zero.
-With `-discard none`, media time zero stays at the container's earliest stream, whatever streams the job attempt maps.
-link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043] measured the shift on an MPEG-TS source.
-Mapping English alone put media time zero 170.7 ms later than mapping all three of the source's languages.
-The worker does not pass `-discard none` yet.
-`-discard none` alone is not enough.
-FFmpeg leaves a subtitle or data stream that starts at least 1 s before the other streams out of the container's start time.
-On an MPEG-TS or MPEG-PS source, FFmpeg still counts that stream for media time zero when no stream is discarded.
-On a test MPEG-TS source whose data stream started 12 s before its audio, the probe placed the first keyframe at 0.023 s, and a copy with `-discard none` placed it at 12.000 s.
-This rule therefore also needs an offset that the worker derives from the probe.
-A separate decision will settle that offset.
+Together with the flags of <<decision-media-time-zero>>, these flags place media time zero at the source container's start time.
 Every attempt uses this origin, whether it starts from zero or seeks into the source.
 The producer keeps the timestamps that FFmpeg writes, with one exception.
 The producer snaps copied audio with fixed-length frames to its codec's encoder frame grid (<<decision-audio,audio rule>>).
@@ -168,6 +160,53 @@ The runs timed the encoder alone for a 1080p libx264 seek at the `faster` preset
 A 100 ms target saved only 0.03 s more than a 250 ms target.
 Parsing four fragments per media second instead of one cost under 0.1 % of FFmpeg's CPU time.
 Evidence: <<evidence-channel>>, <<evidence-timeline>>, <<evidence-frame-rate>>, https://github.com/streamarr/streamarr-transcode-worker/issues/53[streamarr/streamarr-transcode-worker#53].
+
+[[decision-media-time-zero]]
+=== Every FFmpeg that reads the source cancels FFmpeg's start time correction
+
+Media time zero is the source container's start time that the probe reports.
+FFmpeg's demuxer sets that start time from the earliest stream that is neither a subtitle nor a data stream.
+A subtitle or data stream sets it only when that stream starts less than 1 s before the others, or when no other stream has a start time.
+FFmpeg's command line then corrects the start time of a source whose demuxer allows timestamp discontinuities, such as MPEG-TS, MPEG-PS and Ogg.
+The correction moves the start time to the earliest start time of any stream that FFmpeg does not discard, and `-start_at_zero` subtracts the moved start time.
+FFmpeg discards every stream that a job attempt does not map, so the correction changes with the streams that each attempt maps.
+`-discard none` makes the correction count every stream.
+A subtitle or data stream that starts 1 s or more before the others then still moves media time zero.
+
+The start time correction is the earliest start time over every stream, minus the container's start time.
+It is zero or negative.
+The probe reports it, as link:0032-media-file-probe-results-are-persisted.adoc#probe-version-6[ADR 0032] decides.
+Every FFmpeg that reads the source for a job attempt passes `-discard none -copyts -avoid_negative_ts disabled -start_at_zero`.
+When the start time correction is not zero, that FFmpeg also passes `-itsoffset` with the correction.
+When FFmpeg corrects the start time, it replaces the timestamp offset with minus the corrected start time and then adds the `-itsoffset` value, so the value cancels the correction.
+FFmpeg then subtracts the container's start time, whatever streams the attempt maps.
+This rule covers the single FFmpeg of a job attempt and the first FFmpeg of the path that moves RPUs.
+The second FFmpeg of that path reads the fMP4 copy, which is already on media time, and passes neither `-discard none` nor `-itsoffset`.
+The keyframe packet scan of link:0032-media-file-probe-results-are-persisted.adoc#keyframe-positions[ADR 0032] keeps its own command without `-start_at_zero`, `-discard none` or `-itsoffset`.
+The scan subtracts the probe's container start time itself, so this rule would subtract the start time twice there.
+
+FFmpeg also measures its timestamp wrap check from the corrected start time, not from the container's start time.
+A source whose timestamps reach more than half a stream's wrap range past the earliest stream start time would then lose a full wrap range.
+For such a source, the probe reports a fallback instead of the correction (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-6[ADR 0032]).
+
+The worker owns the rule that computes the start time correction, because the rule follows FFmpeg's command line and the server runs no FFmpeg (link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033]).
+The server stores the correction and passes it on unchanged.
+A stream session reads the correction with its segment list and keyframe positions, and every job attempt of the stream session carries that value.
+A replacement attempt never reads the correction again.
+The server sends a job that carries the correction only to a worker that lists probe version 6.
+
+A job attempt passes neither `-discard none` nor `-itsoffset` when the stored probe outcome carries no correction.
+That covers an outcome from before probe version 6 and a probe version 6 outcome that reports a fallback (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-6[ADR 0032]).
+Such an attempt reads the source as it did before this rule.
+No source therefore plays worse than before this rule, during the re-scan or after it.
+
+*Why:* On three synthetic MPEG-TS sources, no command without `-itsoffset` placed media time zero right on every source.
+Without `-discard none`, a second audio track that started 154 ms before the first moved media time zero by 154 ms when the attempt mapped only the first track.
+With `-discard none`, a data stream that started 12 s before the audio and video moved media time zero by 11.977 s.
+The probe placed the first keyframe at 0.023 s, and a copy placed it at 12.000 s.
+With the start time correction, all three sources placed the first keyframe where the probe did.
+An encoded seek and a copy seek on the 12 s source also kept their positions.
+Evidence: <<evidence-timeline>>.
 
 [[decision-frame-rate]]
 === The frame-rate rule chooses the output frame rate
@@ -1199,7 +1238,17 @@ Standard input carries the stop command, and `ProcessBuilder` passes FFmpeg no o
 * Serving a replacement attempt's own init mid-playlist would tolerate a backend change, but it needs per-attempt inits and playlist changes that ADR 0008 does not generate.
 * Switching H.264 to the `avc3` sample entry, so that parameter sets travel in-band, would tolerate a backend change, but it has no evidence on AVPlayer.
 * Zeroing each attempt's timeline at its own first fragment gives a replacement attempt a different origin from the initial attempt, so the same segment number would name different media.
-* Having the worker probe the source's start time and subtract it duplicates what `-start_at_zero` already does inside FFmpeg.
+* Having the worker subtract the probe's container start time itself duplicates what `-start_at_zero` already does inside FFmpeg.
+The probe supplies only the start time correction, and FFmpeg still subtracts the container's start time.
+* Passing `-discard none` without `-itsoffset` lets a subtitle or data stream that starts 1 s or more before the others move media time zero; on a test source it moved 11.977 s.
+* Passing `-discard:v none -discard:a none` leaves a data stream that starts less than 1 s early discarded, although that stream sets the container's start time; on a test source media time zero moved by 477 ms.
+* Dropping `-start_at_zero` and passing `-itsoffset` with minus the container's start time makes FFmpeg start the accurate-seek trim at the seek plus the container's start time, so every encoded seek wrote no frames while FFmpeg exited 0.
+* Passing `-output_ts_offset` with minus the container's start time makes `-force_key_frames` compare timestamps from before the offset, so an encoded seek lost a forced keyframe.
+* Computing an offset from the streams that each attempt maps ties the offset to each job's `-map` arguments, burn-in inputs and audio selection, which the server and the worker would have to agree on for every job.
+* Having the server compute the start time correction from reported start times puts FFmpeg's command-line behaviour in the server, so each FFmpeg upgrade in the worker would need a server change.
+* Running ffprobe at the start of each job attempt adds a process and its latency to every start and every replacement attempt.
+* Giving job attempts the probe's read limits puts up to 1 GB of reading in front of every attempt.
+* Discarding each early stream with `-discard:N all` breaks a job attempt that maps that stream, such as a burn-in.
 * Exempting the upload wait from every bound, on the grounds that back-pressure is not a stall, leaves an attempt that a silent receiver can hold forever.
 * Waiting indefinitely for FFmpeg to exit after its output ends lets a process that hangs after its last byte hold the attempt until a stop arrives.
 No other watchdog watches the process once the reader has finished reading the output.
@@ -1299,7 +1348,7 @@ A source whose timestamps begin at 12 s put its first fragment at 12 s, in segme
 * With `-start_at_zero`, the same source's first fragment started at 0 for stream copy and for encode.
 * With `-start_at_zero`, an encoded seek to 30 s started at 30.030 s.
 * With `-start_at_zero`, a stream-copy seek to 30 s started at 28.028 s, on the keyframe at or before the requested time, so that fragment is preroll.
-* The container's start time is the earliest stream's first timestamp.
+* The container's start time is the first timestamp of the earliest stream that is neither a subtitle nor a data stream.
 On MPEG-TS sources it is the AAC priming frame, 21 ms before the first video frame, so video starts at 0.021 s (copy) or 0.042 s (encode) rather than at 0.
 * Two MPEG-TS remuxes of the same content starting at 1.46 s and at 3601.38 s produced byte-identical outputs.
 * MPEG-TS input seeking lands on the next keyframe after the target, not the one at or before it.
@@ -1317,6 +1366,22 @@ The muxer cut at every 2.002 s keyframe from 28.028 s to 36.036 s, then at 40.04
 The muxer produced 10 segments numbered 5 to 14 with 8 kHz audio, compared with 7 segments with 48 kHz audio.
 * With every keyframe as its own fragment, the preroll is a separate fragment that the worker can discard.
 * An encoded replacement attempt that seeks exactly to its first boundary starts at 30.030 s with nothing to discard.
+* FFmpeg 8.1.3's `update_stream_timings` (`libavformat/demux.c`) leaves a subtitle or data stream that starts 1 s or more before the other streams out of the container's start time.
+FFmpeg's `correct_input_start_times` (`fftools/ffmpeg_opt.c`) moves the start time to the earliest stream that FFmpeg does not discard.
+When it moves the start time, it replaces the timestamp offset with minus the moved start time and then adds the `-itsoffset` value.
+* Three synthetic MPEG-TS sources, built from lavfi `testsrc` and measured with the pinned FFmpeg 8.1.3, compared the commands:
+** With a data stream 12 s before the audio and video, media time zero was right without `-discard none` and 11.977 s off with it.
+** With a second audio track 154 ms before the first, it was 154 ms off without `-discard none` and right with it.
+** With a data stream 0.477 s before the audio, the earliest other stream, it was 477 ms off without `-discard none` and right with it.
+That data stream sets the container's start time, so `-discard:v none -discard:a none`, which still discards it, leaves the same 477 ms.
+** With `-discard none` and `-itsoffset` set to the start time correction, the first keyframe of all three sources landed where the probe placed it.
+On the 12 s source, the correction was −11.977 s.
+An encoded seek to 2 s forced keyframes at 2.041667 s and 3.000000 s, and a copy seek to 2 s started at 2.023 s, on the stored keyframe position.
+** Without `-start_at_zero`, `-itsoffset` set to minus the container's start time made every encoded seek write no frames, and FFmpeg exited 0.
+`-output_ts_offset` set to the same value lost the keyframe forced at 3 s.
+* FFmpeg's `ts_fixup` (`fftools/ffmpeg_demux.c`) checks each stream's first packet for a timestamp wrap against the corrected start time.
+On a synthetic MPEG-TS source whose video started 50,000 s after a data stream, more than half of the 33-bit 90 kHz wrap range, the command without `-discard none` put the first video sample at 0 s.
+`-discard none` with `-itsoffset` set to the start time correction put it at −95,443.694689 s.
 
 [[evidence-init]]
 === Initialization segment identity
@@ -1677,6 +1742,8 @@ The Node recorder that made them (`src/test/fmp4-recorder`) runs in CI without F
 * Pull request https://github.com/streamarr/streamarr-server/pull/534[streamarr/streamarr-server#534], which advertises each stream copy segment's real duration and joins a final grid interval without a source keyframe to the segment before it.
 * Issue https://github.com/streamarr/streamarr-server/issues/446[streamarr/streamarr-server#446], which has the server refuse a stream session that would encode video without a usable frame rate.
 * Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/24[streamarr/streamarr-transcode-worker#24], which reports probe version 4 and runs the frame-rate rule in the probe job.
+* Issue https://github.com/streamarr/streamarr-server/issues/664[streamarr/streamarr-server#664], which cancels FFmpeg's start time correction with the probe's start time correction.
+* FFmpeg n8.1.3 sources: https://github.com/FFmpeg/FFmpeg/blob/n8.1.3/fftools/ffmpeg_opt.c[`fftools/ffmpeg_opt.c` (`correct_input_start_times`)], https://github.com/FFmpeg/FFmpeg/blob/n8.1.3/fftools/ffmpeg_demux.c[`fftools/ffmpeg_demux.c` (`ifile_open`, `ts_fixup`)] and https://github.com/FFmpeg/FFmpeg/blob/n8.1.3/libavformat/demux.c[`libavformat/demux.c` (`update_stream_timings`)].
 * The write-ups of the proofs of concept behind this decision were not committed.
 Neither were their harnesses, measurements or prior-art surveys.
 The Evidence appendix summarizes their conclusions.

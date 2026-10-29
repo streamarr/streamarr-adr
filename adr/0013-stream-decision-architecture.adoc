@@ -24,6 +24,18 @@ Issue https://github.com/streamarr/streamarr-server/issues/396[streamarr/streama
 link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] decides which playback paths an HDR source permits for a client that declares no dynamic range.
 This amendment records the full interim copy rule that follows from that answer.
 
+A second amendment adds two refusals to the copy rule.
+Issue https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] delivers the second amendment with probe version 5.
+From probe version 5 on, the server never copies a video stream whose codec profile is `UNSPECIFIED`.
+The server also never copies a video stream that has a `MediaFileProbePropertyIssue` that rules out a copy.
+Probe version 5 identifies a Dolby Vision profile 5 or profile 10.0 stream without a configuration record, and finds the malformed samples of some Dolby Vision profile 9 files.
+The second amendment therefore removes the known Dolby Vision gaps that this ADR listed.
+A profile 5 stream without a configuration record from which no read decodes a frame still falls into those gaps (<<record-less-profile-5-without-frames,Consequences>>).
+The second amendment also has the worker move the RPUs of an HEVC Dolby Vision source with no compatible base, such as profile 5, when the RPUs do not follow their pictures (<<reshape-rpus-starting-samples>>).
+FFmpeg's HEVC decoder ignores such RPUs, so before this amendment the encode of such a stream kept the color cast of an unreshaped picture.
+The worker moves them in a fragmented MP4 copy of the source, as probe version 5's RPU placement directs.
+The worker moves the RPUs only when the probe saw a presentation time on every one of the source's first packets (<<reshape-rpus-starting-samples>>).
+
 == Context
 
 Streaming negotiates source media (ffprobe) against client capabilities (StreamingOptions).
@@ -34,7 +46,7 @@ These independent decisions compose into a TranscodeDecision that drives FFmpeg 
 The rest of this section describes the system before this amendment.
 The video decision is implicit.
 A codec family and a compatibility flag stand in for the video decision.
-The server copies the video whenever the client names the source codec.
+The server copies the video whenever the client names the source's codec family.
 Otherwise, the server encodes the video.
 The Apple TV app names `h264` and `hevc`.
 The server therefore copies every HEVC source to the Apple TV app, including HDR sources.
@@ -73,9 +85,10 @@ The video decision also holds each variant's codec profile, tier, level and code
 The worker follows the video decision and never works those values out again.
 link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] leaves the field names of the job contract to the implementation.
 
-The video decision reads facts that only probe version 4 stores.
+The video decision reads facts that probe version 4 and later store.
 link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]'s rules for probe versions govern those facts.
 Those facts include the dynamic range, bit depth, chroma subsampling, rotation, container cropping, output frame rate and codec string of the video stream.
+From probe version 5 on, the video decision also reads the video stream's typed codec profile.
 
 === Every video encode produces 8-bit 4:2:0 SDR
 
@@ -96,6 +109,7 @@ The worker tone-maps with the `tonemapx` filter of the pinned FFmpeg build that 
 <<gpu-stages>> decides when a GPU tone mapper replaces `tonemapx`.
 A reference processing unit (RPU) holds the per-frame Dolby Vision picture-adjustment instructions.
 Before tone mapping, the worker reshapes a Dolby Vision profile 5 source with the source's RPUs.
+When such a source's RPUs do not follow their pictures, the worker first moves the RPUs under the conditions of <<reshape-rpus-starting-samples>>.
 An encode of a Dolby Vision profile 7 or 8.x source reads only the Dolby Vision base layer and ignores the source's RPUs.
 `tonemapx` leaks memory on every reshaped Dolby Vision profile 5 frame.
 Streamarr accepts that leak.
@@ -111,6 +125,167 @@ The tone-mapped Dolby Vision profile 5 output lost its teal cast.
 The tone-mapping filter treats an untagged input as PQ.
 The filter therefore darkened an untagged SDR source to a mean luma of 41 instead of 106.
 Evidence: <<evidence-sdr-output>>, <<evidence-tone-mapping>>.
+
+[[reshape-rpus-starting-samples]]
+=== Before an encode of an HEVC Dolby Vision source with no compatible base, the worker moves each RPU behind the picture that it belongs to
+
+The RPU of a picture belongs after the slices of that picture, as the last NAL unit of the same sample.
+FFmpeg's HEVC decoder reads an RPU only when the RPU is the last NAL unit of the packet that it decodes.
+An RPU anywhere else reshapes no picture, so the encode of a profile 5 picture keeps the color cast of an unreshaped picture.
+
+Probe version 5 reports where the samples place the RPUs, as the stream's RPU placement (link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036]):
+
+* `AFTER_OWN_PICTURE`: each RPU is the last NAL unit of its own picture's sample, as Dolby Vision requires.
+* `STARTS_SAMPLE`: every sample that holds an RPU starts with it.
+* `UNSPECIFIED`: the probe could not tell the placement, as when it cannot delimit the packets, a packet holds two RPUs, the packets mix layouts, or the stream is AV1.
+
+The probe decides the placement from the first packets, and the worker assumes that the rest of the stream keeps that layout.
+Two layouts start samples with RPUs, and both report `STARTS_SAMPLE`:
+
+* The shifted layout: each picture's RPU starts the next picture's sample, and the last sample holds an RPU and no picture.
+mkvmerge wrote it before version 57, released in 2021.
+A shifted file whose start was cut away keeps this layout, and its first picture's sample starts with the RPU of a picture that the cut removed.
+* The own-first layout: each picture's sample starts with that picture's own RPU.
+No known muxer writes this layout, but FFmpeg's MP4 and Matroska remuxes keep it.
+
+The two layouts share one value for two reasons.
+The first packets of a cut shifted file and of an own-first file look the same.
+Both layouts also take the same repair before an encode, and the server copies neither.
+
+The transcode job's video decision carries the source's codec family.
+The server reads that codec family from the codec name that the probe stored.
+Every job carries it, whether it copies or encodes.
+A source of any codec family other than H.264, HEVC and AV1 has an unspecified codec family in the job.
+
+Probe version 5 also reports whether the first packets of the chosen video stream carry presentation times (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]).
+The probe decides it from the packets that its NAL unit walk reads, and the worker assumes that the rest of the stream keeps it.
+The video decision of every job carries `source_packets_carry_presentation_times`, which is true only when the probe stored that every one of those packets carries a presentation time.
+It is false when the probe stored that a packet carries none, and when the probe stored no value, because the probe read no packets.
+
+The worker chooses this path from the source's codec family and dynamic range in the transcode job.
+The server's video decision does not change, and the worker builds the same filters from it.
+The job attempt runs two FFmpeg processes only when all five conditions hold:
+
+* The job encodes the video.
+* The source's codec family is HEVC.
+* The source's compatible base is none.
+* The source's Dolby Vision is present, and its RPU placement is not `AFTER_OWN_PICTURE`.
+* The job's `source_packets_carry_presentation_times` is true.
+
+Every other job attempt runs one FFmpeg process with the same command as before, and FFmpeg reads the source's samples unchanged.
+
+A source whose packets carry no presentation times, or whose presentation times the probe could not see, therefore runs one FFmpeg process, whatever its RPU placement.
+The move copies the source's samples, with their presentation times, into the stream that the encode decodes.
+A copy of packets without presentation times stamps each picture with its decoding time, so the encode loses the pictures that B-frames reorder.
+FFmpeg's raw H.264 and HEVC demuxers give no packet a presentation time, and neither did its AVI demuxer in any file measured.
+The worker adds no `-fflags +genpts` and no input `-r` to such a source.
+One FFmpeg still reshapes the pictures of the usual such source, a raw HEVC stream, because FFmpeg's HEVC parser cuts that stream into packets:
+
+* The parser (`hevc_find_frame_end`) ends a packet just ahead of a NAL unit on layer 0 that begins the next access unit.
+Those NAL units are a VPS, SPS or PPS, an access unit delimiter, an end of sequence or of bitstream (types 32 to 37), a prefix SEI NAL unit (type 39), a NAL unit of a reserved type 41 to 44 or 48 to 55, and the first slice segment of the next picture.
+* An RPU begins no access unit, so the parser starts no packet at an RPU, except the first packet, which starts wherever the parser starts reading.
+* An RPU that follows its picture's slices, where Dolby Vision places it, therefore ends that picture's packet, and the decoder reads it there.
+
+The decoder still ignores two kinds of RPU in such a source.
+One is an RPU that another NAL unit of its packet follows, such as an RPU between the NAL units that begin an access unit and its first slice.
+The other is an RPU that starts a sample of a demuxer that keeps the samples as stored, as FFmpeg's AVI demuxer does for an HEVC stream tagged `HEVC` rather than `H265`.
+Those pictures keep the color cast of an unreshaped picture, but the encode keeps every picture.
+
+Every RPU of a raw HEVC profile 5 stream whose RPUs lead their samples, ahead of the slices, is of the first kind.
+The probe reports such a stream as `STARTS_SAMPLE` without presentation times.
+Streamarr keeps such a stream on one FFmpeg process.
+One FFmpeg keeps every picture, but shows each picture without its reshaping.
+On a measured stream of 100 pictures with B-frames, one FFmpeg kept all 100, with a mean Cr of 59.9 against 125.8 for the same pictures in MP4.
+The move kept the color but lost 50 of the 100 pictures (<<evidence-reshape>>).
+The server cannot play a raw elementary stream today in any case: the probe reports its duration as 0, so the stream has no media segment to play.
+
+The two FFmpeg processes are joined by a pipe:
+
+* The first FFmpeg copies the source's video into fragmented MP4, with the attempt's seek and the same timestamps as a single FFmpeg.
+The copy writes each packet as soon as it has one, in fragments of about one packet, with a new fragment at every keyframe.
+Its movie timescale of one microsecond keeps every timestamp that the source's demuxer reads.
+* The first FFmpeg also writes the job's audio into the copy: it copies the source audio, or encodes it, as a single FFmpeg would.
+Its seek then trims the audio as a single FFmpeg's seek does, and every audio codec that the job copies or encodes works.
+The second FFmpeg copies that audio unchanged.
+* The worker reads the copy and moves the RPUs in its video samples:
+** An RPU that starts a sample moves to the end of the previous picture's sample, which can lie in an earlier fragment.
+The worker drops such an RPU when it has no previous picture, as for the first RPU after a seek or the first RPU of a file whose start was cut away.
+** In the same jobs, an RPU that follows a slice of its sample but is not the sample's last NAL unit moves to the end of that sample.
+** Within one sample, an RPU that already ends the sample stays last, because the decoder reads the last NAL unit, and the RPUs that move within that sample go ahead of it.
+** A sample that holds RPUs and no slice decodes no picture, so its RPUs move behind the previous picture.
+** The move counts NAL units as the probe's walk does (link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036]).
+A NAL unit that FFmpeg's NAL unit splitter drops before its decoders, and that the walk therefore skips, is never a slice or an RPU, and never keeps an RPU from being the last NAL unit of its sample.
+** The worker moves the bytes that one length prefix delimits as a whole.
+A length whose every NAL unit that reaches the decoder is an RPU, such as two RPUs joined by a start code, moves as one RPU, and the decoder reads only the last of those RPUs.
+A length that also holds another NAL unit that reaches the decoder, such as a slice or a parameter set, keeps its place.
+** An RPU that moves behind the previous picture from a later sample ends that picture's sample, after any RPU that the sample already held.
+Of several RPUs that move behind one picture, the worker keeps only the last.
+* The worker gives each video sample of the copy the duration that its packet had in the source.
+The copy's MP4 muxer writes each video sample's duration as the gap to the next sample's decoding time, not the source's duration, such as a Matroska track's default duration.
+The decoder gives each picture its packet's duration, and the second FFmpeg's frame-rate conversion repeats and drops pictures by that duration.
+* The first FFmpeg therefore also writes the timing of each video packet that it copies, as FFmpeg's `framecrc` output, to a Unix socket that the worker opens for the attempt.
+The worker pairs those packets with the copy's video samples in order and checks that their keyframe flags agree.
+It does not compare timestamps, because FFmpeg repairs bad timestamps separately for each output, and the two outputs repair them differently after a Matroska seek with B-frames.
+* In a fragment whose video samples change, each video sample gets a track fragment of its own that states its decoding time, so that a changed duration moves no later sample.
+The worker rewrites only those track fragments, the sample sizes and the data offsets, and passes every other byte unchanged.
+No timestamp and no other track changes.
+* The second FFmpeg encodes the rewritten copy with the usual filters.
+* The second FFmpeg trims the video at the attempt's start, because the copy keeps every packet from the keyframe at or before the seek.
+
+The worker repairs `STARTS_SAMPLE` as the shifted layout, because the shifted layout is the one that a known muxer wrote.
+The cost falls on a file in the own-first layout: the repair gets each of its pictures the next picture's RPU.
+Reading every RPU that starts a sample as its own picture's would instead get each picture of a shifted file, cut or not, the previous picture's RPU.
+
+The worker also moves the RPUs of a stream whose placement is `UNSPECIFIED`.
+The move changes only the samples that hold an RPU which FFmpeg's decoder ignores, and the samples that such RPUs move behind.
+A stream whose RPUs already end their samples therefore passes through the move unchanged.
+A profile 5 picture has no compatible base, so it shows correctly only when the decoder reads its RPU.
+The in-sample move also repairs an `UNSPECIFIED` stream whose RPU follows a slice but is not the last NAL unit of its sample.
+
+The worker accepts only the fragmented MP4 that FFmpeg writes with the copy's settings.
+It fails the attempt as malformed output for any other copy.
+Two cases instead pass video samples on without moving an RPU, and the attempt goes on:
+
+* The worker holds the previous picture's fragment, and every fragment after it, until the next picture arrives.
+When what it holds passes 32 MiB, as audio past the end of the video can make it, the worker passes those fragments on.
+An RPU that then starts a sample has no previous picture, so the worker drops it.
+* A sample that the worker cannot delimit into NAL units, or that holds more than 4096 of them, keeps its bytes.
+The next sample's leading RPU then has no previous picture either, and the worker drops it.
+
+A picture whose RPU the worker drops keeps the color cast of an unreshaped picture.
+
+The worker refuses a copy whose video timing it cannot use, and the attempt fails:
+
+* When the timing ends before a video sample's packet arrives, the attempt fails as truncated output.
+* When the worker cannot read the timing, a packet's keyframe flag disagrees with its sample's, or a duration does not convert exactly into the video track's timescale, the attempt fails as malformed output.
+So does a timing that runs more than 65,536 packets ahead of the copy.
+
+A sample whose packet has no duration keeps the duration that the muxer wrote.
+
+A stop asks the first FFmpeg to quit, and the second FFmpeg then ends at the end of its input.
+A stall, a failure or a forced end ends both processes.
+The attempt's outcome follows this order:
+
+. An unexpected failure of the transfer between the two processes, or the worker's refusal of the copy.
+. The second FFmpeg's exit, as a single FFmpeg's exit would decide.
+. A copy that did not reach the second FFmpeg whole, or a first FFmpeg that exited with an error, when the second FFmpeg exited cleanly.
+
+Neither process writes media to a temporary file.
+The socket for the video timing is the attempt's only file, and the worker removes it.
+
+*Why:* In a local build of the worker image with the pinned FFmpeg 8.1.3, the shifted layout of a profile 5 excerpt encoded through the move gave a mean Cr of 122.3 over the first 3 frames, with the placement `STARTS_SAMPLE` and with `UNSPECIFIED`.
+The same excerpt muxed correctly, encoded by one FFmpeg, also gave 122.3, and the output packets were identical.
+128 is neutral on that 8-bit scale.
+The shifted excerpt through one FFmpeg, without the move, gave 62.7.
+A move in the wrong direction shows: on a fixture whose pictures carry RPUs of two different sources, the previous-picture move gave 99 of 100 frames of the own-first layout the wrong reshape.
+Either reading of an RPU that starts a sample gives each picture of the other layout a neighbour's RPU, so the repair follows the layout that a known muxer wrote.
+On a variable-frame-rate HEVC source with B-frames, the pipe showed all 48 source pictures in the same sequence as one FFmpeg, and every output packet matched.
+With the durations that the copy's muxer wrote, it showed 43 of the 48.
+Across 108 audio cases, 106 matched the single FFmpeg packet for packet, and the other 2 failed on both paths.
+The first media segment arrived about 100 to 120 ms later than from one FFmpeg.
+On a raw HEVC stream with B-frames, 100 pictures long, the copy gave every packet its decoding time as its presentation time, and the encode through the pipe held 98 frames, where one FFmpeg held all 100.
+Through one FFmpeg, 100 raw packets with B-frames from a profile 5 stream whose RPUs follow their pictures gave 100 of 100 distinct pictures, reshaped as the same stream in MP4.
+Evidence: <<evidence-reshape>>.
 
 [[gpu-stages]]
 === A job attempt that encodes on the GPU also decodes, scales and tone-maps on the GPU
@@ -157,7 +332,7 @@ Evidence: <<evidence-levels-and-codec-strings>>.
 The probe computes the exact codec string of every video and audio stream from the stream's decoder configuration record.
 Probe version 4 stores these codec strings, as link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032] records.
 A stream copy's codec string is the codec string that the probe computed for the source stream.
-An encode's codec string follows from the encode's forced codec, codec profile, level, tier and bit depth.
+An encode's codec string follows from the encode's codec family and from the codec profile, level, tier and bit depth that the encode forces.
 Examples are `avc1.6400LL` and `av01.0.LLM.08`.
 In both examples, `LL` stands for the computed level.
 In the AV1 example, `M` stands for the Main tier and `08` stands for 8 bits.
@@ -269,12 +444,21 @@ The interim copy rule applies to every client until the playlist can describe HD
 Issue https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396] makes the playlist's HDR attributes truthful, so that the playlist can describe HDR copies.
 Issue https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396] builds on the client-declared dynamic ranges of https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395].
 
-* Copy the video only when all four conditions hold.
+* Copy the video only when all six conditions hold.
 ** The source's compatible base is SDR or unspecified.
 ** The source carries no Dolby Vision compatibility identifier that disagrees with the source's signaled transfer.
 The Dolby Vision compatibility identifier is the value in the Dolby Vision configuration record that names the base format that the stream claims.
+** The source's video stream has no other `MediaFileProbePropertyIssue` that rules out a copy.
+link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] decides which issues rule out a copy.
+A Dolby Vision stream whose RPU placement is `STARTS_SAMPLE` has such an issue, as a malformed profile 9 file does.
+** The source's codec profile is not `UNSPECIFIED`.
+This condition applies to a stored outcome of probe version 5 or later.
+A probe version 4 outcome stores no codec profile.
+This condition narrows an acceptance criterion of https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394], which said that the server never copies a video stream whose codec profile is `UNSPECIFIED`.
+Under link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]'s upgrade rule, each file keeps its probe version 4 decisions until the server stores the file's probe version 5 outcome.
+Applying the refusal to a probe version 4 outcome would encode every source until the re-scan stored each file's probe version 5 outcome.
 ** The source is not H.264, or the source is 8-bit 4:2:0 H.264.
-** The client names the source's codec, as the server already requires.
+** The client names the source's codec family, as the server already requires.
 * Encode every other source to 8-bit SDR.
 The worker tone-maps the encode when the source's compatible base is PQ, HLG or none.
 
@@ -299,31 +483,33 @@ PQ and HLG sources without Dolby Vision or HDR10+ also permit only an SDR encode
 Dolby Vision profiles 8.2 and 9 have a valid SDR compatible base.
 The interim copy rule therefore copies a Dolby Vision source with an SDR compatible base, which means a profile 8.2 or 9 source.
 Such a copy carries the base layer's sample-entry tag, as <<dolby-vision-copy-tags>> decides.
-In a headless check, such copies played in every player that decodes the base layer's codec.
-The rule encodes a Dolby Vision source whose compatibility identifier disagrees with its signaled transfer, such as Dolby Vision profile 7 tagged as SDR.
-The rule keeps encoding such a source until https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] decides which playback paths that source permits.
-An SDR encode of such a source trusts neither of the source's contradicting claims.
+In a headless check, such copies played in every player that decodes the base layer's codec family.
+The server never copies a Dolby Vision source whose compatibility identifier disagrees with its signaled transfer, such as Dolby Vision profile 7 tagged as SDR.
+The server encodes such a source and interprets the source's signaled transfer, as link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] decides.
+This refusal stays in force after the interim copy rule ends.
+The refusal of a malformed Dolby Vision profile 9 stream also stays in force after the interim copy rule ends.
+The refusal of an `UNSPECIFIED` codec profile also stays in force after the interim copy rule ends.
+The server cannot check an unknown codec profile against what a client can decode.
 The Apple TV app receives no HDR copies until https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396] makes the playlist's HDR attributes truthful.
 Until then, the server encodes HDR HEVC sources to SDR for the Apple TV app.
 At first, those SDR encodes use H.264.
 Those SDR encodes use HEVC once link:0009-h264-plus-av1-codec-strategy.adoc[ADR 0009]'s HEVC preference takes effect (https://github.com/streamarr/streamarr-server/issues/58[streamarr/streamarr-server#58]).
 This amendment defers HDR copies to the Apple TV app on purpose.
 
-[[known-gaps]]
-Three kinds of Dolby Vision source are known gaps until https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] adds the probe facts that detect those sources.
-
-* The probe reads a Dolby Vision profile 5 video stream in MPEG-TS without the Dolby Vision descriptor as having an unspecified compatible base.
-The interim copy rule then either copies the video stream or encodes the video stream without the reshape.
-In both cases, the video stream plays teal.
-Only a probe that reads RPUs from the frames detects such a video stream.
-* A Dolby Vision video stream with no configuration record can signal BT.709 while the stream is really profile 5.
-The probe reads such a video stream as having an SDR compatible base, so the interim copy rule copies the video stream.
-The copy plays teal.
-This gap lasts until https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] identifies profile 5 from the RPU header.
-* A Dolby Vision profile 9 file from a known faulty muxer ends with a sample that holds no picture.
-The interim copy rule copies such a file.
-Chromium and Firefox fail at the end of such a copy.
-This gap lasts until https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] detects malformed samples.
+Probe version 5 reads the first frames of the chosen video stream (ADR 0036).
+From probe version 5 on, the compatible base of a Dolby Vision profile 5 stream is none, whatever the stream's signaled transfer says.
+The probe identifies profile 5 from the configuration record, or from the first RPU header when the stream has no configuration record.
+This rule covers a profile 5 stream without a configuration record that signals BT.709.
+This rule also covers a profile 5 stream in MPEG-TS without the Dolby Vision descriptor.
+The probe finds such a stream's RPUs even when FFmpeg's HEVC decoder ignores them, because the probe also parses the NAL units of the packets (ADR 0036).
+The interim copy rule therefore encodes each such stream, and the worker tone-maps the encode.
+When the stream's RPUs do not follow their pictures, the worker moves the RPUs before the encode under the conditions of <<reshape-rpus-starting-samples>>.
+The rule misses a profile 5 stream without a configuration record from which no read decodes a frame, because the probe then finds no RPU header (<<record-less-profile-5-without-frames,Consequences>>).
+Dolby Vision profile 10.0, which is AV1 with no compatible base, follows the same rule, so the server encodes a profile 10.0 stream.
+Probe version 5 also finds the Dolby Vision profile 9 files from a known faulty muxer, in which an RPU starts a sample.
+Such a file ends with a sample that holds no picture.
+Its placement is `STARTS_SAMPLE` whether or not its start was cut away, so the server encodes it.
+A file whose stored outcome comes from probe version 4 keeps the version 4 decisions until the server stores the file's probe version 5 outcome (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]).
 
 *Why:* No playlist can yet describe an HDR copy truthfully to a client that declares no range.
 WebKit's native player and AVPlayer refused PQ and Dolby Vision profile 8.1 copies in a variant that the playlist declared SDR.
@@ -341,9 +527,6 @@ This choice covers the Original quality option, the user's HDR choice, and 10-bi
 Client-declared dynamic ranges alone do not bring back HDR copies.
 * HDR copies, including HDR copies to the Apple TV app, once the playlist's HDR attributes are truthful (https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396]).
 HDR copies end the interim copy rule.
-* Reading HDR10+ information and RPUs from the frames (https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394]).
-Issue https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] closes the three known Dolby Vision gaps that <<known-gaps>> lists.
-* Which playback paths a Dolby Vision source permits when the source's compatibility identifier disagrees with the source's signaled transfer (https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394]).
 * Dolby Vision copies with a PQ or HLG compatible base, and the playlist attributes of those copies, including `SUPPLEMENTAL-CODECS`.
 Issue https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] decides when such a copy carries those attributes.
 Issue https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396] builds those attributes.
@@ -371,6 +554,42 @@ The initialization segment then stays identical across job attempts, as link:003
 The playlist therefore never advertises a false codec string for an encode.
 * A libx265 encode whose forced level is too low fails the job attempt, because libx265 refuses to start.
 * A full-length Dolby Vision profile 5 encode grows each FFmpeg process's memory until the job attempt ends.
+* An encode of an HEVC Dolby Vision source with no compatible base runs two FFmpeg processes only under the conditions of <<reshape-rpus-starting-samples>>.
+When the source is read at real time, the first media segment arrives about 100 to 120 ms later than from one FFmpeg process.
+* On that path, the job's audio comes out as from one FFmpeg for every audio codec that the job copies or encodes, including in an attempt that starts after the end of the source's audio and with audio that starts late.
+The container's rotation and cropping also survive.
+* An attempt that copies AC-3 or E-AC-3 audio and starts after the end of that audio fails as malformed output, from one FFmpeg as from two.
+The pinned build's MP4 muxer writes no valid description of an AC-3 or E-AC-3 track that holds no packet.
+Issue https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511] removes this case: it pads audio that ends early, so that an attempt that starts after the end of the audio encodes silence instead of copying an empty track.
+* When the worker moves the RPUs, a `STARTS_SAMPLE` placement, like an `UNSPECIFIED` one, takes the previous-picture move.
+A file in the own-first layout therefore gets each picture the next picture's RPU.
+* The server never copies a Dolby Vision file whose placement is `STARTS_SAMPLE`, whether it is a shifted file, a shifted file whose start was cut away, or an own-first file.
+A copy of a generated profile 9 stream in the shifted layout failed at the end of the stream in Chromium and Firefox (<<evidence-dolby-vision-copies>>).
+An own-first profile 8.2 or 9 file is encoded as well, although no player was measured on a copy of that layout.
+* An `UNSPECIFIED` placement rules out no copy, so the interim copy rule can copy a profile 8.2 or 9 file whose first packets mix layouts.
+* A stream whose RPU layout changes after the packets that the probe read gets the move that those packets call for.
+In a stream that mixes the conforming and the shifted layouts, a picture whose sample already ends with its RPU also takes the next sample's leading RPU, and the decoder reads the moved one.
+* A variable-frame-rate source keeps its pictures on the path that moves RPUs: the encode repeats and drops the same pictures as from one FFmpeg.
+A copy whose video timing the worker cannot use fails the attempt rather than play with other pictures.
+* A profile 5 source whose first packets carry no presentation times, such as a raw HEVC file or HEVC in AVI, or whose presentation times the probe could not see, runs one FFmpeg process and keeps every picture.
+Its pictures keep their reshape where FFmpeg's HEVC parser ends each packet with its RPU, as in a raw HEVC file whose RPUs follow their pictures.
+A picture whose RPU another NAL unit of its packet follows, and a picture of an AVI stream tagged `HEVC` whose RPU starts its sample, keep the color cast of an unreshaped picture.
+* The encode of a raw HEVC profile 5 stream whose RPUs lead their samples keeps every picture, but every picture keeps the color cast of an unreshaped picture.
+Streamarr keeps every picture rather than the reshape, because the move would reshape the pictures but drop about half of them.
+The server cannot play such a stream yet anyway, because the probe reports a raw elementary stream's duration as 0.
+* A stream whose first packets carry presentation times and whose later packets carry none still takes the move, and its encode can lose the pictures that B-frames reorder after those packets.
+* An H.264 or AV1 Dolby Vision source with no compatible base runs one FFmpeg process.
+FFmpeg's H.264 decoder reads no RPU, and its AV1 decoders attach an RPU to the next frame, so moving the RPUs would change nothing.
+* An encode of a profile 5 stream whose RPUs FFmpeg's HEVC decoder ignores for another reason, such as an RPU that it cannot parse, still keeps the color cast of an unreshaped picture.
+So does a picture whose RPU the worker drops after it passed on 32 MiB that it held, or after a sample that it could not delimit.
+Under the interim copy rule, the server never copies a stream that the probe identifies as profile 5.
+* [[record-less-profile-5-without-frames]]The server can still copy a Dolby Vision profile 5 stream without a configuration record that is tagged BT.709, when no read decodes a frame of the stream.
+Such a copy plays teal.
+The probe walks neither the extradata nor the packets of a stream from which no read decodes a frame (link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036]).
+Without a configuration record, the probe then finds no RPU header and cannot tell that the stream is profile 5.
+The stream's compatible base therefore follows its BT.709 transfer and is SDR, as under probe version 4.
+The interim copy rule can then copy the stream to a client that names HEVC.
+A profile 5 stream in MPEG-TS without the Dolby Vision descriptor, from which no read decodes a frame, likewise keeps the compatible base of its signaled transfer.
 * A Dolby Vision copy with an SDR compatible base plays as SDR in every measured player.
 * A 10-bit Dolby Vision profile 8.2 copy loses its configuration record under the pinned FFmpeg build.
 In the measured players, the lost record changed nothing.
@@ -378,6 +597,8 @@ In the measured players, the lost record changed nothing.
 The record is the only Dolby Vision signal in such a copy's initialization segment.
 Without the record, such a copy plays teal.
 * A source whose compatible base is PQ, HLG or none plays as SDR on every client until the deferred HDR output choice is built.
+* A source whose codec profile is `UNSPECIFIED` always plays through an encode.
+A source of a codec family whose codec profiles the worker contract does not name always has an `UNSPECIFIED` codec profile.
 * The playlist advertises a copy's codec string before any job attempt runs.
 A failed copy therefore costs the player one switch to a new playlist.
 
@@ -403,7 +624,7 @@ HDR copies wait for https://github.com/streamarr/streamarr-server/issues/396[str
 * Declaring `VIDEO-RANGE=PQ` or `VIDEO-RANGE=HLG` on copies today: on macOS 26.6.2 with no HDR display, AVPlayer refused 4 of 4 such variants.
 WebKit's native player timed out on 4 of 4 such variants.
 The same variants played when the playlist declared them SDR.
-* Copying HLG sources to clients that name the codec: the HLG copies played.
+* Copying HLG sources to clients that name the source's codec family: the HLG copies played.
 The playlist could not state the copies' HLG range.
 AVPlayer without an HDR display refuses a variant declared `VIDEO-RANGE=HLG`.
 WebKit's native player times out on that variant.
@@ -417,7 +638,7 @@ Streamarr chose the mobius curve with no condition.
 * The hable tone curve: the hable curve makes pictures darker overall.
 Below the peak, the hable curve gave a mean luma of 76.9 on a PQ source, against 92.9 for the mobius curve on the same source.
 * Copying a Dolby Vision profile 7 source tagged SDR: the source makes contradictory claims.
-The server encodes such a source until https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] decides which playback paths the source permits.
+The server never copies such a source, as link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] decides.
 * Copying no Dolby Vision source with an SDR compatible base until the worker chooses the HEVC tag of every copy (https://github.com/streamarr/streamarr-transcode-worker/issues/18[streamarr/streamarr-transcode-worker#18]), or encoding every such source with a `dvh1` or `dvhe` tag until then: the retag makes `dvh1` copies play now.
 In a headless check on macOS against the pinned worker image, a `dvh1` profile 8.2 copy played in 0 of 3 runs in each of AVPlayer, WebKit's native player, and hls.js in Chrome and in Firefox.
 Written as `hvc1`, the same copy played in 3 of 3 runs in every player that decodes HEVC.
@@ -425,12 +646,14 @@ Written as `hvc1`, the same copy played in 3 of 3 runs in every player that deco
 The `avc1` copy played in 18 of 18 runs across the six player setups.
 * Choosing the HEVC tag of a Dolby Vision copy with an SDR compatible base from the client's declaration, after a tvOS check: the tag is settled now.
 Every client receives `hvc1`.
-* Encoding every Dolby Vision profile 9 source while the interim copy rule applies, or having the worker drop a trailing sample that holds no picture: Streamarr keeps the simpler path.
-The faulty-muxer gap stays recorded until https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] detects malformed samples.
+* Encoding every Dolby Vision profile 9 source while the interim copy rule applies, or having the worker drop a trailing sample that holds no picture: probe version 5 finds the malformed files from their first packets, whether or not their start was cut away.
+The server encodes only those files.
 * Getting the pinned build's validity check for the configuration record relaxed upstream, building FFmpeg ourselves, or re-inserting the configuration record in the worker: for profile 8.2, the record changed nothing measured.
 With the record restored, and even with `SUPPLEMENTAL-CODECS`, AVPlayer, Safari and an iPhone Air still showed SDR.
-* Reading the first frame's RPU header in probe version 4, or encoding every Dolby Vision stream that has no configuration record: link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036]'s rule for the compatible base stays as it is.
-The RPU-header method moves to https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394].
+* Reading the first frame's RPU header in probe version 4, or encoding every Dolby Vision stream that has no configuration record: probe version 5 reads the RPU header instead.
+A Dolby Vision stream without a configuration record keeps link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036]'s rule for the compatible base.
+* Applying the refusal of an `UNSPECIFIED` codec profile to probe version 4 outcomes: a probe version 4 outcome stores no codec profile.
+The server would then encode every source until the re-scan stored each file's probe version 5 outcome.
 * `SUPPLEMENTAL-CODECS` on Dolby Vision copies with an SDR compatible base: adding the attribute changed nothing measurable in any headless player.
 The attribute stays open in case a later need appears.
 * Applying the HEVC tag rule in the server as well as in the worker: the tag rule would then live in two places.
@@ -439,10 +662,58 @@ Tone mapping moves to the GPU once the GPU tone mapper matches the CPU output.
 * Having the worker encode a stream whose copy fails the record check: the job's video decision and codec string would then no longer describe the worker's output.
 * Encoding in place in the same stream session and making the player reload its playlist: the old playlist's `CODECS` attribute would no longer match the media until the player reloads.
 * Predicting the failure from probe data: the worker cannot tell in advance which sources yield a record without parameter sets.
+* Moving a profile 5 stream's RPUs with a bitstream filter of the pinned FFmpeg build: no filter in that build moves a NAL unit.
+The `dovi_rpu` filter looks only at the last NAL unit of a packet.
+The `filter_units` filter can delete NAL units, but deleting the RPUs removes the reshape.
+* Patching FFmpeg's HEVC decoder so that it reads an RPU anywhere in its sample, or so that its MPEG-TS muxer carries more audio codecs: Streamarr runs the pinned Jellyfin build unchanged, and link:0029-pin-jellyfin-ffmpeg-releases.adoc[ADR 0029] defers an FFmpeg build pipeline of Streamarr's own.
+* Fixing the colors after decoding, with a filter: the decoder has already discarded the RPUs, and nothing after the decoder can rebuild the per-frame reshape.
+The first RPU header that the probe stores tells only the Dolby Vision profile and holds no reshape.
+* Moving the RPUs in an MPEG-TS copy, as this amendment first built: MPEG-TS carries the audio's parameters only in the audio's packets.
+An attempt that started after the end of the source's audio therefore failed and wrote no bytes, and the second FFmpeg had to read the start of the stream to learn its streams, which cost about 1.4 s before the first segment.
+The move relied on the access unit delimiter that the MPEG-TS muxer writes at the start of each sample, and on the second FFmpeg's HEVC parser, which ends each access unit at a delimiter.
+An RPU moved ahead of the delimiter became the last NAL unit of the picture before only through that parser rule, so the move could give an RPU only to the previous picture.
+The pinned build's MPEG-TS muxer also carries no FLAC or ALAC, the copy lost Opus's pre-skip and the encoder's trim of the last AAC frame, and the copy dropped the container's rotation.
+* A placement value for the own-first layout, `BEFORE_OWN_PICTURE`, with a move of each RPU that starts a sample to the end of its own sample, as this amendment first built: the probe would report that value for every file whose first picture's sample starts with an RPU.
+A file in the shifted layout whose start was cut away starts the same way, and that move would give each of its pictures the previous picture's RPU.
+On the own-first fixture, the move matched the conforming layout in 100 of 100 frames, but no known muxer writes that layout.
+* Reading the end of the file to tell the own-first layout from a cut shifted file: the last sample of a shifted file holds an RPU and no picture, and the last sample of an own-first file holds a picture.
+A file whose end was cut away as well ends with a picture in both layouts.
+The probe would also read the end of every Dolby Vision file on the re-scan, where probe version 5 reads only the first frames.
+* Encoding a stream whose placement is `UNSPECIFIED` with one FFmpeg, or failing its attempt, when its packets carry presentation times: one FFmpeg loses every RPU that starts a sample, and a failed attempt plays nothing.
+The previous-picture move leaves a conforming stream unchanged.
+* Moving the RPUs of a source whose packets carry no presentation times, as this amendment first did: the copy gave each packet its decoding time as its presentation time, and the encode of a raw HEVC stream with B-frames lost 2 of its 100 pictures.
+Failing the attempt instead would play nothing, while one FFmpeg keeps every picture and still reads the RPUs that FFmpeg's HEVC parser puts at the end of their packets.
+On a raw profile 5 stream with B-frames whose RPUs lead their samples, the move kept the color, but the encode held 50 of its 100 pictures (<<evidence-reshape>>).
+* Giving the copy presentation times with `-fflags +genpts`, or with an input frame rate (`-r`), so that such a source could take the move.
+`+genpts` gives a packet without a presentation time its decoding time, which loses the order of B-frames: on an H.264 stream with B-frames in AVI, 379 of 480 frames came out in another presentation order than from the same stream in MPEG-PS.
+An input `-r` left all 480 packets of that stream without a presentation time.
+Neither option makes every raw stream copyable either: with the settings of the server's stream copy, FFmpeg 8.1.3's MP4 muxer aborted on two raw FATE streams at an assertion in `movenc.c`, line 1248, with either option, with both and with neither.
+* Requiring Dolby Vision profile 5 by number in the worker's conditions: a compatible base of none already means that no player can show the base without the RPUs, whatever the profile number.
+* A raw HEVC stream between the two FFmpeg processes: a raw stream carries neither the source's timestamps nor its audio.
+* A Matroska stream between the two FFmpeg processes: the pinned build's Matroska muxer writes millisecond timestamps, and it changed the durations of the last audio packets.
+The last AAC packet declared 1008 samples instead of 272.
+* A NUT stream between the two FFmpeg processes: the pinned build's NUT muxer refuses a negative presentation timestamp, and its demuxer read ALAC back as an unknown codec tag and E-AC-3 as AC-3.
+After some seeks, the demuxer lost video while FFmpeg exited with status 0, in one attempt delivering 2 of 192 video packets.
+The NUT copy also lost the last packets' durations.
+* Reading the audio from a second input of the source in the second FFmpeg, beside a video-only pipe: the worker would read the source twice.
+On the excerpt, one FFmpeg read 1,699,613 bytes, and the pair read 3,399,226 bytes, although the audio packets held 50,412 bytes.
+A source of 80 Mb/s on network storage would then be read at about 160 Mb/s.
+* Carrying the source audio's sample rate and channel layout in the transcode job, so that the second FFmpeg could declare an MPEG-TS audio track before its first packet: the pinned build refused the sample rate as an MPEG-TS input option, and an audio copy still failed with `sample rate not set`.
+The job also cannot restore a codec's configuration, such as FLAC's or ALAC's, its packet durations or its padding.
+* Clearing the copy's frame rate with `setpts=PTS:strip_fps=1`, so that a variable-frame-rate source keeps its pictures: on the pinned build, each constant-frame-rate source then came out one frame short, with every frame different from a single FFmpeg's.
+* Leaving the copy's video durations as the MP4 muxer writes them: on a variable-frame-rate source with B-frames, the encode showed 43 of 48 source pictures, where one FFmpeg showed all 48.
+* Reading the video timing from the first FFmpeg's standard error: FFmpeg's log writes one line in up to five separate writes, and the `framecrc` output does not take the log's lock, so a timing record could land inside a log line.
+A socket of its own carries nothing else.
+* Changing the durations in place inside a fragment's single track run: the first fragment of a copy with audio holds two video samples, so a changed duration would move the next sample's decoding time.
+* Pairing each timing with its sample by timestamp: FFmpeg repairs bad timestamps separately for each output, and the `framecrc` output allows timestamps that MP4 does not.
+After a Matroska seek with B-frames, the leading packets carried different timestamps in the two outputs, so a timestamp check refused every such seek.
+* Seeking in the second FFmpeg with an output `-ss` option: FFmpeg subtracts that time from every output timestamp, so the attempt's timeline would no longer match a single FFmpeg's timeline.
+The second FFmpeg trims instead.
+An input seek cannot run on a pipe.
 
 == Evidence
 
-Every measurement used the pinned worker image with FFmpeg 8.1.2 on a 10-core host.
+Unless a measurement names another date and version, every measurement used the pinned worker image with FFmpeg 8.1.2 on a 10-core host.
 The encoders were libx264 and SVT-AV1.
 One level check also used libx265.
 The players were hls.js 1.7.0 in Chromium, Chrome, Firefox and WebKit, plus WebKit's native player and AVPlayer on macOS 26.6.2.
@@ -500,6 +771,160 @@ Mobius was compared only for brightness.
 The tone-mapping work (https://github.com/streamarr/streamarr-transcode-worker/issues/26[streamarr/streamarr-transcode-worker#26]) therefore repeats the color and player checks with the mobius curve.
 * `tonemapx` leaked about 3.2 KB per reshaped Dolby Vision profile 5 frame.
 By calculation from that rate, a two-hour film at 24 fps would grow one FFmpeg process by about 0.55 GB.
+* On 2026-10-27, FFmpeg in the pinned worker image decoded the first 3 frames of a raw profile 5 HEVC stream and tone-mapped them with the worker's filter.
+The stream is the one that ADR 0032's frame-facts evidence rewrote so that each RPU sat ahead of the next picture instead of after its own picture.
+The mean Cr of the unchanged stream's output was 122.4 on an 8-bit scale whose neutral value is 128.
+The mean Cr of the rewritten stream's output was 62.6, the same as for the stream with every RPU removed.
+
+[[evidence-reshape]]
+=== Moving the RPUs of a profile 5 stream
+
+These measurements ran on 2026-10-27 through the worker's own job attempts, in a local build of the worker image with the pinned FFmpeg 8.1.3, unless they name another setup.
+The measurements of 2026-10-28 ran the same way, with the worker that gives each video sample its duration in the source and moves the RPUs of every placement other than `AFTER_OWN_PICTURE`.
+Where the measurements of 2026-10-27 gave the value `BEFORE_NEXT_PICTURE`, they appear here as `STARTS_SAMPLE`, the value that replaced it with the same move.
+
+* The source was a 4-second, 1920x1080, 24 fps excerpt of a Dolby Vision profile 5 film, 100 pictures long, with AAC audio.
+A copy of the excerpt was remuxed so that each RPU started the next picture's sample, in MP4 and in Matroska.
+The probe reported the excerpt as `AFTER_OWN_PICTURE` and the remuxed copies as `STARTS_SAMPLE` (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]).
+* The worker encoded each file to 640x360 H.264 with tone mapping, in 1-second segments.
+* Mean Cr is the mean of the Cr (red-difference chroma) samples on an 8-bit scale whose neutral value is 128.
+A profile 5 picture that is not reshaped comes out teal, which pulls the mean Cr far below 128.
+
+[cols="3,1,1",options="header"]
+|===
+|Encode |Mean Cr, first 3 frames |Mean Cr, all frames
+
+|Correctly muxed excerpt, one FFmpeg
+|122.3
+|122.7
+
+|RPUs starting the next picture's sample, one FFmpeg without the move
+|62.7
+|63.3
+
+|RPUs starting the next picture's sample, two FFmpegs, `STARTS_SAMPLE`
+|122.3
+|122.7
+|===
+
+* With the placement `STARTS_SAMPLE` and with `UNSPECIFIED`, the encode of the shifted copy held the same output packets as the single FFmpeg's encode of the correctly muxed excerpt.
+On 2026-10-28, both placements again gave a mean Cr of 122.3 over the first 3 frames and 122.7 over all frames, and 0 of 100 frames differed from the correctly muxed excerpt's encode.
+* The own-first fixture was the same excerpt, rewritten so that each RPU started its own picture's sample.
+Every second picture in decode order carried the RPU of another profile 5 source, with other reshaping, so that an RPU given to the wrong picture changes that picture.
+The encodes used single-threaded x264, because x264's output otherwise changes from run to run.
+The own-picture move was the move that this amendment first built for a `BEFORE_OWN_PICTURE` placement, which the contract no longer has.
++
+[cols="3,2",options="header"]
+|===
+|Encode of the own-first fixture |Result against one FFmpeg on the conforming layout
+
+|Two FFmpegs, the own-picture move
+|All 297 packets and all 100 decoded frames identical
+
+|Two FFmpegs, the previous-picture move, as for `STARTS_SAMPLE` and `UNSPECIFIED`
+|99 of 100 frames differ
+
+|One FFmpeg without the move
+|100 of 100 frames differ, mean Cr 62.8 over the first 6 frames
+|===
++
+The same fixture in the shifted layout, through the previous-picture move, differed in 12 of 297 packets at the end, because the fixture leaves out the last picture's RPU.
+* On 2026-10-28, a local build of the worker image from this amendment, with the same FFmpeg 8.1.3 binary, probed the excerpt in the conforming, the shifted and the own-first layouts, raw and in MP4.
+The probe reported the shifted and the own-first layouts as `STARTS_SAMPLE`, and the conforming layout as `AFTER_OWN_PICTURE`.
+Through the move, the shifted and the own-first MP4 files each gave a mean Cr of 122.3 over the first 3 frames and 122.7 over all 103 frames, the same as the conforming file through one FFmpeg.
+The shifted file gave the same with the placement `UNSPECIFIED`.
+Without the move, the shifted and the own-first files each gave 62.7 over the first 3 frames.
+* The audio cases crossed six source audio codecs (AAC, AC-3, E-AC-3, FLAC, ALAC and Opus), three outputs (a copy of the source audio, AAC and Opus), three audio timings and two seeks.
+The audio timings were audio over the whole video, audio that starts 1.5 s late, and 0.5 s of audio that ends before the mid-file seek.
+The seeks were at 0 and at 3 s.
+The encodes used single-threaded x264.
+106 of the 108 cases matched the single FFmpeg packet for packet: presentation and decoding timestamps, duration, size, flags and the SHA-256 of each packet.
+The other 2 cases copied short AC-3 and E-AC-3 audio past the 3 s seek.
+Both paths failed them as malformed output, with an initialization segment whose `moov` box ran to the end of the output, and delivered nothing.
+On 2026-10-28, the same 108 cases, with seeks at 0 and at 2 s, again matched in 106, and the same 2 AC-3 and E-AC-3 cases failed on both paths.
+* A 90° rotation, a container crop, and both together, in MP4 and in Matroska, gave the same packets as the single FFmpeg.
+The outputs kept the rotated and cropped sizes, 202x360, 748x360 and 174x360, against 640x360 for the plain source.
+* The first segment's latency was measured with the source read at real time, AAC audio, 640x360 x264 at the `faster` preset and 1-second segments, in 3 runs each.
+On 2026-10-27, before the worker read the video timing, the first segment arrived after 3,376 to 3,388 ms from one FFmpeg and after 3,476 to 3,480 ms from two.
+On 2026-10-28, with the video timing, it arrived after 3,372 to 3,392 ms from one FFmpeg and after 3,489 to 3,498 ms from two, about 10 ms later than before.
+* A stop ended the attempt as stopped.
+A failure of either FFmpeg, a copy that is not MP4, and a stall of either FFmpeg each failed the attempt, and no FFmpeg process remained.
+A stall failed it as an encoder stall after the 3 s stall limit that the test set.
+* The variable-frame-rate source was a generated HEVC stream in Matroska with B-frames, 48 pictures long, which the encode converted to 24 fps, 120 frames from the start.
+The encodes used single-threaded x264.
+The copy's MP4 muxer wrote each video sample's duration as the gap to the next decoding time, while the Matroska demuxer gives each packet the track's default duration.
++
+[cols="3,2",options="header"]
+|===
+|Encode of the variable-frame-rate source |Result
+
+|One FFmpeg
+|48 of 48 source pictures shown
+
+|Two FFmpegs, with the durations that the copy's muxer wrote
+|43 of 48 source pictures shown, and 39 of 120 frames showing another source picture than one FFmpeg
+
+|Two FFmpegs, each video sample with its duration in the source
+|48 of 48 source pictures shown in the same sequence as one FFmpeg, every output packet identical, 0 of 120 frames different
+|===
++
+With AAC copied from the source, every output packet also matched one FFmpeg's, and 0 of 120 frames differed.
+After a seek to 2 s, every packet matched, and 0 of 72 frames differed.
+With `setpts=PTS:strip_fps=1` in the second FFmpeg instead, all 48 pictures showed, but each of two constant-frame-rate sources came out one frame short with every frame different.
+* The worker's smoke tests generate a profile 5 stand-in from FFmpeg's test sources, in the conforming and the shifted layouts.
+A third layout also puts an RPU ahead of the first picture, as a shifted file whose start was cut away and an own-first file do, and the smoke tests give it, as the shifted layout, the placement `STARTS_SAMPLE`.
+Through a local build of the worker image with the pinned FFmpeg 8.1.3, the shifted layouts uploaded the same packets as the conforming one, with AAC, AC-3, E-AC-3, FLAC, ALAC and Opus source audio, from the start and after a seek.
+The smoke tests also compare the variable-frame-rate source through the pipe with one FFmpeg, packet for packet.
+* Packets without presentation times were measured on 2026-10-28 in a local build of the worker image with the same FFmpeg and ffprobe 8.1.3 binary as the pinned image.
+** ffprobe printed no presentation time for any packet of three raw streams: FATE's `hevc/pir.hevc`, which has no B-frames, FATE's `h264/sei-1.h264`, and the raw rewrap of FATE's `mov/dovi-p5.mp4`.
+** In AVI, ffprobe printed none for an H.264 stream with B-frames and one without, 480 packets each, for an HEVC stream with B-frames tagged `HEVC` and tagged `H265`, and for an HEVC stream without B-frames tagged `H265`.
+** Every packet of the raw `mov/dovi-p5.mp4` rewrap, as FFmpeg's HEVC parser cut it, ended with an RPU.
+** The pipe's copy of a generated 320x180 raw HEVC stream with B-frames, 100 pictures long, gave all 100 packets their decoding time as their presentation time.
+The encode of that copy held 98 frames.
+One FFmpeg, reading the raw stream with the command of every other job, held 100 frames, all distinct, and so did the pipe's encode of the same stream in MP4.
+** Through the worker's own engine, in the local build, one FFmpeg encoded 100 raw packets with B-frames from a profile 5 stream whose RPUs follow their pictures.
+The job carried the placement `STARTS_SAMPLE` and no presentation times.
+The encode held 100 of 100 distinct pictures, with a mean Cr of 125.75, against 125.85 for the same stream in MP4.
+** On 2026-10-28, a raw HEVC stream went through the server's probe and transcode decision and through a local build of the worker image.
+The stream held the first 100 pictures of a profile 5 test file with B-frames, with each picture's RPU behind the next picture's VPS, SPS and PPS and ahead of the next picture's slices.
+The probe reported the placement `STARTS_SAMPLE`, no presentation times and a duration of 0.
+With that duration, the server's timeline held no media segment, and the worker refused the job.
+For the measurement, the timeline was given the 4 s that the pictures last at the 25 fps that the probe falls back to.
+One FFmpeg served all 100 pictures, with a mean Cr of 59.9 over all frames, against 125.8 for the same pictures in MP4 through one FFmpeg.
+With the job's presentation-time fact forced to true, the move served 50 of the 100 pictures, with a mean Cr of 124.3.
+** These checks used the settings of the server's stream copy.
+`-fflags +genpts` gave each packet of the H.264 AVI stream with B-frames its decoding time as its presentation time, and 379 of its 480 frames then came in another presentation order than from the same stream in MPEG-PS.
+An input `-r` left all 480 packets without a presentation time.
+FATE's raw `h264/sei-1.h264` and `hevc/food.hevc` aborted the MP4 muxer with `Assertion next_dts <= 0x7fffffff failed at libavformat/movenc.c:1248` with `+genpts`, with `-r`, with both and with neither.
+
+The containers between the two FFmpegs were compared on 2026-10-27.
+The MPEG-TS pipe ran through the worker's job attempts in a local build of the worker image with the pinned FFmpeg 8.1.3.
+The other comparisons ran in a local build of the worker image with the same FFmpeg 8.1.3 binary, on the same excerpt and on generated sources, through the worker's segment delivery or FFmpeg alone.
+
+* MPEG-TS, the pipe that this amendment first built: the worker moved each RPU that started a sample ahead of the access unit delimiter that the MPEG-TS muxer writes, and the second FFmpeg's HEVC parser then ended the previous picture at that delimiter.
+** With the source read at real time, the first 1-second segment arrived after 2.67 s from one FFmpeg and after 4.07 s from two.
+Most of the difference was the second FFmpeg reading the start of the MPEG-TS to learn its streams.
+In the local build, probing less (`-analyzeduration 1 -fpsprobesize 0`) brought it to 2.77 s, but then an AAC stream that started 4 s late failed with `sample rate not set` and wrote no bytes.
+** An attempt that started after the end of the source's audio failed with `sample rate not set` and wrote no bytes.
+A single FFmpeg wrote 10,650 bytes for the same attempt.
+** In the last segment after a seek, the stream's last AAC frame declared 1024 samples instead of 136 or 128.
+** The pinned build's MPEG-TS muxer carries no FLAC or ALAC, and the copy lost Opus's pre-skip.
+** A 64x36 HEVC stream in MP4 with a 90° display rotation came out 36x64 from one FFmpeg and 114x64 through the MPEG-TS copy.
+* Fragmented MP4, with each packet written at once and the move in a separate process: the first segment arrived after a median of 2.735 s against 2.635 s from one FFmpeg and 4.001 s from the MPEG-TS pipe, in 3 runs each.
+Fragments of 250 ms instead gave 3.074 s.
+In 72 cases that crossed six source audio codecs, late audio, a source that starts at 10 s, two seeks and three audio outputs, every video and audio packet equaled the single FFmpeg's.
+* Matroska: the pinned build's Matroska muxer writes millisecond timestamps and changed the durations of the last audio packets.
+The last AAC packet declared 1008 samples instead of 272, and the last ALAC packet 4080 instead of 1296.
+* NUT: the pinned build's NUT muxer refuses a negative presentation timestamp.
+Its demuxer read ALAC back as an unknown codec tag and E-AC-3 as AC-3, and restored neither the decoding timestamps nor the last durations.
+After some seeks, the demuxer reported `frame size > 2max_distance and no checksum` and lost video while FFmpeg exited with status 0.
+In one such attempt, 2 of the 192 expected video packets arrived.
+* Audio from a second input of the source: the second FFmpeg read the video from the pipe and the audio from the source.
+In 94 readable pairs, every packet equaled the single FFmpeg's, with a recipe that keeps the source's timestamps in the pipe.
+The source was read twice: 1,699,613 bytes for one FFmpeg and 3,399,226 bytes for the pair, although the audio packets held 50,412 bytes.
+At a source bitrate of 80 Mb/s, that is about 160 Mb/s of reads at real time.
+* Audio parameters in the job: the pinned build's MPEG-TS demuxer refused an input sample rate (`Option sample_rate not found`).
+Output audio settings with an audio copy still failed with `sample rate not set` and wrote no bytes.
 
 [[evidence-levels-and-codec-strings]]
 === Levels and codec strings
@@ -571,6 +996,11 @@ With the record restored, and even with `SUPPLEMENTAL-CODECS`, AVPlayer, Safari 
 * Adding `SUPPLEMENTAL-CODECS` to a Dolby Vision copy with an SDR compatible base changed nothing measurable in any headless player.
 * For a profile 5 copy under `hev1`, the configuration record is the only Dolby Vision signal in the initialization segment.
 Without the record, such a copy plays teal.
+* A generated profile 9 stream was muxed so that each RPU started a new sample.
+Each RPU then sat in the next frame's sample, and the last sample held only an RPU and no picture.
+A copy of that stream failed at the end of the stream in Chromium and Firefox.
+The same copy played in 0 of 3 runs in WebKit with hls.js.
+The same stream muxed correctly played in 3 of 3 runs in all six player setups.
 
 == References
 
@@ -579,7 +1009,7 @@ Without the record, such a copy plays teal.
 * https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56] (NVENC), https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57] (VideoToolbox) and https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] (the remaining hardware encoders).
 * https://github.com/streamarr/streamarr-server/issues/501[streamarr/streamarr-server#501], which delivers this amendment.
 * https://github.com/streamarr/streamarr-server/issues/512[streamarr/streamarr-server#512], which adds merged-slot segment lists.
-* link:0009-h264-plus-av1-codec-strategy.adoc[ADR 0009], which decides which codec an encode uses.
+* link:0009-h264-plus-av1-codec-strategy.adoc[ADR 0009], which decides which codec family an encode uses.
 * link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032], which governs probe versions.
 * link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036], which defines the dynamic range, the planned output and the produced output.
 * link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037], which makes every media segment fragmented MP4 and keeps each variant's initialization segment across job attempts.

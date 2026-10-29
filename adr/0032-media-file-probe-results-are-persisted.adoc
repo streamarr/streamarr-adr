@@ -37,6 +37,13 @@ Other temporary failures still retry without a limit.
 A scan probes a file with that terminal error again.
 A scan does not probe a file again for any other terminal error.
 
+Another amendment adds probe version 5 (<<probe-version-5>>).
+Probe version 5 reports each video stream's typed codec profile, level and tier and its color properties.
+Probe version 5 also reads the first frames of the chosen video stream.
+On the upgrade to probe version 5, the server queues a re-scan itself.
+The re-scan runs through the existing scan library operation.
+Playback keeps using each file's probe version 4 outcome until the server stores the file's probe version 5 outcome.
+
 == Context
 
 Streamarr learns a media file's technical properties by running ffprobe.
@@ -66,7 +73,7 @@ This ADR first moves probing into library processing.
 It also defines the result that workers will later produce.
 
 Each stored probe outcome records the probe version that produced it.
-Probe versions 1 and 3 describe each video stream by its codec, size, frame rate and bitrate.
+Probe versions 1 and 3 describe each video stream by its codec name, size, frame rate and bitrate.
 With those facts alone, the transcode decision cannot tell an 8-bit stream from a 10-bit stream.
 The transcode decision also cannot tell an SDR stream from an HDR stream.
 The transcode decision cannot compute the codec string that the playlist's `CODECS` attribute must carry for a stream copy.
@@ -74,6 +81,8 @@ The transcode decision also cannot tell which frame rate an encode should use wh
 Probe version 4 adds the missing facts for the playback capabilities epic, https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399].
 Probe version 4 also adds each file's chapters, which a future chapter menu uses.
 Probe version 4 describes dynamic range in the vocabulary of link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036].
+Probe version 4 reads no frames, so probe version 4 cannot report HDR10+ or a Dolby Vision RPU as absent.
+Probe version 5 reads the first frames of the chosen video stream and adds typed codec and color facts.
 
 == Decision
 
@@ -89,10 +98,13 @@ The row also stores a snapshot of the source file's size and modification time.
 Each row also stores `probe_version` and an optional typed `probe_error` code.
 
 `media_file_stream_info` holds one row per stream.
-Each row stores the stream type, index, codec, width, height, frame rate, channels, and bitrate.
+Each row stores the stream type, index, codec name, width, height, frame rate, channels, and bitrate.
 The row also stores the language and the default and forced flags.
 Probe version 4 adds the stream facts listed in <<probe-version-4,the probe version 4 section>>.
 Probe version 4 also reports the container's chapters.
+Probe version 5 adds the stream facts listed in <<probe-version-5,the probe version 5 section>>.
+The database stores no `MediaFileProbePropertyIssue`.
+The server derives each issue from the stored facts, as ADR 0036 decides.
 https://github.com/streamarr/streamarr-server/issues/546[streamarr/streamarr-server#546] decides how the server stores the chapters.
 The tables correspond to ffprobe's `format` and `streams` sections.
 Container properties and `probe_error` are nullable.
@@ -230,6 +242,7 @@ If the probe succeeds, the probe returns the complete container-and-stream resul
 For video streams, the result includes width, height, and frame rate.
 The result includes bitrate for any stream that reports a bitrate.
 Probe version 4 adds the facts listed in <<probe-version-4,the probe version 4 section>>.
+Probe version 5 adds the facts listed in <<probe-version-5,the probe version 5 section>>.
 If the probe encounters a terminal media error, the probe returns a typed error.
 Replace `MediaProbe` as the probe's return type.
 Derive `MediaProbe` from the complete result for playback consumers.
@@ -270,8 +283,9 @@ Every job attempt of that variant then writes the same initialization segment.
 Some streams carry the values only in the SEI messages of their HEVC bitstream.
 Those streams report no static metadata, because probe version 4 reads no frames.
 A missing value therefore does not mean that a PQ stream is PQ10.
+Probe version 5 reads those values from the first frame, or from the SEI messages of the first packets (<<probe-version-5>>).
 The static metadata is not the raw color signaling.
-The transfer, primaries, matrix and range of a stream stay with the later probe version.
+Probe version 5 reports the transfer, primaries, matrix and range of each video stream.
 * The container's chapters, with each chapter's start time, end time and title.
 The chapter times use the timeline of the keyframe positions.
 A future chapter menu and the markers of https://github.com/streamarr/streamarr-server/issues/285[streamarr/streamarr-server#285] use the chapters.
@@ -307,7 +321,7 @@ For such a file, the probe parses the AV1 stream's sequence header instead.
 The probe never derives the codec string from ffprobe's named profile and level.
 Because the probe stores the exact codec string, the playlist never waits for a produced initialization segment.
 A sample entry is the four-character code, such as `hvc1`, `hev1` or `avc1`, that names a video stream's coding format in the initialization segment.
-A video codec string names the sample entry that a stream copy of that stream will carry.
+The codec string of a video stream names the sample entry that a stream copy of that stream will carry.
 The worker alone holds the tag rule, which picks a copy's sample entry.
 https://github.com/streamarr/streamarr-transcode-worker/issues/18[streamarr/streamarr-transcode-worker#18] changes the tag rule.
 The changed tag rule writes a `dvh1` sample entry as `hvc1`.
@@ -342,6 +356,87 @@ The server can fix its own rule without a new probe.
 link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043] holds the library sample's handler names, which test the server's rule.
 The hearing-impaired flag comes from the same ffprobe run as the other version 4 facts (<<evidence-hearing-impaired>>).
 So https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60] marks SDH renditions without a later probe version.
+
+[[probe-version-5]]
+=== Probe version 5 reads the first frames of the chosen video stream and reports typed codec and color facts
+
+Probe version 5 reports every fact of probe version 4.
+https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] adds probe version 5.
+Probe version 5 adds these facts to a successful outcome:
+
+* The codec profile, codec level and codec tier of each video stream, as typed values.
+The probe reads those values from the stream's decoder configuration record or sequence header.
+The probe never maps ffprobe's profile name.
+A codec profile that the worker contract does not name is `UNSPECIFIED`.
+The codec level is absent when the probe cannot read a level.
+Each audio stream still reports only its profile name, as ffprobe prints it.
+* The color primaries, transfer characteristics, matrix coefficients and color range of each video stream.
+Each value of the primaries, the transfer and the matrix names one ITU-T H.273 code point.
+An enum value's number in the worker contract need not equal its H.273 code point, as ADR 0036 records.
+A value that the worker contract does not name is `UNSPECIFIED`.
+* Whether the probe read the first frames of each video stream.
+The probe reads the first 3 frames of the chosen video stream, or fewer when the stream holds fewer.
+The probe reads no frame of any other stream.
+A read that keeps 1 or 2 frames counts as cut short, even when the stream holds no more, and reports no frame feature as `ABSENT`, as ADR 0036 decides.
+When no read decodes a frame, because every read fails or because even the read of 192 packets decodes none, the probe reports that it did not read the stream's first frames.
+Only the HDR10+, observed RPU and Dolby Vision facts of such a stream keep their probe version 4 meaning, so it reports no frame feature as `ABSENT`, and a present Dolby Vision gives no first RPU header and an unspecified RPU placement.
+Its compatible base follows the probe version 5 rules, as ADR 0036 decides.
+* The HDR10+ and Dolby Vision RPU facts that the first frames show, as the probe version 5 section of ADR 0036 decides.
+For H.264 and HEVC, the probe also parses the NAL units of the packets that hold those frames, because FFmpeg's decoders drop or ignore some RPUs.
+The probe also reads the SEI messages of those packets and of the stream's extradata, because FFmpeg loses some HDR10+ and static metadata messages.
+H.264 streams therefore report HDR10+ as present or absent, as HEVC streams do.
+FFmpeg's AV1 decoders drop the RPUs, the frames and the rest of the packets whose metadata OBUs they cannot parse, and never apply the metadata OBUs of the extradata.
+For AV1, the probe therefore reads the metadata OBUs of the extradata and of those packets.
+The probe reads extradata in each form that FFmpeg's demuxers give: an `avcC`, `hvcC` or `av1C` record, Annex B extradata, and the bare OBUs of AV1 in IVF or a raw OBU file.
+AV1 streams therefore report HDR10+, RPUs and Dolby Vision as present or absent, as H.264 and HEVC streams do.
+Those facts include the fields of the first RPU header that tell the Dolby Vision profile.
+An HEVC NAL unit of type 62 counts as an RPU only on layer 0 with TemporalId 0, where FFmpeg's HEVC decoder reads an RPU, as ADR 0036 decides.
+The walk skips the NAL units that FFmpeg's NAL unit splitter drops before its decoders see them, such as a NAL unit whose `forbidden_zero_bit` is 1, as ADR 0036 lists.
+Those facts also include the RPU placement: whether each RPU follows its own picture, whether every RPU starts its sample, or whether the first packets cannot tell, as ADR 0036 decides.
+* Whether the first packets of the chosen video stream carry presentation times.
+The probe asks ffprobe for each packet's presentation time in its read of the packets that the NAL unit walk covers.
+ffprobe's JSON leaves out the presentation time of a packet to which the demuxer gives none.
+The fact is true when every packet that the read printed has a presentation time, and false when at least one has none.
+The fact is absent when the probe read no packets: on every stream but the chosen video stream, on a chosen video stream whose codec family is not H.264, HEVC or AV1 or whose first frames the probe did not read, and when that read fails or prints no packet.
+The server refuses a video stream's fact as a contract violation unless the probe read that stream's first frames and that stream's codec family is H.264, HEVC or AV1.
+link:0013-stream-decision-architecture.adoc#reshape-rpus-starting-samples[ADR 0013] decides how the worker's RPU move uses the fact.
+* The mastering display of the first frame of the chosen video stream, when the container declares no mastering display.
+The content light level of that first frame, when the container declares no content light level.
+For H.264 and HEVC, when the first frame carries no value either, the value of the first SEI message that carries it and is not nested.
+For AV1, when the first frame carries no value either, the value of the first mastering display or content light level metadata OBU without an extension byte.
+The values keep the units of the probe version 4 static metadata.
+* Whether each video stream carries, or may carry, a static metadata value that the probe left absent.
+That includes a Matroska MasteringMetadata element that FFmpeg's Matroska demuxer drops because neither its primaries nor its luminance are complete.
+That also includes each value that no source gives when the probe cannot read the Matroska track's Colour element, for every codec family.
+That also includes a value that the probe cannot rule out, as ADR 0036 decides, such as a value that an SEI NAL unit or an OBU that the probe could not delimit may hold.
+A stream with such an omitted value is never PQ10.
+* The content light level of the chosen video stream's Matroska track when the track's MaxCLL or MaxFALL element is 0 or missing.
+ffprobe reports a Matroska light level only when both elements are nonzero.
+When ffprobe reports no light level, the probe reads the two elements itself.
+A track that holds either element reports both values, with 0 for an element that the track does not hold.
+
+The server stores every one of these facts with the probe outcome.
+The server stores no `MediaFileProbePropertyIssue`.
+The server derives each issue from the stored facts when the server decides, as ADR 0036 decides.
+A fix to the rule that derives an issue therefore needs no new probe version.
+
+The upgrade to probe version 5 keeps every probe version 4 outcome.
+The server can still read a probe version 4 outcome, because probe version 5 does not change how the server reads a probe version 4 fact.
+On the upgrade, the server queues a re-scan itself, as <<upgrade-rescan,the section on source changes and probe versions>> describes.
+The re-scan runs through the existing scan library operation and the durable probe jobs.
+Playback keeps using each file's probe version 4 outcome until the server stores the file's probe version 5 outcome.
+A probe version 4 outcome stores no codec profile.
+ADR 0013 refuses a copy of an `UNSPECIFIED` codec profile only for an outcome of probe version 5 or later.
+
+*Why:* A probe that reads no frames cannot report HDR10+ or a Dolby Vision RPU as absent.
+Some streams carry their HDR10 static metadata only in their HEVC bitstream.
+Probe version 4 therefore could not tell HDR10 from PQ10.
+A Dolby Vision profile 5 stream without a configuration record names its profile only in its RPUs.
+FFmpeg's HEVC decoder ignores an RPU that is not the last NAL unit of its sample, so the frames alone can hide the RPUs of a malformed profile 5 stream.
+FFmpeg also loses the HDR10+ and static metadata messages that follow a rejected SEI message, so the frames alone can make an HDR10 stream look like PQ10.
+FFmpeg's AV1 decoders lose metadata OBUs in the same way, so the frames alone can also hide an AV1 stream's HDR10+, RPUs and static metadata.
+https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] compares the codec profile and level with what a client declares, so streamarr/streamarr-server#395 needs typed values.
+The measurements are in <<evidence-frame-facts>>, <<evidence-static-hdr>> and <<evidence-fate-sweep>>.
 
 [[output-frame-rate]]
 === The probe job chooses the output frame rate once per file
@@ -566,12 +661,14 @@ Each probe version reports every fact of the versions before it.
 The probe versions are numbered in the order in which they ship:
 
 * Probe version 1 reports the container's format, duration and bitrate.
-It also reports each stream's codec, language, size, frame rate, channels, bitrate and flags.
+It also reports each stream's codec name, language, size, frame rate, channels, bitrate and flags.
 * Probe version 3 adds the keyframe positions of the chosen video stream, as <<keyframe-positions,the keyframe section>> describes.
 https://github.com/streamarr/streamarr-server/issues/66[streamarr/streamarr-server#66] adds the keyframe positions.
 * Probe version 4 adds the facts that <<probe-version-4,the probe version 4 section>> lists.
 https://github.com/streamarr/streamarr-server/issues/501[streamarr/streamarr-server#501] adds those facts.
 Probe version 4 also reports the keyframe positions of version 3.
+* Probe version 5 adds the facts that <<probe-version-5,the probe version 5 section>> lists.
+https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] adds those facts.
 
 Probe version 2 is unused.
 This ADR first gave version 2 to the facts for streamarr/streamarr-server#501.
@@ -579,7 +676,8 @@ The keyframe positions were ready first, so they shipped as version 3.
 No server requests probe version 2, and no worker advertises it.
 
 A change after probe version 4 does not add its facts to probe version 4.
-A probe version after version 4 adds caption detection: whether the video carries CEA-608 or CEA-708 captions.
+A change after probe version 5 does not add its facts to probe version 5.
+A later probe version adds caption detection: whether the video carries CEA-608 or CEA-708 captions.
 The probe detects the captions by decoding keyframes.
 https://github.com/streamarr/streamarr-server/issues/505[streamarr/streamarr-server#505] adds the caption detection.
 
@@ -980,7 +1078,7 @@ The keyframe packet scan capacity returns to 1 once no job attempt has run on th
 
 *Why:* A keyframe packet scan reads a whole file, and a file can take tens of seconds to scan.
 CPU priority does not protect disk reads.
-A Jellyfin user ran trickplay generation at idle CPU priority, and playback from a 7200 RPM disk still failed.
+On another media server, a user ran the generation of seek thumbnails at idle CPU priority, and playback from a 7200 RPM disk still failed.
 Pausing a scan costs only time.
 After the scan finishes, playback can copy the file's video instead of encoding it.
 
@@ -1092,19 +1190,9 @@ The source snapshot currently uses file size and modification time.
 * Select streams other than the chosen video stream and the first audio stream.
 The code that decides how to transcode would need the selected stream indices.
 The worker contract and command builder would also need those indices.
-* Report typed codec profiles and levels and the color properties in a later probe version.
-The color properties are the transfer, primaries, matrix and range.
-Probe version 4 keeps only each audio stream's profile name, as ffprobe prints it.
-That later version also reads the HDR10 static metadata of a stream that carries the metadata only in its HEVC bitstream.
-That later version also reads HDR10+ metadata and Dolby Vision RPUs from frames.
-An RPU (reference processing unit) carries Dolby Vision's per-frame picture-adjustment instructions.
-The later version can then report HDR10+ and Dolby Vision as present or absent.
-https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] describes that later version, including the worker's part of it.
-* Identify a Dolby Vision stream without a configuration record that is really profile 5, by reading the RPU header of the stream's first frame.
-https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] adds that check.
-* Record a `MediaFileProbePropertyIssue`.
-Probe version 4 records no such issue, as ADR 0036 decides.
-https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] decides where these issues are stored.
+* Report typed codec profiles of audio streams.
+Probe version 5 keeps only each audio stream's profile name, as ffprobe prints it.
+* Read the frames of video streams other than the chosen video stream.
 
 == Consequences
 
@@ -1157,11 +1245,15 @@ The library sample held no multi-program transport stream.
 Second, 15 PGS subtitle streams in 7 of the 300 sampled files still had no size.
 None of the packets of those streams fell within 200 s or 1 GB.
 Third, a Dolby Vision profile 5 stream in MPEG-TS without the Dolby Vision descriptor reads as `UNSPECIFIED`.
-ADR 0013 records how such a stream plays until a later probe reads RPUs from frames.
-https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] describes that later probe.
 Fourth, a stream that carries its HDR10 static metadata only in its HEVC bitstream reports none.
 Every HEVC stream in MPEG-TS or in a raw HEVC file works this way.
-streamarr/streamarr-server#394 reads that metadata from the first frame.
+Probe version 5 closes the third gap and the fourth gap.
+Probe version 5 identifies such a profile 5 stream from its first RPU header.
+The third gap stays open for such a stream when no read decodes a frame of it, because the probe then finds no RPU header (link:0013-stream-decision-architecture.adoc#record-less-profile-5-without-frames[ADR 0013]).
+Probe version 5 reads such static metadata from the first frame, or from the SEI messages of the first packets.
+* The re-scan on the upgrade to probe version 5 probes every file again.
+Each of those probes reads the first frames of the chosen video stream.
+Each file keeps its probe version 4 decisions until the server stores the file's probe version 5 outcome.
 * Probes and job attempts no longer compete for a worker's slots.
 Before this amendment, probes shared the playback slots, and a worker defaulted to one slot.
 A cold scan of about 1,800 movies on a 72-core host then spent about 20 minutes probing, at about 1.6 files per second.
@@ -1245,6 +1337,9 @@ A scan that requests new inputs would therefore wait for the retry time even if 
 If the source became unreadable after the scan listed the file, the whole scan would fail instead of just the probe attempt.
 * Retry a failed file on each scan without saving why the probe failed.
 An administrator could not see why the file never became playable.
+* Delete the probe version 4 outcomes on the upgrade to probe version 5, as the upgrade to probe version 4 deleted older outcomes.
+The server can still read every probe version 4 outcome.
+Playback of every file would stop until the re-scan stored the file's probe version 5 outcome.
 * Keep version 1 and version 3 outcomes usable while the re-scan refreshes them to probe version 4.
 Those outcomes would read as an `UNSPECIFIED` dynamic range.
 Until the re-scan refreshed an HDR file's outcome, the server would copy that file or encode it without tone mapping.
@@ -1363,7 +1458,7 @@ Every operator, in Docker Compose and in Kubernetes, would have to grant that ca
 
 == Evidence
 
-Each group below holds the measurements behind one part of probe version 4.
+Each group below holds the measurements behind one part of probe version 4 or probe version 5.
 The measurements ran on 2026-09-27 against ffprobe and FFmpeg 8.1.2 in the pinned worker image.
 The write-ups and harnesses for these measurements were not committed.
 This Evidence section therefore gives the results.
@@ -1409,6 +1504,220 @@ The file still held both elements.
 * MP4 files with `hvc1` or `hev1` sample entries reported neither value as stream side data when only the `hvcC` record and the samples held the SEI messages.
 A Matroska file without the mastering elements, an MPEG-TS file and a raw HEVC file also reported none.
 * In all of those files, ffprobe reported both values as frame side data of the first frame.
+
+[[evidence-frame-facts]]
+=== Frame facts
+
+These measurements ran against ffprobe and FFmpeg 8.1.2 in the pinned worker image.
+
+* FFmpeg's H.264 decoder dropped the NAL units of type 28 that carry Dolby Vision profile 9 RPUs.
+ffprobe therefore could not observe those RPUs when ffprobe read frames.
+* ffprobe read the first frame of a Dolby Vision profile 5 sample without a configuration record.
+ffprobe reported the RPU header fields `vdr_rpu_profile` 0 and `bl_video_full_range_flag` 1.
+FFmpeg guesses profile 5 from the same fields when the configuration record is missing.
+
+These measurements ran on 2026-10-27 against the pinned FFmpeg and ffprobe 8.1.3.
+Where they give the worker's probe result, the probe ran in a local build of the worker image with the pinned FFmpeg 8.1.3.
+
+* A raw profile 5 HEVC stream without a configuration record was rewritten so that each RPU sat ahead of the next picture instead of after its own picture.
+A muxer that starts a new sample at each RPU writes the same order.
+ffprobe reported Dolby Vision RPU side data on none of the first 3 frames.
+The unchanged stream reported the side data on all 3 frames.
+* A PQ Matroska file held a MasteringMetadata element with a maximum luminance and no primaries, and its HEVC bitstream held no static metadata.
+ffprobe reported no mastering display, either as stream side data or as side data of the first frame.
+* No AV1 Dolby Vision sample from a real source was available.
+FFmpeg's source shows that both of its AV1 decoders ignore an RPU that fails to parse, and attach no RPU side data to that frame.
+The profile 10.0 rule rests on the RPU header fields that FFmpeg 8.1 reads for AV1, and was tested only with constructed inputs.
+* FFmpeg's source shows that its H.264 decoder stops reading an SEI NAL unit at the first message that it rejects.
+In the pinned build, an HEVC stream whose first SEI message was malformed, followed by an HDR10+ message, showed no HDR10+ on any frame.
+Before the probe read the SEI messages itself, it reported that stream's HDR10+ as `ABSENT`.
+* An MP4 file held, in its `hvcC` record, a user data message shorter than 16 bytes ahead of the mastering display, light level and HDR10+ messages.
+None of its first 3 frames carried any of the three.
+With the same messages inside a scalable nesting message (payload type 133), none of the frames carried any of the three either.
+* An AV1 stream held a malformed HDR10+ message in its first temporal unit.
+ffprobe exited with status 0 and reported 7 frames, none with HDR10+.
+A truncated mastering display or light level message in the first temporal unit failed the first group of pictures, and the later frames carried no static metadata.
+* The worker's recorded ffprobe results include HEVC and H.264 samples with their first packets.
+With the SEI read, every such HEVC sample kept its facts, and a PQ10 sample stayed PQ10.
+Before the SEI read, the four such H.264 samples reported HDR10+ as `UNSPECIFIED`, because FFmpeg's H.264 decoder drops every HDR10+ message.
+With the SEI read, those four samples report HDR10+ as `ABSENT`.
+
+The measurements below ran on 2026-10-27 in a local build of the worker image with the pinned FFmpeg 8.1.3.
+That FFmpeg build decodes AV1 with libdav1d.
+Each file was constructed for the measurement.
+The AV1 files are an AV1 encode with metadata OBUs inserted into its temporal units, in IVF, MP4 and Matroska.
+Each before and after pair compares the worker's probe without and with the rule that the measurement tests.
+
+* An RPU OBU ahead of a frame's OBU reached that frame, and an RPU OBU after it reached the next frame.
+An HDR10+ OBU ahead of a hidden frame reached the shown frame of the same temporal unit.
+Mastering display and light level OBUs after the OBUs of frame 0 reached only frame 1 and later.
+* An HDR10+ OBU with a malformed body, or an HDR10+ OBU without its trailing bits, in the first temporal unit dropped frame 0.
+A truncated mastering display OBU dropped the rest of its packet.
+An RPU whose EMDF container had a wrong header was ignored, and its frame was kept.
+* A metadata OBU with an extension byte reached the frames when the sequence header's `operating_point_idc` was 0, which selects every layer.
+* FFmpeg's MP4 muxer copied the mastering display and light level OBUs of the first temporal unit into the `av1C` record.
+With those OBUs only in the `av1C` record, neither the frames nor the stream side data showed them.
+* The extradata of an AV1 stream in IVF was the bare OBUs: the sequence header and the metadata OBUs ahead of the first frame.
+* The worker's probe of the constructed AV1 MP4 files changed as follows when it began to walk the OBUs.
+Before the walk, the probe ruled nothing out for AV1.
++
+[cols="2,2,2"]
+|===
+|AV1 MP4 file |Before the OBU walk |With the OBU walk
+
+|PQ, without HDR10+, RPUs or static metadata
+|HDR10+ and Dolby Vision `UNSPECIFIED`, both static values omitted
+|HDR10+ and Dolby Vision `ABSENT`, no value omitted, so PQ10
+
+|An HDR10+ OBU that FFmpeg rejects, in the first temporal unit
+|HDR10+ `UNSPECIFIED`
+|HDR10+ `PRESENT`
+
+|Mastering display and light level OBUs after the OBUs of frame 0
+|No static value, both omitted
+|Both static values reported
+
+|An RPU in an EMDF container with a wrong header
+|Dolby Vision `UNSPECIFIED`
+|Dolby Vision `PRESENT` with an observed RPU and no RPU header
+
+|An RPU that FFmpeg parses
+|Dolby Vision `PRESENT` with its RPU header, HDR10+ `UNSPECIFIED`
+|The same Dolby Vision facts, HDR10+ `ABSENT`
+|===
++
+An AV1 PQ stream in IVF, and an AV1 MP4 file whose samples switch to another sample description, reported HDR10+ and Dolby Vision as `UNSPECIFIED` and both static values as omitted, before and after.
+The IVF stream changed once the probe walked bare-OBU extradata, as the extradata measurements below show.
+* An HEVC MP4 file with an edit list held 288 packets and 97 frames, and its first 192 packets decoded to 1 frame.
+Before the probe counted a capped read of a longer stream as cut short, it reported HDR10+ and Dolby Vision as `ABSENT`.
+After, both are `UNSPECIFIED`.
+* A raw HEVC stream held its HDR10+ message inside a regional nesting message (payload type 157), and no frame showed HDR10+.
+Before the probe treated an unread nesting message as undelimited, it reported HDR10+ as `ABSENT`.
+After, HDR10+ is `UNSPECIFIED`.
+* A PQ HEVC stream in MPEG-TS, without static metadata, carried Annex B extradata.
+While the probe trusted the frames alone, it reported HDR10+ and Dolby Vision as `ABSENT` and the stream as PQ10, without reading the extradata that FFmpeg's HEVC decoder applies.
+While the probe treated such extradata as unread, HDR10+ and Dolby Vision were `UNSPECIFIED`, both static values were omitted, and the stream was not PQ10.
+Once the probe walked Annex B extradata, the stream reported HDR10+ and Dolby Vision as `ABSENT` and the stream as PQ10, because neither the extradata nor the packets hold an HDR message.
+* A PQ HEVC MP4 file's second sample switched to another `hvcC` record.
+ffprobe printed that the packet carried new extradata, but not the record's bytes.
+Before the probe counted a read with a replacement record as one whose units it could not all delimit, it reported the stream as PQ10, with HDR10+ and Dolby Vision `ABSENT`.
+After, HDR10+ and Dolby Vision are `UNSPECIFIED`, and both static values are omitted.
+The same file without the switch still reports HDR10+ and Dolby Vision as `ABSENT`.
+* The pinned ffprobe exited with status 0 when a read ended early.
+A Matroska file cut to a third of its length printed 13 of its 40 packets, with exit status 0.
+* The worker's recorded first packets of H.264, HEVC and AV1 samples changed as follows when the probe began to walk Annex B extradata and bare-OBU extradata.
+Before, the probe treated both forms as unread.
++
+[cols="2,2,2"]
+|===
+|Sample |Treating the extradata as unread |Walking the extradata
+
+|PQ HEVC in MPEG-TS, without static metadata
+|HDR10+ and Dolby Vision `UNSPECIFIED`, both static values omitted
+|HDR10+ and Dolby Vision `ABSENT`, no value omitted, so PQ10
+
+|HEVC in MPEG-TS with an unspecified transfer, and the base layer of a two-layer profile 7 file in MPEG-TS
+|HDR10+ and Dolby Vision `UNSPECIFIED`
+|HDR10+ and Dolby Vision `ABSENT`
+
+|10-bit AV1 in IVF, and the same in a raw OBU file
+|HDR10+ and Dolby Vision `UNSPECIFIED`, both static values omitted
+|HDR10+ and Dolby Vision `ABSENT`, no value omitted
+
+|PQ AV1 in IVF, without static metadata
+|HDR10+ and Dolby Vision `UNSPECIFIED`, both static values omitted
+|HDR10+ and Dolby Vision `ABSENT`, no value omitted, so PQ10
+
+|Raw PQ H.264 with a mastering display, no light level, and a rejected SEI message
+|Light level omitted
+|Light level not omitted, HDR10+ and Dolby Vision `ABSENT`
+|===
++
+The recorded samples that carry HDR10+ or static metadata, in MPEG-TS and in raw HEVC files, kept those facts.
+* The probe reported these RPU placements in a local build of the worker image with the pinned FFmpeg 8.1.3, under the value names that the contract had at the time:
+** `AFTER_OWN_PICTURE` for a conforming raw profile 5 HEVC stream, for a 4-second Matroska excerpt of a profile 5 film, and for the profile 5 and profile 9 streams of the recorded MPEG-TS samples.
+** `BEFORE_NEXT_PICTURE` for the raw stream rewritten so that each RPU sat ahead of the next picture, and for the excerpt remuxed into MP4 and into Matroska so that each RPU started the next picture's sample.
+Today the contract names that value `STARTS_SAMPLE`.
+** `BEFORE_OWN_PICTURE` for a raw stream rewritten so that each RPU started its own picture's sample.
+Today the contract has no such value, and the probe reports that layout as `STARTS_SAMPLE`.
+On 2026-10-28, from the same recorded ffprobe output, the probe reported that stream as `STARTS_SAMPLE`, as it reports every stream whose packets with RPUs each start with their RPU.
+* On 2026-10-28, a local build of the worker image with the same FFmpeg 8.1.3 binary reported `STARTS_SAMPLE` for the profile 5 excerpt in the shifted and the own-first layouts, raw and in MP4, and `AFTER_OWN_PICTURE` for the excerpt in the conforming layout in MP4.
+* In a local build of the worker image with the same FFmpeg 8.1.3 binary, FFmpeg's MP4 and Matroska remuxes kept that own-picture layout in 100 of 100 samples.
+* On 2026-10-28, in a local build of the worker image with the same FFmpeg 8.1.3 binary, the raw rewrap of FATE's `mov/dovi-p5.mp4` was rewritten six times.
+Each variant followed every RPU with one kind of NAL unit that `ff_h2645_packet_split` drops: a `forbidden_zero_bit` of 1, a `nuh_temporal_id_plus1` of 0, a `nuh_layer_id` of 63, a NAL unit of 1 byte, an empty NAL unit, and a NAL unit whose bytes are all 0.
+FFmpeg's HEVC decoder attached all 10 RPUs to the frames of every variant.
+When a valid NAL unit of type 63 followed every RPU instead, it attached 0 of the 10.
+
+[[evidence-fate-sweep]]
+=== A sweep of FFmpeg's FATE samples
+
+These measurements ran on 2026-10-28 against a local build of the worker image with the same FFmpeg and ffprobe 8.1.3 binary as the pinned image.
+FATE is FFmpeg's automated test suite, and its samples are public test files.
+A separate script served as the oracle for each probe result.
+The oracle read the same packets with ffprobe, parsed their NAL units, SEI messages and OBUs itself, and read the side data of the decoded frames.
+The oracle counted a probe result as wrong in three cases.
+In the first case, the probe reported HDR10+, the observed RPU or Dolby Vision as `ABSENT`, and the oracle found that feature.
+In the second case, the probe reported a PQ10 stream, and the oracle found static metadata.
+In the third case, the probe's RPU placement disagreed with the oracle's reading of the packets.
+
+* The sweep ran the probe 508 times.
+** The sweep probed each of 472 FATE files once.
+Those files are the 383 H.264 and HEVC conformance streams, and 89 other samples whose first video stream is H.264, HEVC, AV1, VP9 or ProRes.
+The 89 samples include every FATE sample under 200 MB whose stream or first 30 frames carry HDR10+, HDR Vivid, a mastering display, a content light level or Dolby Vision metadata.
+** The sweep probed each of 28 rewraps once.
+The rewraps copied 10 of those samples, without a new encode, into raw streams, MP4, Matroska and MPEG-TS.
+** The sweep probed each of 8 crafted variants once.
+Six variants repeat a single-picture FATE sample, so that a read holds 3 frames: the HDR10+ sample and the HDR Vivid sample 6 times each, and a profile 7 sample 4 times, each as a raw stream and in Matroska.
+Two of those Matroska files held no media, and the probe failed both as invalid media.
+A later run rebuilt them, as the last bullet of this section describes.
+The other two variants start from the raw rewrap of the FATE profile 5 sample `mov/dovi-p5.mp4`.
+One variant changes the NAL unit header of each RPU to TemporalId 1, and the other changes it to layer 1.
+* The oracle counted no probe result as wrong.
+No feature read `ABSENT` where the oracle found that feature.
+No stream read as PQ10 where the oracle found static metadata.
+No RPU placement disagreed with the oracle.
+* 17 runs on FATE files and rewraps reported Dolby Vision `PRESENT` with an observed RPU.
+12 of those runs reported `AFTER_OWN_PICTURE`, as the oracle read their packets.
+The other 5 runs were the single-picture profile 7 samples in MP4 and Matroska and their rewraps.
+Their reads were cut short, and those runs reported `UNSPECIFIED`.
+The profile 7 variant that repeats the picture 4 times reported `AFTER_OWN_PICTURE`.
+* The sweep found one wrong fact that the oracle does not check.
+The probe reported the HDR10+ of the FATE VP9 sample in WebM as `UNSPECIFIED`, although FFmpeg's Matroska demuxer gives the frame the HDR10+ metadata of its BlockAdditional element.
+The probe ignored the frames of every codec family other than HEVC and AV1.
+Once the frames of every codec family counted, the probe reported that stream's HDR10+ as `PRESENT`.
+* Before the probe counted an HEVC NAL unit of type 62 as an RPU only on layer 0 with TemporalId 0, the probe reported both RPU header variants as Dolby Vision `PRESENT`.
+Each of those results held an observed RPU, the RPU header of profile 5 and a compatible base of `NONE`.
+FFmpeg attached no RPU to any frame of either variant.
+After the change, both variants report HDR10+ and Dolby Vision as `ABSENT`.
+Every other Dolby Vision sample, rewrap and variant kept its observed RPU and its RPU placement.
+* The contract accepts results that rule out less than the oracle's reading of the same packets.
+In each of the following runs, the probe reported HDR10+ or Dolby Vision as `UNSPECIFIED`, or marked a static metadata value as omitted.
+The counts come from the 500 runs on FATE files and rewraps before the two changes above, and neither change affects these runs.
+** 54 runs were cut short.
+In 50 of them, the stream held fewer packets than the kept read asked for, as the single-picture HDR10+ and HDR Vivid samples do.
+In the other 4, no read decoded more than 1 frame.
+** In 6 runs, no read decoded a frame, so the probe walked no packets and reported no frame feature as `ABSENT`.
+Five of those streams are conformance streams, and one of the five decoded no frame from 192 packets.
+The sixth stream is the single-picture HDR Vivid sample rewrapped into MP4.
+** 3 runs were of `h264/sei-1.h264`, raw and rewrapped into Matroska and MPEG-TS.
+The stream's mastering display SEI message holds a maximum luminance above 100,000,000, which FFmpeg drops, so the first frame carries only the primaries.
+The probe takes the first frame's incomplete value ahead of the SEI message, which holds every field.
+The probe therefore reported no mastering display and marked the mastering display as omitted.
+** In 1 run, an SEI NAL unit ended without its RBSP trailing bits, in `h264/brokensps.flv`.
+** In 3 runs, the walk could not delimit the packets.
+`h264/mixed-nal-coding.mp4` holds MP4 samples that also contain start codes.
+`h264/ref_10.avi` holds AVI extradata that is neither a configuration record nor Annex B.
+`h264/crew_cif.nal` is a raw H.264 stream whose first packet holds 2 bytes ahead of its first start code.
+** In 2 runs, the packets switched to another sample description and carried new extradata side data, in `h264/extradata-reload-multi-stsd.mov` and `hevc/extradata-reload-multi-stsd.mov`.
+* The FATE ProRes HDR10 sample in MXF reported HDR10+ and Dolby Vision as `UNSPECIFIED`, because its frames show neither and the probe walks no ProRes packets.
+The probe took the sample's static metadata from the container.
+* Later on 2026-10-28, after the walk began to skip the NAL units that FFmpeg's splitter drops and the probe began to report whether the first packets carry presentation times, the sweep ran 27 probes again.
+The oracle then skipped the same NAL units, and also checked the presentation-time fact against the packets that ffprobe printed.
+** The runs covered the 8 crafted variants, the Dolby Vision FATE samples in MP4, Matroska, MOV and MPEG-TS, and their rewraps into raw streams, Matroska, MP4 and MPEG-TS.
+The two Matroska variants that had held no media were rebuilt, and held 4 and 6 frames that carry the Dolby Vision and HDR side data.
+** The oracle counted no probe result as wrong, and every presentation-time fact matched the oracle's reading.
+** Every raw stream reported `false`, and every MP4, MOV, Matroska and MPEG-TS file reported `true`.
+** The two rebuilt Matroska variants reported what their raw streams reported: the profile 7 variant `AFTER_OWN_PICTURE` with an observed RPU, and the HDR Vivid variant HDR10+ and Dolby Vision `ABSENT`.
 
 [[evidence-stream-titles]]
 === Stream titles
@@ -1525,7 +1834,7 @@ Its 95 % intervals come from bootstrap resampling.
 * https://github.com/streamarr/streamarr-server/issues/418[Issue #418: Finish scans after the server records all required results]
 * https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499: Start extra quality levels and pick presets from measured encoder headroom]
 * https://github.com/streamarr/streamarr-server/issues/344[streamarr/streamarr-server#344: Backfill missing and outdated persisted outcomes], closed as not planned
-* https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394: The later probe version's facts, with its server and worker parts]
+* https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394: Probe version 5's facts, with its server and worker parts]
 * https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399: Playback capabilities epic]
 * https://github.com/streamarr/streamarr-server/issues/446[streamarr/streamarr-server#446: Refuse a video encode without a usable frame rate]
 * https://github.com/streamarr/streamarr-server/issues/501[streamarr/streamarr-server#501: Play HDR and 10-bit sources as SDR in every client]

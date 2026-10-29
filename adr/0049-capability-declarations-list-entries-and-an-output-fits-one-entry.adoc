@@ -116,6 +116,10 @@ Codec profiles, compatible bases, Dolby Vision profiles and source containers ar
 No value in those lists counts as below another value.
 A client that accepts both HEVC Main and HEVC Main 10 therefore lists both codec profiles.
 
+A client declares a maximum only when the player accepts every value at or below that maximum.
+A capability entry cannot exclude a smaller value, such as a picture size below a decoder's minimum.
+A client whose player refuses some smaller values declares a maximum only up to the point where the player accepts every value below.
+
 [[decision-unknown-values]]
 === The server decides for each property whether an unknown source value fits a capability entry
 
@@ -123,10 +127,10 @@ The probe leaves a source value empty when the probe cannot name that value.
 A codec profile that the contract does not name, such as HEVC 4:4:4, is also empty.
 The server applies the same rule for every client:
 
-* An unknown codec profile or bit depth fits no capability entry.
+* An unknown codec profile, bit depth or picture size fits no capability entry.
 The server encodes such a stream.
-* An unknown codec level, codec tier, picture size or frame rate fits a capability entry that accepts every known property of the stream.
-When the player then rejects the stream, the client reports a format error.
+* An unknown codec level or codec tier fits a capability entry only when that capability entry accepts the stream's known picture size and frame rate.
+* An unknown frame rate fits a capability entry that accepts every known property of the stream.
 * An `UNSPECIFIED` compatible base fits a capability entry that accepts `SDR`.
 ADR 0036 already copies a source with an `UNSPECIFIED` compatible base as SDR.
 
@@ -134,15 +138,26 @@ A client cannot change how an unknown value fits.
 
 *Why:* A codec profile decides whether a decoder can decode the stream at all.
 An unnamed codec profile is often a profile that consumer decoders refuse.
+ADR 0013 already refuses to copy a stream whose codec profile is `UNSPECIFIED`.
+A codec level mostly follows from the picture size and the frame rate, so the known picture size and frame rate bound the decoder's work.
+In Original, the client does not recover from a format error during an HLS copy (https://github.com/streamarr/streamarr-server/issues/401[streamarr/streamarr-server#401]).
+An unknown value that fits a capability entry can therefore end playback in Original.
+The rule lets an unknown value fit only where the server has no safer path.
 A stream with no usable frame rate cannot be encoded (https://github.com/streamarr/streamarr-server/issues/446[streamarr/streamarr-server#446]).
 A rule that made an unknown frame rate fit no capability entry would therefore leave that stream with no playback path.
 
-[[decision-containers]]
-=== Each capability entry names the source containers from which the player directly opens a stream that the capability entry accepts
+[[decision-delivery-paths]]
+=== Each capability entry names its delivery paths, and HLS and direct play are matched separately
 
-Each video capability entry and each audio capability entry lists the source containers from which the player directly opens a stream that the capability entry accepts.
-An empty list means that the capability entry applies only to HLS.
-A capability entry for HLS names no container, because every HLS media segment is fragmented MP4 (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]).
+Each video capability entry and each audio capability entry says whether the capability entry applies to HLS.
+Each capability entry also lists the source containers from which the player directly opens a stream that the capability entry accepts.
+A capability entry can apply to HLS alone, to direct play alone, or to both.
+HLS needs no container in the capability entry, because every HLS media segment is fragmented MP4 (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]).
+
+The server matches each output against the capability entries for the output's delivery path.
+An HLS output fits only a capability entry that applies to HLS.
+A capability entry that lists a source container but does not apply to HLS never admits an HLS output.
+For example, a player that plays TrueHD from an MP4 file but not from fragmented MP4 sends a TrueHD capability entry that lists MP4 and does not apply to HLS.
 
 A file's video stream is covered for direct play only when one video capability entry accepts the video stream and lists the file's source container.
 A file's selected audio is covered for direct play only when one audio capability entry accepts the selected audio and lists the file's source container.
@@ -158,15 +173,12 @@ The declaration describes the player and the display that the stream session use
 The server therefore learns of a display change at the next stream session.
 A limit that depends on the display mode goes into the capability entries, like every other limit that depends on another value.
 
-[[decision-default]]
-=== A client that sends no capability entries counts as sending one H.264 entry and one AAC entry
+[[decision-required]]
+=== Every stream session request carries a declaration with video and audio capability entries
 
-A client that sends no video capability entry counts as sending one video capability entry.
-That default video capability entry accepts H.264 High at 8 bits with an SDR compatible base.
-The default video capability entry sets no maximum codec level, picture size or frame rate.
-A client that sends no audio capability entry counts as sending one audio capability entry.
-That default audio capability entry accepts AAC with two channels.
-Neither default capability entry lists a source container.
+The API boundary rejects a request to start a stream session when the request carries no client capability declaration.
+The API boundary also rejects a declaration that holds no video capability entry or no audio capability entry.
+The server assumes no capability entry for a client.
 
 [[decision-dynamic-range]]
 === Declaring a compatible base declares neither Dolby Vision nor HDR10+
@@ -181,6 +193,11 @@ The server accepts a Dolby Vision output only through a capability entry that li
 That Dolby Vision profile's maximum Dolby Vision level must be at or above the output's Dolby Vision level.
 A player that plays only the PQ base of a profile 8.1 stream declares `PQ` and does not declare profile 8.1.
 The declaration has no value for Dolby Vision profile 7.
+
+Dolby Vision profiles 5 and 10.0 have a compatible base of `NONE` (ADR 0036).
+A capability entry accepts a profile 5 or profile 10.0 output through the output's Dolby Vision profile and Dolby Vision level alone.
+The output keeps its compatible base of `NONE`.
+The capability entry needs no compatible base for that output.
 
 A video capability entry declares HDR10+ only when the player applies HDR10+ information.
 The server accepts an HDR10+ output only through a capability entry that declares HDR10+.
@@ -202,6 +219,12 @@ The server therefore treats the Dolby Vision information of such a stream as und
 A client with a capability entry that accepts the stream's compatible base receives a copy with Dolby Vision stripped.
 Every other client receives an encode.
 Such a stream never plays directly.
+
+The copy with Dolby Vision stripped relies on the stream's signaled transfer.
+The profile is usually unknown because no read decodes a frame of the stream.
+A profile 5 stream without a configuration record that is tagged BT.709 then looks like an SDR stream.
+That copy plays teal, as ADR 0013 records for the same gap.
+An encode would not avoid the teal picture, because the probe could not decode a frame of the stream.
 
 [[decision-direct-play-issues]]
 === A property issue that rules out a copy also rules out direct play
@@ -241,9 +264,15 @@ That rejection costs a format attempt (ADR 0045 and https://github.com/streamarr
 The server needs no constraint solver.
 * A file with a property issue that rules out a copy never plays directly, even when the player could play the file.
 * A Dolby Vision stream whose profile is unknown loses Dolby Vision on every client, including a client that declares every Dolby Vision profile.
-* A stream whose codec profile the probe cannot name is always encoded, even for a player that could decode the stream.
-* A stream whose codec level or frame rate the probe cannot read can reach a player that rejects the stream.
-That rejection costs a format attempt.
+* A stream whose codec profile, bit depth or picture size the probe cannot read is always encoded, even for a player that could decode the stream.
+* A stream whose codec level, codec tier or frame rate the probe cannot read can reach a player that rejects the stream.
+In Auto, that rejection costs a format attempt.
+In Original, that rejection ends playback.
+* A record-less Dolby Vision profile 5 stream tagged BT.709, from which no read decodes a frame, still plays teal.
+* A player whose decoder refuses some smaller values loses the larger values that the player could play.
+A capability entry cannot express a gap below a maximum.
+* A client that sends no declaration cannot start a stream session.
+Every client must build a declaration before the client plays anything.
 
 == Rejected Alternatives
 
@@ -261,6 +290,14 @@ The server then could not decide until the client answered.
 That answer would add a round trip before playback starts, or would have to travel with the client's query for the media item.
 The candidate set would also grow with the variants of Auto, with format recovery and with direct play.
 Auto is the playback choice in which the player adapts quality to bandwidth across the variants.
+* A default capability entry for a client that sends no declaration would authorize outputs that nobody tested.
+A default H.264 entry with no maximums would send a 3840×2160 copy to a player that decodes only 1920×1080.
+A default H.264 entry with conservative maximums would still guess at a player that the server knows nothing about.
+* A capability entry that lists a source container and therefore also applies to HLS would treat direct play and HLS as one capability.
+A player can open a codec from an MP4 file and still fail on the same codec in fragmented MP4.
+* Ranges with minimums, alignment rules or lists of exact sizes would let a capability entry express a gap below a maximum.
+Each of those additions makes every capability entry larger.
+Streamarr has measured no player that needs one.
 * One list of source containers for the whole declaration would combine every container with every capability entry.
 Such a list would assume that the lists are independent, and ADR 0036 forbids that assumption.
 * Always encoding a Dolby Vision stream whose profile is unknown would cost worker time.

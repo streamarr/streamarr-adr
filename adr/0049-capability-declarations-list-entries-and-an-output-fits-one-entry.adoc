@@ -1,0 +1,284 @@
+= ADR 0049: A Client Capability Declaration Lists Capability Entries, and an Output Fits Only When One Capability Entry Accepts the Whole Output
+
+== Status
+
+Proposed
+
+This decision answers three questions that link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] left to https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395].
+The first question asks how a supported value for one property constrains the values of other properties.
+The second question asks which playback paths a Dolby Vision or HDR10+ source permits for a client that declares a compatible base but neither format.
+The third question asks whether a `MediaFileProbePropertyIssue` rules out direct play.
+ADR 0036 stays Accepted.
+
+== Context
+
+The server chooses each output from the client's client capability declaration (ADR 0036).
+A client capability declaration records the combinations of formats that the client's player and delivery path can accept.
+The server also chooses direct play from the client capability declaration (link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045]).
+Direct play means that the server sends the source file itself.
+During direct play, the player reads the source file with HTTP byte-range requests.
+The source container is the container of a media file as the probe found the media file, such as Matroska, MP4 or MPEG-TS.
+
+Before this decision, a client named its codecs as strings.
+A client named its video codecs in one list and its audio codecs in a second list.
+A client also sent one channel limit for every audio codec.
+Issue https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] replaces those strings with typed values.
+
+Typed values alone do not say which values combine.
+ADR 0036 forbids the server to assume that a client supports every combination of the values in separate lists.
+ADR 0036 allows that assumption only where the contract explicitly gives the lists that meaning.
+Real players have limits that depend on each other:
+
+* A decoder reports its codec profiles and levels as pairs.
+Android's `MediaCodecInfo` reports a maximum level for each codec profile.
+A decoder can reach a higher level in HEVC Main than in HEVC Main 10.
+* A decoder's maximum picture size depends on the frame rate.
+Android reports a decoder's performance points as triples of width, height and frame rate.
+A decoder that plays 3840×2160 at 30 fps and 1920×1080 at 120 fps does not necessarily play 3840×2160 at 120 fps.
+* A display's HDR formats can depend on the display mode.
+Since Android 14, each display mode reports its own HDR types.
+* Each Dolby Vision profile has its own maximum Dolby Vision level.
+The Dolby Vision level is separate from the codec's own level.
+* Whether a player opens a codec directly depends on the source container that holds the codec.
+
+The platform APIs answer one configuration at a time.
+A web client asks `MediaCapabilities.decodingInfo()` about one codec string, picture size, frame rate and transfer.
+An Apple client asks `AVURLAsset.isPlayableExtendedMIMEType` about one codec string.
+An Android client asks `VideoCapabilities.areSizeAndRateSupported` about one picture size and frame rate.
+No platform API lists every configuration that a device plays.
+A client therefore tests configurations and reports the configurations that pass.
+
+A copy is a stream copy, which passes the source video through unchanged.
+A `MediaFileProbePropertyIssue` is the server's judgment that a stream's probe facts conflict or break a container rule.
+Under ADR 0036, the server never copies a stream that has certain property issues.
+ADR 0036 deferred the question of whether those issues also rule out direct play.
+
+== Decision
+
+[[decision-entries]]
+=== A client capability declaration is a list of capability entries
+
+A client capability declaration holds a list of capability entries.
+A capability entry is one group of values and maximums that the player accepts together.
+A video capability entry names one codec family.
+An audio capability entry names one audio codec.
+
+A video capability entry lists the codec profiles and the dynamic-range features that the player accepts for the entry's codec family.
+A video capability entry also gives the maximum bit depth, the maximum picture width and height, and the maximum frame rate.
+An audio capability entry gives the maximum channel count that the player accepts for the entry's audio codec.
+A capability entry that a client sends gives every maximum.
+Issue #395 defines the fields and their spellings.
+
+Inside one capability entry, the player accepts every combination that takes one value from each list of that capability entry and stays within that capability entry's maximums.
+The contract of the client capability declaration gives the lists inside one capability entry this combining meaning explicitly, as ADR 0036 requires.
+No list combines with a list of another capability entry.
+
+[[decision-one-entry]]
+=== An output fits the declaration only when one capability entry accepts every property of the output
+
+The server accepts a video output for a client only when one video capability entry accepts every video property of that output.
+The server accepts an audio output for a client only when one audio capability entry accepts every audio property of that output.
+The server never takes one property from one capability entry and another property from a second capability entry.
+
+Capability entries may overlap.
+The server does not merge or rewrite capability entries.
+
+[[decision-several-entries]]
+=== A client sends several capability entries when its limits depend on each other
+
+A client whose limits depend on each other sends one capability entry for each combination of limits.
+For example, a client that plays HEVC Main 10 at 3840×2160 and 30 fps, and at 1920×1080 and 120 fps, sends two HEVC capability entries.
+The first capability entry allows 3840×2160 at 30 fps.
+The second capability entry allows 1920×1080 at 120 fps.
+The server then never chooses 3840×2160 at 120 fps for that client.
+
+[[decision-nested-limits]]
+=== A limit that belongs to one value sits inside that value
+
+Each codec profile in a video capability entry carries its own maximum codec level and its own maximum codec tier.
+HEVC and AV1 have a Main tier and a High tier.
+H.264 has no tier.
+Each Dolby Vision profile in a video capability entry carries its own maximum Dolby Vision level.
+A limit that applies to every value of a list stays on the capability entry.
+
+A capability entry numbers codec levels the way the probe numbers codec levels.
+The probe writes a codec level as the major level × 10 plus the minor level, for every codec family.
+HEVC level 5.1 is therefore 51, and AV1 level 5.1 is also 51.
+A capability entry never uses a level number on a scale that differs between codec families.
+
+[[decision-maximums]]
+=== A maximum accepts every value at or below the maximum
+
+A maximum accepts every value at or below the maximum.
+The maximums are the picture width, the picture height, the frame rate, the codec level, the codec tier, the Dolby Vision level, the bit depth and the channel count.
+The High tier is above the Main tier.
+Codec profiles, compatible bases, Dolby Vision profiles and source containers are lists of accepted values.
+No value in those lists counts as below another value.
+A client that accepts both HEVC Main and HEVC Main 10 therefore lists both codec profiles.
+
+[[decision-unknown-values]]
+=== The server decides for each property whether an unknown source value fits a capability entry
+
+The probe leaves a source value empty when the probe cannot name that value.
+A codec profile that the contract does not name, such as HEVC 4:4:4, is also empty.
+The server applies the same rule for every client:
+
+* An unknown codec profile or bit depth fits no capability entry.
+The server encodes such a stream.
+* An unknown codec level, codec tier, picture size or frame rate fits a capability entry that accepts every known property of the stream.
+When the player then rejects the stream, the client reports a format error.
+* An `UNSPECIFIED` compatible base fits a capability entry that accepts `SDR`.
+ADR 0036 already copies a source with an `UNSPECIFIED` compatible base as SDR.
+
+A client cannot change how an unknown value fits.
+
+*Why:* A codec profile decides whether a decoder can decode the stream at all.
+An unnamed codec profile is often a profile that consumer decoders refuse.
+A stream with no usable frame rate cannot be encoded (https://github.com/streamarr/streamarr-server/issues/446[streamarr/streamarr-server#446]).
+A rule that made an unknown frame rate fit no capability entry would therefore leave that stream with no playback path.
+
+[[decision-containers]]
+=== Each capability entry names the source containers from which the player directly opens a stream that the capability entry accepts
+
+Each video capability entry and each audio capability entry lists the source containers from which the player directly opens a stream that the capability entry accepts.
+An empty list means that the capability entry applies only to HLS.
+A capability entry for HLS names no container, because every HLS media segment is fragmented MP4 (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]).
+
+A file's video stream is covered for direct play only when one video capability entry accepts the video stream and lists the file's source container.
+A file's selected audio is covered for direct play only when one audio capability entry accepts the selected audio and lists the file's source container.
+ADR 0045 decides which other parts of the file the declaration must cover.
+
+The declaration has no list of source containers outside the capability entries.
+
+[[decision-display]]
+=== A client builds the declaration from its current player and display
+
+A client builds a fresh client capability declaration each time the client starts a stream session.
+The declaration describes the player and the display that the stream session uses.
+The server therefore learns of a display change at the next stream session.
+A limit that depends on the display mode goes into the capability entries, like every other limit that depends on another value.
+
+[[decision-default]]
+=== A client that sends no capability entries counts as sending one H.264 entry and one AAC entry
+
+A client that sends no video capability entry counts as sending one video capability entry.
+That default video capability entry accepts H.264 High at 8 bits with an SDR compatible base.
+The default video capability entry sets no maximum codec level, picture size or frame rate.
+A client that sends no audio capability entry counts as sending one audio capability entry.
+That default audio capability entry accepts AAC with two channels.
+Neither default capability entry lists a source container.
+
+[[decision-dynamic-range]]
+=== Declaring a compatible base declares neither Dolby Vision nor HDR10+
+
+A video capability entry lists the compatible bases that the player displays.
+A compatible base in a declaration is `SDR`, `PQ` or `HLG`.
+A declaration never lists `NONE` or `UNSPECIFIED`.
+
+A video capability entry lists a Dolby Vision profile only when the player applies that profile's RPUs.
+An RPU is a Dolby Vision reference processing unit.
+The server accepts a Dolby Vision output only through a capability entry that lists the output's Dolby Vision profile.
+That Dolby Vision profile's maximum Dolby Vision level must be at or above the output's Dolby Vision level.
+A player that plays only the PQ base of a profile 8.1 stream declares `PQ` and does not declare profile 8.1.
+The declaration has no value for Dolby Vision profile 7.
+
+A video capability entry declares HDR10+ only when the player applies HDR10+ information.
+The server accepts an HDR10+ output only through a capability entry that declares HDR10+.
+
+A client can accept a source's compatible base but not the source's Dolby Vision profile or HDR10+ information.
+The server then copies the source and strips the undeclared format.
+https://github.com/streamarr/streamarr-server/issues/396[Issue streamarr/streamarr-server#396] decides how the server strips each format during a copy.
+Issue #396 also amends ADR 0036 for those bitstream rewrites.
+ADR 0036 already decides that a copy keeps the RPUs of Dolby Vision profiles 8.2 and 9.
+A profile 8.2 or profile 9 copy keeps its RPUs under its base sample entry.
+Such a copy fits a capability entry that accepts the base codec and `SDR`.
+
+[[decision-unknown-profile]]
+=== A Dolby Vision stream whose profile is unknown plays without Dolby Vision
+
+A Dolby Vision stream's profile is unknown when the probe found Dolby Vision `PRESENT` but read neither a configuration record nor an RPU header.
+No capability entry can declare an unknown Dolby Vision profile.
+The server therefore treats the Dolby Vision information of such a stream as undeclared for every client.
+A client with a capability entry that accepts the stream's compatible base receives a copy with Dolby Vision stripped.
+Every other client receives an encode.
+Such a stream never plays directly.
+
+[[decision-direct-play-issues]]
+=== A property issue that rules out a copy also rules out direct play
+
+Every `MediaFileProbePropertyIssue` that rules out a copy also rules out direct play.
+Direct play sends the same bitstream that a copy passes through.
+A file with such an issue therefore plays over HLS as an encode, whatever the client declares.
+
+[[decision-playlist]]
+=== The playlist announces an HDR range only for an output that one capability entry accepts
+
+The playlist describes the planned output.
+The server plans a `PQ`, `HLG` or Dolby Vision output only for a client with a capability entry that accepts that output.
+A variant in the multivariant playlist therefore carries `VIDEO-RANGE=PQ`, `VIDEO-RANGE=HLG` or `SUPPLEMENTAL-CODECS` only for such a client.
+Issue #396 builds those attributes.
+
+[[explicitly-deferred]]
+=== Explicitly deferred
+
+* This ADR does not decide how a declaration names the subtitle formats that a player plays from inside a source file.
+https://github.com/streamarr/streamarr-server/issues/59[Issue streamarr/streamarr-server#59] decides that question for direct play.
+* This ADR does not decide whether each codec family has its own codec profile type in the schema.
+Issue #395 decides that contract question.
+* This ADR does not add dual-layer Dolby Vision playback.
+
+== Consequences
+
+* The server never chooses an output from known values that no single capability entry accepts.
+A client therefore never receives a combination of known values that the client did not declare.
+* A client turns the answers of its platform APIs into capability entries.
+Each client decides which configurations the client tests.
+* A client that declares too little loses copies and direct play that the client could have played.
+A client that declares too much can receive an output that the player rejects.
+That rejection costs a format attempt (ADR 0045 and https://github.com/streamarr/streamarr-server/issues/401[streamarr/streamarr-server#401]).
+* A declaration with several capability entries is larger than one list of codec names.
+* The server checks a planned output against each capability entry in turn.
+The server needs no constraint solver.
+* A file with a property issue that rules out a copy never plays directly, even when the player could play the file.
+* A Dolby Vision stream whose profile is unknown loses Dolby Vision on every client, including a client that declares every Dolby Vision profile.
+* A stream whose codec profile the probe cannot name is always encoded, even for a player that could decode the stream.
+* A stream whose codec level or frame rate the probe cannot read can reach a player that rejects the stream.
+That rejection costs a format attempt.
+
+== Rejected Alternatives
+
+* Independent lists across the whole declaration would imply combinations that the player cannot play.
+A client that plays H.264 at 1920×1080 and HEVC at 3840×2160 would imply H.264 at 3840×2160.
+* Condition strings in the style of DLNA device profiles let a typo change playback without an error.
+* Conditions that apply only when the source matches another condition cannot say "one combination or another combination".
+Such conditions also limit each property on its own, so the server cannot choose between two combinations of limits.
+* A flag on each limit that says whether an unknown source value fits would leave that choice to each client.
+Two clients with the same player could then treat the same file differently.
+* Capability entries of exact configurations, with no maximums, multiply the number of capability entries.
+A maximum already covers the smaller configurations that a player accepts.
+* The server could propose candidate outputs and ask the client to test each candidate.
+The server then could not decide until the client answered.
+That answer would add a round trip before playback starts, or would have to travel with the client's query for the media item.
+The candidate set would also grow with the variants of Auto, with format recovery and with direct play.
+Auto is the playback choice in which the player adapts quality to bandwidth across the variants.
+* One list of source containers for the whole declaration would combine every container with every capability entry.
+Such a list would assume that the lists are independent, and ADR 0036 forbids that assumption.
+* Always encoding a Dolby Vision stream whose profile is unknown would cost worker time.
+Until https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397] adds HDR encodes, that encode would also give an HDR client an SDR picture.
+* Offering direct play despite a property issue would rely on the format error after a failed start.
+The viewer would see the failed start first.
+
+== References
+
+* link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036: Video Contracts Share One Vocabulary and Preserve Dynamic-Range Facts]
+* link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045: In Original Quality, a Client Direct-Plays Each File Its Capability Declaration Covers, and Each Client Uses Its Platform's Own Player]
+* link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037: The Worker Delivers Fragmented MP4 Segments From FFmpeg's Standard Output, and HLS Media Segments Are fMP4 Only]
+* https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399] is the playback capabilities epic.
+* https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] adds typed client capability declarations.
+* https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396] completes the explicit video decision for HDR output.
+* https://github.com/streamarr/streamarr-server/issues/59[streamarr/streamarr-server#59] adds direct play.
+* https://developer.mozilla.org/en-US/docs/Web/API/MediaCapabilities/decodingInfo[MDN: MediaCapabilities.decodingInfo()]
+* https://developer.apple.com/documentation/avfoundation/avurlasset/isplayableextendedmimetype(_:)[Apple: AVURLAsset.isPlayableExtendedMIMEType]
+* https://developer.android.com/reference/android/media/MediaCodecInfo.CodecProfileLevel[Android: MediaCodecInfo.CodecProfileLevel]
+* https://developer.android.com/reference/android/media/MediaCodecInfo.VideoCapabilities#getSupportedPerformancePoints()[Android: VideoCapabilities.getSupportedPerformancePoints()]
+* https://developer.android.com/reference/android/view/Display.Mode#getSupportedHdrTypes()[Android: Display.Mode.getSupportedHdrTypes()]

@@ -153,8 +153,14 @@ _Avoid_: source metadata, input description
 
 **Client capability declaration**:
 The record of the combinations that a player and its delivery path can accept, including any display constraints.
+A client capability declaration lists capability entries.
 The server chooses an output from it, and playback can still fail.
 _Avoid_: device profile, client profile, capabilities list
+
+**Capability entry**:
+One group of values and maximums that the player accepts together for one video codec family or one audio codec.
+An output fits the declaration only when one capability entry accepts every property of the output.
+_Avoid_: codec profile (a profile of the coding standard), device profile, condition
 
 **Planned output**:
 The output that the server chooses from the source description, the client capability declaration, the verified worker capabilities and the user's playback choice.

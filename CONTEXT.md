@@ -93,19 +93,30 @@ The standard picture format that a player could use without the advanced HDR inf
 It is SDR, PQ, HLG, none, or unspecified, and it does not promise that a device can play the source bytes unchanged.
 _Avoid_: base layer (a Dolby Vision layer, not a picture format), HDR10 (PQ with static metadata, a narrower fact), fallback, SDR fallback
 
+**Codec family**:
+The video coding standard of a video stream, such as H.264, HEVC or AV1, without the stream's codec profile, level or codec string.
+The probe reads a video stream's codec family from the codec name that ffprobe reports for the stream.
+The server reads the same codec family from the codec name that the probe stored.
+In code, `ProbedCodecFamily` holds the codec family that the probe read: `H264`, `HEVC`, `AV1` or `OTHER`.
+`OTHER` covers every remaining codec family, such as VP9, because Streamarr has no rules for those codec families.
+An encode targets one codec family, which the worker contract carries as a `VideoCodecFamily` value.
+Every transcode job also carries the source's codec family as a `VideoCodecFamily` value.
+The job's source codec family is unspecified for an `OTHER` source.
+_Avoid_: codec (unqualified), video codec, format (a container format or an output format)
+
 **Codec profile**:
-The profile and level that a video codec such as H.264, HEVC or AV1 signals for a video stream.
+The profile and level that a video stream signals within the stream's codec family, such as H.264, HEVC or AV1.
 _Avoid_: profile (unqualified), Profile (the portable viewing identity in ADR 0024)
 
 **Codec string**:
 The RFC 6381 value that names one stream's codec with its codec profile, level and other parameters, such as `avc1.640028`.
 A variant's `CODECS` attribute lists the codec strings of the variant's streams.
-An encode's codec string follows from its forced codec, codec profile, level, tier and bit depth.
+An encode's codec string follows from the encode's codec family and from the codec profile, level, tier and bit depth that the encode forces.
 The probe computes the codec string of every video and audio stream.
 A stream copy uses the source stream's codec string, with the sample-entry tag that ADR 0013's tag rule picks for the copy.
 For example, a Dolby Vision copy carries its base layer's tag, so a `dvh1` source stream's copy is described as `hvc1`.
 Each codec string must match the produced initialization segment.
-_Avoid_: codec (the family name alone), codec tag (the sample-entry four-character code), CODECS string (the attribute can list several)
+_Avoid_: codec (the codec family alone), codec tag (the sample-entry four-character code), CODECS string (the attribute can list several)
 
 **Dolby Vision profile**:
 The profile, level and base-layer compatibility that the Dolby Vision configuration record declares for a video stream, kept separate from the codec profile.
@@ -311,7 +322,7 @@ One output format that the server chooses within a playback session. Each format
 _Avoid_: fallback stream, replacement (unqualified)
 
 **Encoder backend**:
-An encoder that a worker runs for a codec family, together with whether it is hardware or software. A worker can run a hardware and a software backend for the same codec family, so one codec's variants can come from two backends at once (ADR 0044). Every replacement attempt for a variant must use the backend of the job attempt that produced the variant's initialization segment (ADR 0037).
+An encoder that a worker runs for a codec family, together with whether it is hardware or software. A worker can run a hardware and a software backend for the same codec family, so the variants of one codec family can come from two backends at once (ADR 0044). Every replacement attempt for a variant must use the backend of the job attempt that produced the variant's initialization segment (ADR 0037).
 _Avoid_: encoder capability, codec
 
 **Completed attempt**:

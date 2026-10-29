@@ -21,6 +21,7 @@ For H.264 and HEVC, probe version 5 also reads the NAL units and the SEI message
 For AV1, probe version 5 reads the metadata OBUs of those packets for the same reason.
 Probe version 5 also reports where the samples place each Dolby Vision RPU, so that the worker can move the RPUs that FFmpeg's HEVC decoder would ignore (ADR 0013).
 The second amendment also lists the signaled transfers that give each compatible base, and the server rejects a probe result whose compatible base does not follow that list.
+The worker also refuses a job that names a compatible base of `NONE` without Dolby Vision present.
 The second amendment also decides where `MediaFileProbePropertyIssue` lives and which playback paths each issue rules out (<<decision-property-issues>>).
 The server derives each issue from the stored probe facts and stores no issue.
 The second amendment also decides that the server never copies a Dolby Vision stream whose compatibility identifier disagrees with its signaled transfer.
@@ -193,9 +194,16 @@ From probe version 5 on, the `compatibleBase` of a Dolby Vision profile 5 or pro
 When the Dolby Vision compatibility identifier disagrees with the signaled transfer, the signaled transfer wins.
 The server then derives a `MediaFileProbePropertyIssue` that names both claims (<<decision-property-issues>>).
 The server checks the compatible base of every probe version 5 result that it receives against these rules.
-A probe version 4 result carries no typed transfer, so the server keeps reading its compatible base as stored.
+A probe version 4 result carries no typed transfer.
+The server still rejects a version 4 compatible base of `NONE` when Dolby Vision is not present.
+When a stored result holds that combination, the server treats the file as having no result and requests a new probe.
+It never rewrites the stored value (https://github.com/streamarr/streamarr-server/pull/661[streamarr/streamarr-server#661]).
 A result whose compatible base differs from the one that its signaled transfer and its Dolby Vision facts give breaks the worker contract.
 The server counts that result as a contract violation, as link:0032-media-file-probe-results-are-persisted.adoc#probe-contract-violations[ADR 0032] decides, and stores none of its facts.
+The worker refuses a job whose source or output dynamic range has a compatible base of `NONE` without Dolby Vision present.
+It reports `JOB_ATTEMPT_FAILURE_INVALID_SPECIFICATION` before any FFmpeg starts (https://github.com/streamarr/streamarr-transcode-worker/pull/111[streamarr/streamarr-transcode-worker#111]).
+The contract defines `NONE` only for a stream with Dolby Vision present, or a profile 5 or profile 10.0 stream.
+A job that names `NONE` without Dolby Vision contradicts itself, and running it would tone-map on a guess.
 The `compatibleBase` value does not guarantee that a device can play the source bytes unchanged.
 The worker may need to transform the source before the player can use the compatible base.
 The server must explicitly choose that change, and the worker must support the change.
@@ -956,6 +964,8 @@ A file whose end was also cut away ends with a picture in both layouts, and the 
 The server could then copy a profile 8.2 or 9 file whose last sample holds an RPU and no picture, and copies of that layout failed at the end of the stream in Chromium and Firefox (ADR 0013).
 `UNSPECIFIED` would also have meant both that the probe could not tell and that it saw every RPU start its sample.
 * Leaving Annex B extradata and bare-OBU extradata unread, as an earlier draft of this amendment did: no PQ stream in MPEG-TS, in a raw HEVC file, in IVF or in a raw OBU file could then be PQ10, and none could report HDR10+ or Dolby Vision as `ABSENT`.
+* Running a job whose compatible base is `NONE` without Dolby Vision present: `NONE` turns tone mapping on, so the worker would tone-map on a contradiction.
+* Rewriting such a compatible base to `UNSPECIFIED`, in the worker or in a stored result: the rewrite guesses that the compatible base is the wrong field, when the Dolby Vision facts could be wrong instead.
 * Accepting `SDR` or `UNSPECIFIED` for every transfer that names neither PQ nor HLG: a Dolby Vision stream with a linear or logarithmic transfer could then be stored with an `SDR` base and copied.
 * Taking a Matroska track that the probe cannot read as holding no static metadata: FFmpeg drops an incomplete MasteringMetadata element, so the stream could read as PQ10 while it carries HDR10 metadata.
 * Reading a track entry as FFmpeg's partial parse reads it: FFmpeg's parse of a master element stops at the first value that it cannot hold and keeps the values ahead of it.

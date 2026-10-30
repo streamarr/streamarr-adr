@@ -364,7 +364,7 @@ A planned restart of the requested variant's job at the media segment that a pla
 _Avoid_: seek (the player's action), restart (unqualified), recovery
 
 **Format attempt**:
-One output format that the server chooses within a playback session. Each format attempt has its own stream session. An HLS format attempt also has its own initialization segment. The initial format is the first attempt. Each Auto recovery after a format error counts as one format attempt against the playback session's format-attempt budget. In Original, the HLS format attempt that follows a format error on a direct-played file also counts against that budget (ADR 0045). So does the encode that follows a format error during an HLS copy in Original, after which the playback choice is Auto (ADR 0052).
+One output format that the server chooses within a playback session. Each format attempt has its own stream session. An HLS format attempt also has its own initialization segment. The initial format is the first attempt. Each Auto recovery after a format error counts as one format attempt against the playback session's format-attempt budget. In Original, the HLS format attempt that follows a format error on a direct-played file also counts against that budget (ADR 0045). The encode that follows a format error during an HLS copy in Original also counts against that budget, and the playback choice is then Auto (ADR 0052).
 _Avoid_: fallback stream, replacement (unqualified)
 
 **Encoder backend**:

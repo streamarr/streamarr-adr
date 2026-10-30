@@ -349,7 +349,7 @@ One output format that the server chooses within a playback session. Each format
 _Avoid_: fallback stream, replacement (unqualified)
 
 **Encoder backend**:
-An encoder that a worker runs for a codec family, together with whether it is hardware or software. A worker can run a hardware and a software backend for the same codec family, so the variants of one codec family can come from two backends at once (ADR 0044). Every replacement attempt for a variant must use the backend of the job attempt that produced the variant's initialization segment (ADR 0037).
+An encoder that a worker runs for a codec family, together with whether it is hardware or software. A worker can run a hardware and a software backend for the same codec family, so the variants of one codec family can come from two backends at once (ADR 0044). When a connected worker has a hardware backend for the chosen codec family, the server dispatches each variant to a worker with that hardware backend first, and to a software backend only when no such worker has a free playback slot (ADR 0009). Every replacement attempt for a variant must use the backend of the job attempt that produced the variant's initialization segment (ADR 0037).
 _Avoid_: encoder capability, codec
 
 **Completed attempt**:

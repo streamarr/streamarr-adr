@@ -26,7 +26,7 @@ None at present.
 - [ADR 0006: TMDB Metadata Provider Abstraction](adr/0006-tmdb-metadata-abstraction.adoc)
 - [ADR 0007: Transcode-First With Smart Remux](adr/0007-transcode-first-with-smart-remux.adoc)
 - [ADR 0008: Server-Generated HLS Playlists](adr/0008-server-generated-hls-playlists.adoc)
-- [ADR 0009: Encodes Put AV1 First Only When a Worker Encodes AV1 in Hardware, and Otherwise Use the First of HEVC, H.264 and AV1 That the Client Declares](adr/0009-h264-plus-av1-codec-strategy.adoc)
+- [ADR 0009: Encodes Prefer Hardware AV1 and HEVC, Then H.264, Then Software AV1 and HEVC](adr/0009-h264-plus-av1-codec-strategy.adoc)
 - [ADR 0010: Spring Application Events for Service Decoupling](adr/0010-spring-application-events.adoc)
 - [ADR 0011: Remove MapStruct](adr/0011-remove-mapstruct.adoc) — superseded by ADR 0040
 - [ADR 0012: Filepath URI Encoding](adr/0012-filepath-uri-encoding.adoc)

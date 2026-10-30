@@ -1,0 +1,337 @@
+= ADR 0050: Outside Original, the Viewer's Limits Bind Copies as Well as Encodes, and Each Quality Tier Is a Picture Box in Either Orientation
+
+== Status
+
+Proposed
+
+link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049] decides whether a capability entry accepts an output.
+This decision covers the other bound on an output: the viewer's playback choice and the viewer's limits.
+It decides the questions that a review of https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] raised.
+The review compared the server's rules with Jellyfin, Swiftfin, jellyfin-web and Plezy.
+
+== Context
+
+The viewer picks a playback choice when a stream session starts.
+Original is the playback choice that plays the source at its own quality (link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045]).
+Auto is the playback choice in which the player adapts quality to bandwidth across the variants.
+A fixed quality is a playback choice that names one quality, such as 720p, and keeps it (link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036]).
+
+A variant is one option of the quality ladder that the multivariant playlist lists (link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044]).
+A copy is a stream copy, which passes the source video through unchanged.
+An encode is a variant that the worker encodes.
+Auto's encoded ladder offers one variant for each quality tier that applies, such as 720p or 1080p.
+
+A client can send three limits when it starts a stream session: a maximum picture width, a maximum picture height and a maximum bitrate.
+A client sends them, for example, to fit a small window or a slow connection.
+
+Before this decision, the server applied these rules:
+
+* The viewer's limits bounded encodes only.
+When the client's capability entries accepted the source, the server copied the source even when the source was larger than the viewer's limits.
+* The ADRs did not say whether the viewer's limits bound an encode in Original.
+* The quality ladder keyed each tier on picture height.
+A 1920×800 film therefore lost its 1080p tier, because the film is only 800 lines tall.
+Its top variant was a 720p tier at 1728×720.
+* A 1080×1920 portrait video received a 1080p tier at 608×1080.
+* Auto offered no tier above 1080p, even for a 4K source on a 4K display.
+* Each tier had one nominal bitrate for every codec family.
+* The ladder labelled a tier's variant by its tier, even when a capability entry had shrunk the picture well below the tier's box.
+* The server compared the maximum bitrate with a variant's video bitrate alone.
+The audio that the player downloads beside the video was not counted.
+* A fixed quality ignored its own resolution.
+A fixed 480p on a 4K source produced a 4K encode, limited only by the client's capability entries.
+* A fixed quality encoded at the source's bitrate, not at its tier's bitrate.
+
+link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043] makes audio one HLS rendition that every variant shares.
+A rendition is an alternate HLS track, such as one audio language.
+
+== Decision
+
+[[decision-terms]]
+=== The viewer's limits are the fixed quality's picture box and the limits the client sends
+
+The viewer's limits are the limits that bound a stream session's output apart from the client capability declaration.
+They are:
+
+* the picture box of the fixed quality that the viewer picked, if any (<<decision-fixed-quality>>);
+* the maximum picture width that the client sends;
+* the maximum picture height that the client sends;
+* the maximum bitrate that the client sends.
+
+A picture box is a width and a height that bound a picture in either orientation.
+A picture fits a picture box when its longer side is at or below the box's longer side and its shorter side is at or below the box's shorter side.
+ADR 0049 bounds a capability entry's picture size the same way.
+
+The maximum picture width and the maximum picture height apply as the client gives them.
+The width limit bounds the picture's width, and the height limit bounds its height.
+They are not turned for a portrait picture.
+
+*Why:* A capability entry describes a decoder, and a decoder's work does not depend on orientation.
+A client sends its width and height limits for a window or a screen, which has an orientation.
+A client that wants one limit for both orientations sends the same value for both.
+
+[[decision-copies]]
+=== Outside Original, the server copies the video only when the source fits the viewer's limits
+
+In Auto and in a fixed quality, the server chooses a video copy only when the source fits every one of the viewer's limits.
+The source fits the fixed quality's picture box in either orientation.
+The source's width is at or below the maximum width, and its height is at or below the maximum height.
+The source's container bitrate is at or below the maximum bitrate.
+The container bitrate is the bitrate that the probe reports for the whole source file.
+It counts the source's video and audio together.
+
+When the source exceeds any of the viewer's limits, the server encodes the video instead.
+The encode follows the viewer's limits and one capability entry, as every encode does.
+
+In Original, a copy ignores the viewer's limits.
+The server still copies a source that exceeds them.
+
+When Original must encode, the encode follows the viewer's limits, as an encode in Auto does.
+Original must encode when no capability entry accepts a copy of the source.
+The maximum width and the maximum height bound the encode as the client gives them.
+The maximum bitrate, less the audio bitrate, bounds the encode's video (<<decision-bitrate>>).
+Original has no fixed quality, so no picture box bounds its encode.
+
+A source that the server cannot encode still copies when a capability entry accepts the copy.
+It copies even when it exceeds the viewer's limits.
+A source cannot be encoded when it has no usable output frame rate (https://github.com/streamarr/streamarr-server/issues/446[streamarr/streamarr-server#446]).
+This rule holds in Auto and in a fixed quality.
+
+A source whose container bitrate is unknown passes the bitrate check.
+Its picture size still has to fit the viewer's other limits.
+
+*Why:* A viewer sets a limit to get a smaller or cheaper stream.
+A copy that ignores the limit gives the viewer the stream they asked to avoid.
+Original promises the source's own quality, and the server never silently replaces a manual choice (link:0013-stream-decision-architecture.adoc[ADR 0013]).
+A viewer who wants their limits honored picks Auto or a fixed quality.
+An encode in Original already gives up the source's own quality.
+Nothing that Original promises is then left to protect, so the encode honors the limits as Auto does.
+A stream over the viewer's limits is better than no stream at all.
+Refusing a copy for an unknown bitrate would encode many files that the client plays as they are.
+Jellyfin refuses to copy a video whose bitrate it does not know.
+An open Jellyfin issue reports that refusal as a bug for Ultra HD Blu-ray folders (https://github.com/jellyfin/jellyfin/issues/18443[jellyfin/jellyfin#18443]).
+
+[[decision-tiers]]
+=== Each quality tier is a 16:9 picture box in either orientation
+
+A quality tier is a named picture box that the quality ladder offers.
+The quality tiers and their boxes are:
+
+[cols="1,1"]
+|===
+|Quality tier |Picture box
+
+|360p |640×360
+|480p |854×480
+|720p |1280×720
+|1080p |1920×1080
+|1440p |2560×1440
+|2160p |3840×2160
+|===
+
+A tier's variant is the source scaled to fit the tier's box, keeping the source's aspect ratio.
+The server never upscales a tier's variant.
+The server offers a tier only when the source is larger than the next smaller tier's box.
+A source is larger than a box when the source does not fit the box.
+A 1920×800 film therefore gets a 1080p tier at 1920×800, because the film does not fit the 720p box.
+The film gets no 1440p tier, because it fits the 1080p box.
+A 1080×1920 portrait video gets a 1080p tier at 1080×1920.
+
+A tier never crops, pads or stretches the source.
+A scope film, about 2.4:1, takes its tier box's full width at a shorter height.
+The widest tier box is 2160p's, at 3840 wide.
+An encode of a source wider than 3840 is therefore 3840 wide.
+A copy keeps the source's size.
+A future client with an ultrawide screen would get a wider encode from a wider tier box.
+
+Auto offers the 1440p and 2160p tiers when the source, the viewer's limits and one capability entry allow them.
+ADR 0044 still decides when each offered variant starts.
+
+A capability entry can shrink a tier's variant into a smaller tier's box (ADR 0049).
+That tier then gives way to the smaller tier, and the ladder does not offer it.
+When two variants would take the same label (<<decision-labels>>), the ladder keeps the variant that reaches its own tier's box.
+It drops the higher tier's shrunken variant.
+
+Each tier has a nominal video bitrate for each codec family.
+This decision sets them for AV1 and H.264.
+From 360p to 1080p, both codec families keep the tier's existing bitrate.
+At 1440p and 2160p, the AV1 bitrates follow the HEVC ladder in item 1.25 of Apple's HLS Authoring Specification.
+H.264 needs more bitrate than AV1 for the same picture quality.
+Its 1440p and 2160p bitrates are therefore higher than AV1's.
+This ADR names no bitrate values.
+The server's tier definitions hold them.
+
+*Why:* A tier keyed on height shrinks a widescreen film below the size its name promises.
+Widescreen films are a large share of a film library.
+A future desktop app for a home theater must show a scope film as it is.
+Cropping, padding or stretching would change the picture that the film's makers chose.
+A tier keyed on height also makes a portrait video's tier far narrower than its box.
+A box bounds both sides, so a 4:3 source never exceeds the tier's height and a wide source keeps the tier's width.
+A 4K display in Auto should receive a 4K encode when the source and the client allow it.
+AV1 compresses at least as well as HEVC, so Apple's HEVC rows suit AV1.
+Apple's H.264 ladder stops at 1080p and gives no value for the larger tiers.
+The lower tiers keep their bitrates, so this decision changes no existing variant's bitrate.
+
+[[decision-labels]]
+=== A variant takes its tier's label only when its picture reaches the tier's box
+
+A picture reaches a box when it is as large as fits.
+It fits the box in either orientation, and the worker's next larger picture of the same source would not fit.
+The worker gives every encoded picture an even width and an even height, so its next larger picture is two lines taller.
+A picture that reaches its box can therefore fall a few pixels short of the box's side.
+A variant whose picture reaches its tier's box takes the tier's label, such as 360p or 1080p.
+Otherwise the server labels the variant by its shorter side followed by "p".
+
+* A 1920×800 variant reaches the 1080p box, so its label is 1080p.
+* A 1276×532 variant of a 2.4:1 film reaches the 720p box, so its label is 720p.
+Its next larger picture is too wide for the box.
+* A 360×640 portrait variant reaches the 360p box turned, so its label is 360p.
+* A 1080p tier that a capability entry shrinks to 1600×900 does not reach the 1080p box, so its label is 900p.
+* A 320×180 variant has the label 180p, and a 498×280 variant has the label 280p.
+
+Labels name the variants of Auto's ladder only.
+The rule applies to each of them, with or without a tier.
+A variant without a tier takes the label of a tier whose box it reaches.
+That includes Auto's single variant that the viewer's limits and a capability entry bound.
+A source smaller than the 360p box therefore gets one variant in Auto, labelled by its shorter side.
+
+A fixed quality's encode and an encode in Original are a ladder of one variant.
+That variant takes no label, and its media playlist keeps the path named "default".
+
+*Why:* Players show a variant's label to the viewer.
+A label should tell the viewer the size that they get.
+A widescreen film at 1920×800 has a 1080p film's full width, and viewers know it as 1080p.
+Even sides keep a 2.4:1 film at 720p to 1276×532, but no larger picture of it fits the box.
+A 1600×900 picture could grow and still fit the 1080p box, so calling it 1080p claims more than it holds.
+A ladder of one variant offers the player no choice.
+The viewer already picked the quality, so a label would tell them nothing.
+
+[[decision-bitrate]]
+=== The maximum bitrate bounds video plus audio
+
+A variant costs its video bitrate plus the stream session's audio bitrate.
+The audio bitrate is the audio decision's bitrate.
+For a copied audio track, it is the track's bitrate.
+For an encoded audio track, it is the encode's bitrate.
+Every variant shares the same audio rendition (ADR 0043), so every variant adds the same audio bitrate.
+
+The server offers a tier only when the tier's video bitrate for the chosen codec family plus the audio bitrate is at or below the maximum bitrate.
+
+A variant without a tier is the single variant that Auto offers when no tier fits.
+A fixed quality and an encode in Original also have a single variant.
+For each of these variants, the video bitrate is at most the maximum bitrate minus the audio bitrate.
+When that remainder is below the 360p tier's video bitrate, the server also bounds the picture to the 360p box.
+The video then gets the 360p tier's video bitrate, capped by the maximum bitrate.
+When the probe knows the source's bitrate, the source's bitrate caps the video too.
+The video bitrate is never zero or negative.
+
+*Why:* The player downloads the audio rendition beside every variant.
+A variant whose video alone fills the maximum bitrate exceeds the viewer's limit by the audio.
+A copied surround track can take a large share of a low maximum bitrate.
+An encoder treats a zero bitrate as no bitrate limit at all, so a zero or negative remainder would produce the largest stream instead of the smallest.
+An encode never needs more bitrate than the source holds, so the server never asks for more.
+
+[[decision-fixed-quality]]
+=== Each fixed quality has the picture box of its tier
+
+Each fixed quality names one quality tier, and that tier's box is the fixed quality's picture box:
+
+* the 360p fixed quality has the 360p box;
+* the 480p fixed quality has the 480p box;
+* the 720p fixed quality has the 720p box;
+* the 1080p fixed quality has the 1080p box;
+* the 4K fixed quality has the 2160p box.
+
+A fixed quality's single variant is bounded by its picture box, the viewer's other limits and one capability entry.
+The server never upscales a fixed quality's variant.
+A fixed 720p on a 480p source therefore plays the source at 480p.
+
+A fixed quality's bitrate follows the picture that the worker encodes.
+The variant encodes at the nominal bitrate, for the chosen codec family, of the smallest tier whose box holds the encoded picture in either orientation.
+A fixed 4K on a 1080p source therefore encodes at the 1080p tier's bitrate.
+Two values cap that bitrate: the source's bitrate, when the probe knows it, and the maximum bitrate less the audio bitrate (<<decision-bitrate>>).
+When the probe does not know the source's bitrate, the variant takes that tier's nominal bitrate within the maximum bitrate less the audio bitrate.
+
+*Why:* A viewer picks a fixed quality to get that quality.
+A fixed quality that ignores its resolution gives the viewer a 4K encode when they asked for 480p.
+The same boxes as the tiers make a fixed quality's variant match the variant that Auto offers for that tier.
+A tier's bitrate suits a picture of that tier's size.
+A fixed quality above the source's size, or one that a capability entry shrinks, encodes a smaller picture than its name says.
+The bitrate of the tier that holds that picture suits it.
+The source's bitrate suits the source's picture, which can be far larger.
+
+[[explicitly-deferred]]
+=== Explicitly deferred
+
+* This ADR does not decide whether Auto offers lower variants beside a copy.
+When the source fits the viewer's limits and the server copies it in Auto, Auto's ladder stays as it is today.
+https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399] keeps that question open.
+
+== Consequences
+
+* A source that exceeds the viewer's limits is encoded in Auto and in a fixed quality, even when the client could copy it.
+That encode costs worker capacity and some picture quality.
+* A viewer in Original receives a copy of the source even when the source exceeds their limits.
+The stream can then buffer on a slow connection.
+* In Original, the viewer's limits apply to an encode but not to a copy.
+Whether a limit holds in Original therefore depends on whether a capability entry accepts the copy.
+* A source that cannot be encoded can play over the viewer's limits in Auto and in a fixed quality.
+* A copy of a source whose container bitrate is unknown can exceed the viewer's maximum bitrate.
+* The server learns of a turned window or screen at the next stream session.
+ADR 0049 decides the same for a display change.
+* Widescreen films and portrait videos keep the full width or height of their tier.
+Their variants carry more pixels than before at the same tier bitrate.
+* Auto's 1440p and 2160p tiers cost more encoding load than a 1080p tier.
+ADR 0044's headroom decides when they start.
+* Each tier carries a bitrate for each codec family.
+A codec family that the server starts to encode needs its own bitrate for every tier.
+* Players show labels outside the tier names, such as 900p or 280p, for pictures smaller than their tier's box.
+* A picture a few pixels short of its tier's box still takes the tier's label.
+* When a capability entry shrinks a higher tier to a lower tier's label, Auto offers one fewer variant.
+* When the audio bitrate leaves less than the 360p tier's video bitrate, the stream can exceed the viewer's maximum bitrate.
+The video then plays at a fixed small size rather than not at all.
+* A fixed quality above the source's size plays the source's size, not the size that its name suggests.
+It encodes at the bitrate of the tier that holds that size.
+* A source wider than 3840 is encoded at 3840 wide, even on a screen that could show more.
+* Players show no label for a fixed quality's encode or an encode in Original.
+* A fixed quality on a source whose bitrate is below the tier's bitrate plays at the source's bitrate.
+
+== Rejected Alternatives
+
+* Applying the viewer's limits to encodes only would let a copy exceed every limit the viewer set.
+* Applying the viewer's limits to a copy in Original would break Original's promise of the source's own quality.
+* Letting an encode in Original ignore the viewer's limits would keep no promise of Original, because the encode already changes the source.
+It would only give the viewer a larger stream than they asked for.
+* Refusing to copy a source that cannot be encoded when it exceeds the viewer's limits would leave the viewer with nothing to play.
+* Refusing a copy when the source's bitrate is unknown would encode files that the client plays as they are.
+An open Jellyfin issue reports that behavior as a bug.
+* Turning the client's width and height limits for a portrait picture would ignore the orientation of the window or screen that the limits describe.
+* Tiers keyed on height shrink widescreen films and narrow portrait videos.
+* Tiers keyed on width would let a 4:3 or portrait source grow taller than its tier's name suggests.
+* Keeping Auto at 1080p would hold a 4K display below the quality that the source and the client allow.
+* One nominal bitrate per tier for every codec family would starve H.264 or waste bitrate on AV1 at 1440p and 2160p.
+* Labelling every variant by its tier would call a 1600×900 or 320×180 picture by a size that it does not have.
+* Labelling every variant by its shorter side would call a 1920×800 film 800p, although it has a 1080p film's full width.
+* Requiring one side to equal the box's side would call a 1276×532 scope film 532p.
+Even sides keep that film a few pixels short of the 720p box, although no larger picture of it fits.
+* Cropping, padding or stretching a source to fill its tier's 16:9 box would change the picture that a home theater should show as it is.
+* Labelling a fixed quality's or Original's single variant would name a choice that the player cannot make.
+* Keeping both variants when a shrunken higher tier takes a lower tier's label would show the viewer two choices with one name.
+* Comparing the maximum bitrate with the video bitrate alone would let every variant exceed the viewer's limit by the audio.
+* Letting the remaining video bitrate reach zero or below would give the encoder no bitrate limit.
+* A fixed quality that only labels the variant would give the viewer a different size than they picked.
+* Encoding a fixed quality at the source's bitrate would spend a 4K source's bitrate on a 480p picture.
+* Encoding a fixed quality at its named tier's bitrate would spend the 2160p bitrate on a fixed 4K's 1080p picture of a 1080p source.
+* Leaving the 360p fallback uncapped by the source's bitrate would ask the encoder for more bitrate than the source holds.
+
+== References
+
+* link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049: A Client Capability Declaration Lists Capability Entries, and an Output Fits Only When One Capability Entry Accepts the Whole Output]
+* link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044: Encoder Headroom, Measured in Pixel Rate, Decides When Extra Variants Start, and One Preset Scale Serves Every Software Encoder]
+* link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043: Audio Tracks and Text Subtitles Are HLS Renditions, so Switching Them Never Restarts the Video]
+* link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045: In Original Quality, a Client Direct-Plays Each File Its Capability Declaration Covers, and Each Client Uses Its Platform's Own Player]
+* https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399] is the playback capabilities epic.
+* https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] adds typed client capability declarations.
+* https://github.com/streamarr/streamarr-server/issues/446[streamarr/streamarr-server#446] refuses a video encode without a usable frame rate.
+* https://developer.apple.com/documentation/http-live-streaming/hls-authoring-specification-for-apple-devices[Apple: HLS Authoring Specification for Apple Devices]
+* https://github.com/jellyfin/jellyfin/issues/18443[jellyfin/jellyfin#18443] reports Jellyfin's refusal to copy a video with no known bitrate.

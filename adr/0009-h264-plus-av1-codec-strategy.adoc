@@ -1,4 +1,4 @@
-= ADR 0009: Encodes Use the First of AV1, HEVC and H.264 That the Client Declares
+= ADR 0009: Encodes Prefer Hardware AV1 and HEVC, Then H.264, Then Software AV1 and HEVC
 
 == Status
 
@@ -12,6 +12,11 @@ That change still stands.
 link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] and ADR 0037 left the codec-preference clause to the playback capabilities epic, https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399].
 This amendment settles that clause.
 https://github.com/streamarr/streamarr-server/issues/58[streamarr/streamarr-server#58] implements this amendment.
+
+A second amendment puts the codec families that a connected worker encodes in hardware first, then H.264, then HEVC and AV1 in software (<<decision-hardware-first>>).
+It also sends each variant to a worker with the hardware encoder first (<<decision-dispatch>>).
+Before the second amendment, the codec preference was `[av1, hevc, h264]` on every worker.
+https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] implements the second amendment.
 
 == Context
 
@@ -51,13 +56,14 @@ WebKit's `canPlayType` reports `hev1` as unsupported.
 
 == Decision
 
-=== Encodes use the first of AV1, HEVC and H.264 that the client declares
+=== Encodes use the first codec in the codec preference that the client declares
 
 The server chooses an output codec only when it does not copy the video.
 ADR 0013's video decision decides what the server copies.
 Until the playlist can describe HDR copies (https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396]), ADR 0013's interim copy rule decides what the server copies.
 
-When the server encodes, it uses the first codec in `[av1, hevc, h264]` that the client declares.
+When the server encodes, it uses the first codec in the codec preference that the client declares.
+The codec preference puts the codec families that a connected worker encodes in hardware first, then H.264, then HEVC and AV1 in software (<<decision-hardware-first>>).
 A client that declares no codec receives H.264, as it does today.
 The server reads the declared codecs from the typed client capability declaration that https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] defines.
 The codec preference never reads the codec-name strings that clients send today.
@@ -77,10 +83,54 @@ Auto is the playback choice in which the player adapts quality across the varian
 In Auto, the server may also choose another format after a format error.
 https://github.com/streamarr/streamarr-server/issues/401[streamarr/streamarr-server#401] owns that order.
 
-*Why:* the order ranks codecs by how well they compress.
-AV1 stays first, as the first version decided.
+*Why:* the order ranks codecs by how well they compress, among the codecs that a worker can encode in real time.
 The Apple TV app declares HEVC and does not declare AV1.
 If the list left out HEVC, every encode for the Apple TV app would be H.264.
+
+[[decision-hardware-first]]
+=== Codec families that a worker encodes in hardware come first
+
+The codec preference ranks codec families in three groups.
+
+. First come the codec families that a connected worker encodes in hardware, ranked by how well they compress: AV1, then HEVC.
+A codec family joins this group when a connected worker that could run the encode has a worker-verified hardware encoder for the family.
+. H.264 comes next.
+. HEVC and AV1 in software come last, used only when H.264 does not fit the client.
+H.264 does not fit the client when no H.264 capability entry of the client fits the output (link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049]).
+Within this group, AV1 still comes before HEVC.
+
+The frame rate still decides first (ADR 0049).
+The codec preference only breaks a tie between codec families whose capability entries keep the same frame rate.
+A client whose AV1 entry keeps a higher frame rate than its H.264 entry still receives AV1, even from a software AV1 encoder.
+
+The server encodes only H.264 and AV1 today.
+Its codec preference is therefore `[av1, h264]` when a connected worker encodes AV1 in hardware, and `[h264, av1]` otherwise.
+HEVC joins the same rule when the server starts to encode HEVC (https://github.com/streamarr/streamarr-server/issues/58[streamarr/streamarr-server#58]).
+
+*Why:* the SVT-AV1 software encoder cannot encode a 4K source in real time on a worker with only CPUs.
+Each media segment takes about as long to encode as to play, or longer.
+The player cannot buffer ahead, so it falls to its lowest variant.
+libx264 keeps up on the same worker.
+The libx265 software encoder is slower than libx264 too (<<evidence-cost>>), so software HEVC ranks with software AV1.
+A hardware encoder keeps up and keeps its codec family's bandwidth savings over H.264.
+A software HEVC or AV1 encode still serves a client that H.264 cannot serve.
+
+[[decision-dispatch]]
+=== A variant goes to a worker with the hardware encoder first
+
+When a connected worker encodes the chosen codec family in hardware, the server dispatches the variant's job attempt to a worker with that hardware encoder first.
+The server sends the job attempt to a software encoder for the family only when no worker with that hardware encoder has a free playback slot.
+Once encoder headroom replaces playback slots, the hardware encoder backend's headroom decides instead (link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044]).
+This rule extends ADR 0044's rule that a hardware encoder backend takes new variants first from one worker to every connected worker.
+
+The rule applies to the dispatch of every variant in a stream session, not only the first variant.
+It also applies to every later job attempt of a variant, such as a replacement attempt or a relocation.
+A later job attempt still runs on the encoder backend that produced the variant's initialization segment (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]).
+A later job attempt of a variant that a hardware encoder started therefore goes to a worker with that hardware encoder backend.
+
+*Why:* the hardware encoder is the reason the codec family came first.
+A variant that a software encoder takes while a hardware encoder sits idle can fall behind the player, as <<decision-hardware-first>> describes.
+Falling back to a software encoder when every hardware encoder is busy still serves the variant rather than making it wait.
 
 === Encoders that workers have verified filter every codec
 
@@ -89,11 +139,11 @@ A worker-verified encoder is an encoder that passed the worker's test encode and
 A worker-verified encoder can be a hardware encoder or a software encoder.
 The filter applies to every codec in the preference, not only to HEVC.
 The filter by worker-verified encoders replaces the first version's filter by available hardware encoders.
-https://github.com/streamarr/streamarr-server/issues/398[streamarr/streamarr-server#398] makes workers advertise their worker-verified encoders and builds the filter.
-The server does not have the filter by worker-verified encoders yet.
+https://github.com/streamarr/streamarr-server/issues/398[streamarr/streamarr-server#398] made workers advertise their worker-verified encoders and built the filter.
+Each worker reports whether each worker-verified encoder is a hardware or a software encoder.
+The codec preference (<<decision-hardware-first>>) and the dispatch (<<decision-dispatch>>) read that report.
 
-When no worker has verified an encoder for the client's first declared codec, the server tries the next codec in `[av1, hevc, h264]` that the client declares.
-H.264 is the last codec that the server tries.
+When no worker has verified an encoder for the client's first declared codec, the server tries the next codec in the codec preference that the client declares.
 
 An encoder backend is the encoder that a worker runs for a codec family, such as libx265 or a hardware `hevc_*` encoder.
 The filter counts a hardware encoder backend only after the backend passes three checks that ADR 0037 sets.
@@ -108,8 +158,8 @@ A replacement attempt is a job attempt that replaces an earlier job attempt for 
 Once streamarr/streamarr-server#398 merges, a replacement attempt runs on the encoder backend of the job attempt that produced the variant's initialization segment, as ADR 0037 requires.
 
 *Why:* no version of the server applied the first version's hardware filter.
-Today a worker without an AV1 hardware encoder encodes AV1 with the SVT-AV1 software encoder.
-A filter by hardware encoders alone would stop those encodes.
+A worker without an AV1 hardware encoder encodes AV1 with the SVT-AV1 software encoder.
+A filter by hardware encoders alone would stop those encodes for a client that declares only AV1.
 
 === An HEVC encode follows the SDR video decision
 
@@ -170,12 +220,12 @@ This ADR does not defer NVENC or VideoToolbox.
 
 == Consequences
 
-* After streamarr/streamarr-server#395 and streamarr/streamarr-transcode-worker#18 merge, the Apple TV app receives HEVC when the server encodes for the app on a worker that has verified an HEVC encoder.
-When that encoder is libx265, streamarr/streamarr-server#497 must merge too.
-The Apple TV app declares HEVC and does not declare AV1.
+* After streamarr/streamarr-server#395 and streamarr/streamarr-transcode-worker#18 merge, the Apple TV app receives HEVC when the server encodes for the app and a connected worker encodes HEVC in hardware.
+The Apple TV app declares HEVC and H.264 and does not declare AV1.
+Without a hardware HEVC encoder, the app receives H.264.
 An HDR HEVC source that ADR 0013's video decision encodes to SDR for the Apple TV app then becomes an SDR HEVC encode instead of an SDR H.264 encode.
 Streamarr wants that SDR HEVC encode.
-ADR 0044's headroom model counts the extra CPU of that SDR HEVC encode against the speed floor.
+ADR 0044's headroom model counts the load of that SDR HEVC encode against the speed floor.
 The speed floor is the minimum production speed that ADR 0044 sets for every running variant.
 * Until streamarr/streamarr-server#395 merges, no client reaches the HEVC or AV1 encode paths.
 The CPU cost and the bugs of the HEVC and AV1 encode paths therefore affect no session yet.
@@ -190,15 +240,28 @@ Each ratio compares the two encoders at the same preset.
 Under Automatic, libx264 runs at `faster` and libx265 runs at `veryfast`.
 No measurement compares libx265 at `veryfast` with libx264 at `faster`.
 This ADR therefore states no CPU ratio for the presets that Automatic runs.
-A worker that runs libx265 as its worker-verified HEVC encoder pays the extra CPU on each HEVC encode.
+libx265 encodes only for a client that H.264 does not fit, and the worker pays the extra CPU on each such encode.
 Evidence: <<evidence-cost>>.
 * H.264 remains the codec that every client receives when it declares nothing better.
+* A client that declares AV1 and H.264 receives H.264 when no connected worker encodes AV1 in hardware.
+H.264 needs more bitrate than AV1 for the same picture quality, so those streams cost more bandwidth.
+* Adding a hardware AV1 encoder to one connected worker moves such clients to AV1.
+Their variants go to that worker first.
+When that worker has no free playback slot, further AV1 variants run on a software AV1 encoder, which may not keep up with a 4K source.
+* A later job attempt of a variant that a hardware encoder started runs only on a worker with that hardware encoder backend, because the variant keeps one encoder backend.
 * libx265 and a hardware `hevc_*` encoder write different initialization segments.
 Once streamarr/streamarr-server#398 merges, a variant therefore stays on one encoder backend for its lifetime.
 
 == Rejected Alternatives
 
 * Keeping `[av1, h264]` would keep every encode for the Apple TV app on H.264, although the app declares HEVC.
+* Keeping AV1 first on every worker would send a 4K source to a software AV1 encoder that cannot keep up.
+The player would fall to its lowest variant.
+* Putting HEVC first when no worker encodes HEVC in hardware would send the Apple TV app's encodes to libx265, which is slower than libx264 too.
+* Putting AV1 first only when every eligible worker encodes AV1 in hardware would leave a mixed fleet's hardware AV1 encoders on H.264 whenever one worker with only CPUs connects.
+Dispatching to a worker with the hardware encoder first lets one such worker serve AV1.
+* Putting AV1 first only below 4K would set a size cutoff that holds only for some workers' CPUs.
+Software AV1 would still spend more of the worker's CPU than H.264 on every lower variant, leaving less headroom for other streams (link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044]).
 * Choosing HEVC from codec-name strings before streamarr/streamarr-server#395 would trust a string that names no codec profile, level or bit depth.
 The typed client capability declaration of streamarr/streamarr-server#395 replaces those strings.
 * Keeping AV1 limited to hardware encoders while other codecs use worker-verified encoders would stop the SVT-AV1 software encodes that workers run today.

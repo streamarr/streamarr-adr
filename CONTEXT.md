@@ -160,7 +160,24 @@ _Avoid_: device profile, client profile, capabilities list
 **Capability entry**:
 One group of values and maximums that the player accepts together for one video codec family or one audio codec.
 An output fits the declaration only when one capability entry accepts every property of the output.
+Its maximum picture width and height bound a picture in either orientation (ADR 0049).
 _Avoid_: codec profile (a profile of the coding standard), device profile, condition
+
+**Viewer's limits**:
+The limits that bound a stream session's output apart from the client capability declaration: the picture box of the fixed quality that the viewer picked, and the maximum picture width, maximum picture height and maximum bitrate that the client sends.
+They bound every encode, in Original too.
+Outside Original, they also bound copies, except a copy of a source that cannot be encoded.
+The maximum width and height apply as the client gives them, and the maximum bitrate covers video plus audio (ADR 0050).
+_Avoid_: client capabilities (what the player can decode), quality cap
+
+**Quality tier**:
+A named 16:9 picture box that the quality ladder offers: 360p, 480p, 720p, 1080p, 1440p or 2160p.
+The box bounds a picture in either orientation, so the 1080p box holds 1920×1080 and 1080×1920.
+A tier's variant is the source scaled to fit the box, never upscaled, cropped, padded or stretched.
+In Auto, the variant takes the tier's name as its label only when its picture reaches the box: it fits, and the worker's next larger picture of the source would not. Otherwise its label is its shorter side, such as 900p.
+Each tier has a nominal bitrate for each codec family.
+Each fixed quality has the box of one quality tier. Its single variant has no label, and it encodes at the bitrate of the smallest tier whose box holds the encoded picture, capped by the source's bitrate and the viewer's maximum bitrate (ADR 0050).
+_Avoid_: resolution, height (as a tier's key), preset (an encoder speed setting)
 
 **Planned output**:
 The output that the server chooses from the source description, the client capability declaration, the verified worker capabilities and the user's playback choice.
@@ -332,7 +349,7 @@ One output format that the server chooses within a playback session. Each format
 _Avoid_: fallback stream, replacement (unqualified)
 
 **Encoder backend**:
-An encoder that a worker runs for a codec family, together with whether it is hardware or software. A worker can run a hardware and a software backend for the same codec family, so the variants of one codec family can come from two backends at once (ADR 0044). Every replacement attempt for a variant must use the backend of the job attempt that produced the variant's initialization segment (ADR 0037).
+An encoder that a worker runs for a codec family, together with whether it is hardware or software. A worker can run a hardware and a software backend for the same codec family, so the variants of one codec family can come from two backends at once (ADR 0044). When a connected worker has a hardware backend for the chosen codec family, the server dispatches each variant to a worker with that hardware backend first, and to a software backend only when no such worker has a free playback slot (ADR 0009). Every replacement attempt for a variant must use the backend of the job attempt that produced the variant's initialization segment (ADR 0037).
 _Avoid_: encoder capability, codec
 
 **Completed attempt**:

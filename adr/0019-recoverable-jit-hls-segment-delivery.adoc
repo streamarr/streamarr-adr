@@ -163,10 +163,12 @@ The server starts, restarts and stops variants by these rules:
 * A request for an initialization segment stops no producer.
 * A request for a media segment of a variant that has no producer starts that variant at the requested segment.
 * A request for a media segment of one video variant stops the producers of the stream session's other video variants, except the left variant.
-* The left variant keeps running only while its running job attempt can produce the requested segment without a relocation.
+* The left variant keeps running only while its job attempt runs and can produce the requested segment without a relocation.
 A request whose segment lies past the left variant's relocation gap, or before its job attempt's first segment, stops the left variant too.
 A suspended left variant has no running job attempt, so the request that resumes the stream session stops it.
 * The left variant stops when the player receives a media segment of the newest media-segment request's variant.
+That segment must answer a request that arrived no earlier than the request that made its variant the newest media-segment request's variant.
+A late segment of an earlier switch to the same variant, which a switch back abandoned, does not stop the left variant.
 An initialization segment does not stop the left variant.
 * A request for a media segment of the left variant makes that variant the requested variant again.
 Its running job attempt serves the request, and the request stops the variant that the player had switched to.
@@ -178,12 +180,16 @@ A request for a third variant stops the variant that the player switched to befo
 * The configured transcode limit caps how many job attempts run at once across every stream session that transcodes.
 When a variant must start and the transcode limit leaves no room, the server starts nothing.
 The server answers that request with `503 Service Unavailable`, with no body and no `Retry-After`.
-The server never stops another stream session's variant to make room.
+The server never stops another stream session's requested or played variant to make room.
 A media-segment request stops the stream session's other video variants except the left variant before the server checks the limit, so their job attempts no longer count.
 The left variant's job attempt counts against the limit and takes a worker job slot.
-When a media-segment request's variant cannot start beside the left variant, the server stops the left variant and tries the start once more.
+When no configured transcode slot or worker job slot is free and a media-segment request's variant cannot start beside the left variant, the server stops the left variant and tries the start once more.
+A start that fails for another reason, such as no worker that runs the variant's pinned encoder, leaves the left variant running.
 An initialization request never stops the played variant to make room.
 A stream session that only remuxes starts its variants without checking the limit.
+* A left variant never keeps another stream session from playing.
+When no configured transcode slot or worker job slot is free, the server stops one other stream session's left variant and tries once more.
+It does so when a new stream session is refused admission, when a variant cannot start on demand, and when a dead or stalled job attempt cannot be replaced.
 * Apart from the first-listed variant, no variant starts before the player requests one of that variant's segments, unless the headroom model of link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] allows that variant to start early.
 * Until the headroom model is validated, the headroom model allows no variant to start early.
 * Once the headroom model is validated, a variant that the headroom model started early is exempt from the rule that a media-segment request stops the other video variants.
@@ -227,6 +233,8 @@ The gap-based stop and the idle grace period, which this ADR rejects, kept produ
 The played variant survives a rapid climb because the player last received media from it.
 A switched variant that has delivered nothing is not a known fallback.
 The left variant must not keep the switched variant from starting, so the left variant gives up its slot when no other slot is free.
+The left variant only insures one player's switch back, so it gives up its slot to any other stream session that finds no free slot.
+Unlike a requested or played variant, stopping it stalls no viewer.
 The left variant only helps while it can serve the player's position.
 After a seek past its relocation gap, its output no longer serves the player.
 
@@ -441,8 +449,7 @@ Streamarr accepts a slower AVPlayer start or first seek only if no alternative i
 While the left variant runs, the switched variant shares the worker's encoder with it.
 The switched variant's first media segment therefore takes longer than under the previous rule, which stopped the left variant at once.
 That cost was not measured.
-When the switched variant's start fails for a reason other than a full slot, the server still stops the left variant before it tries the start again.
-The player's next request for the left variant then starts a new job attempt.
+When another stream session needs the left variant's slot, the player's switch back starts a new job attempt.
 
 The measured sessions started no variant when the stream session was created.
 Starting the first-listed variant at creation was not measured.
@@ -500,6 +507,10 @@ That variant has delivered no media segment, so it is not a known fallback.
 The initialization segment carries no media, so the switched variant can still fail before it delivers anything the player can play.
 * Letting the left variant keep its slot and refusing the switched variant when no other slot is free.
 The player would then stay on the left variant even though it asked for another variant.
+* Letting a left variant keep its slot while another stream session finds no free slot.
+One player's insurance for a switch back would refuse another viewer's playback or recovery.
+* Stopping the left variant before the retry whenever the switched variant's start fails.
+A failure that has nothing to do with slots, such as no worker that runs the pinned encoder, would cost the player its fallback and free a slot that the retry cannot use.
 * Starting every variant of the ladder together at session start and on every relocation, and keeping every variant running, as the server did before this amendment.
 Each variant ran about 3× slower.
 hls.js cycled between 1080p and 360p.

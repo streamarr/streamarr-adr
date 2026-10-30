@@ -13,6 +13,7 @@ For now, variants start on demand.
 The headroom model of link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] decides when extra variants may start early.
 Extra variants are variants that the player has not requested.
 An amendment stops replacement attempts after a failure that would repeat (<<decision-repeating-failures>>).
+An amendment lets only the newest request that positioned a variant relocate or resume that variant (<<decision-newest-request>>).
 This ADR sets the relocation gap to two media segments.
 The relocation gap is how far a requested media segment may lie ahead of a running job attempt's output before the server starts a new job attempt at the requested segment.
 The two-segment relocation gap depends on the decode-only early-start seek that link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] specifies.
@@ -28,6 +29,7 @@ The server does not yet follow the rules that later amendments to this ADR added
 Worker-side upload back-pressure retry and the worker's stall-bounded segment wait are tracked in https://github.com/streamarr/streamarr-transcode-worker/issues/1[worker issue #1, transferred from streamarr-server issue #253].
 The server does not yet use the two-segment relocation gap (https://github.com/streamarr/streamarr-server/issues/502[streamarr/streamarr-server#502]).
 The server still relocates forward when the segment 24 s before the requested segment has not been produced.
+https://github.com/streamarr/streamarr-server/issues/550[streamarr/streamarr-server#550] implements <<decision-newest-request>>.
 The server does not yet publish the preparing-or-ready state (https://github.com/streamarr/streamarr-server/issues/507[streamarr/streamarr-server#507]).
 The worker does not yet pad an encoded variant past a source that ends early (https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511]).
 The server does not yet start extra variants from encoder headroom (https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499]).
@@ -265,6 +267,41 @@ The worst-case extra wait at a gap of 1 segment was within 0.9 s of the worst-ca
 A gap of 1 segment also makes the server relocate whenever a player requests the next segment while the running job attempt is still producing the current segment.
 Evidence: <<evidence-relocation-gap>>.
 
+[[decision-newest-request]]
+=== Only the newest request that positioned a variant may move that variant
+
+Each segment request takes an arrival order when the server first applies the on-demand rules to it.
+A request positions a variant when the request starts that variant on demand, relocates it or resumes it.
+For each variant, the server remembers the newest request that positioned the variant.
+A held request that arrived before that request is superseded.
+
+The server applies these rules:
+
+* Only a request at least as new as the newest request that positioned the variant may relocate or resume the variant.
+* A superseded request whose segment needs a relocation or a resume answers `503 Service Unavailable`, with no body and no `Retry-After`.
+* A superseded request whose segment the running job attempt can produce keeps waiting for that segment.
+* A newer request still relocates the variant in either direction, so a seek backward keeps working.
+* Any held request may replace a dead or stalled job attempt under this ADR's recovery rules, superseded or not.
+* A replacement does not position the variant.
+* A replacement starts at the requested segment.
+While the segment of the newest request that positioned the variant is not stored, a replacement never starts past that segment.
+* Each request relocates a variant at most once.
+
+*Why:* Before this rule, a held request relocated its variant whenever its segment lay before the running job attempt's first segment or past the relocation gap.
+Nothing recorded which request was newer.
+A request held from before a seek moved the variant back to the old position, and the newer request moved the variant forward again.
+Each relocation stops a job attempt, and stopping a job attempt wakes every held request for that variant.
+The two requests therefore moved the variant back and forth without pause.
+
+A stall or a death is not a seek.
+The next job attempt can produce the segments that the requests held on the failed job attempt wait for.
+Refusing those requests would turn a stall into a `503 Service Unavailable` for segments that the viewer still wants.
+
+A replacement that started past the newest positioning request's segment would move the variant away from that request, and that request would relocate the variant back.
+With the cap, only a newer request can move the variant away from a request that positioned it, and that newer request supersedes the request.
+Each request therefore relocates a variant at most once.
+When a replacement starts at a later held request's segment, an earlier held request that is not superseded relocates the variant back once.
+
 === Distributed producers are the recovery redundancy
 
 A variant whose producer fails is re-dispatched, on the next request that needs it, to another available worker for the same source namespace; the pool of workers is the recovery redundancy.
@@ -353,6 +390,12 @@ With the `faster` preset, which ADR 0044 makes the default for libx264, hls.js s
 * A per-window snapshot of eligible execution targets — the snapshot is a retained copy of live fleet state that must be defended against every concurrent mutation (supersession fences, exhausted-window retention, new-target set-difference); review found two high-severity staleness-of-the-copy defects in exactly that machinery, while live consultation admits newly eligible targets without retaining a second copy of fleet membership.
 * Producer lifetime driven by subscription-style demand handles (a producer runs only while a delivery holds a handle) — stateless HLS clients hold no standing connection to hang a handle on; last-request-time reaping is the honest demand signal for HTTP delivery.
 * Treating an output mismatch in an encode mode, or an invalid specification in any mode, as a retryable failure, as the server did before https://github.com/streamarr/streamarr-server/pull/661[streamarr/streamarr-server#661]: each replacement attempt failed the same way until the budget ran out.
+* Letting any held request relocate its variant, as the server did before https://github.com/streamarr/streamarr-server/issues/550[streamarr/streamarr-server#550].
+A request held from before a seek and the request after the seek moved the variant back and forth without pause.
+* Refusing a superseded request whenever its segment needs a replacement.
+A stall or a death then answered `503 Service Unavailable` for segments that the next job attempt would produce.
+* Starting every replacement at the first segment that the replaced job attempt did not store.
+A replacement for a request that lies ahead of that segment would then encode segments that no request waits for.
 * Starting every variant of the ladder together at session start and on every relocation, and keeping every variant running, as the server did before this amendment.
 Each variant ran about 3× slower.
 hls.js cycled between 1080p and 360p.

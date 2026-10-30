@@ -165,15 +165,18 @@ _Avoid_: codec profile (a profile of the coding standard), device profile, condi
 
 **Viewer's limits**:
 The limits that bound a stream session's output apart from the client capability declaration: the picture box of the fixed quality that the viewer picked, and the maximum picture width, maximum picture height and maximum bitrate that the client sends.
-Outside Original, they bound copies as well as encodes.
+They bound every encode, in Original too.
+Outside Original, they also bound copies, except a copy of a source that cannot be encoded.
 The maximum width and height apply as the client gives them, and the maximum bitrate covers video plus audio (ADR 0050).
 _Avoid_: client capabilities (what the player can decode), quality cap
 
 **Quality tier**:
-A named 16:9 picture box that the quality ladder offers and that labels its variant: 360p, 480p, 720p, 1080p, 1440p or 2160p.
+A named 16:9 picture box that the quality ladder offers: 360p, 480p, 720p, 1080p, 1440p or 2160p.
 The box bounds a picture in either orientation, so the 1080p box holds 1920×1080 and 1080×1920.
 A tier's variant is the source scaled to fit the box, never upscaled.
-Each fixed quality has the box of one quality tier (ADR 0050).
+The variant takes the tier's name as its label only when its picture reaches the box on one side; otherwise its label is its shorter side, such as 900p.
+Each tier has a nominal bitrate for each codec family.
+Each fixed quality has the box of one quality tier and encodes at that tier's bitrate, capped by the source's bitrate and the viewer's maximum bitrate (ADR 0050).
 _Avoid_: resolution, height (as a tier's key), preset (an encoder speed setting)
 
 **Planned output**:

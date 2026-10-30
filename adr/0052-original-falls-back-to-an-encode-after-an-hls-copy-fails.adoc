@@ -1,0 +1,197 @@
+= ADR 0052: In Original, a Format Error During an HLS Copy Falls Back to an Encode, and the Quality Choice Changes to Auto
+
+== Status
+
+Proposed
+
+This decision changes a rule that link:0013-stream-decision-architecture.adoc[ADR 0013], link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019], link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036], link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] and link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049] state.
+Those ADRs end playback in Original after a format error during an HLS copy.
+Each of those ADRs now points to this decision.
+link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045] keeps its fallback from direct play to HLS at original quality.
+
+== Context
+
+The viewer picks a playback choice when a stream session starts.
+Original is the playback choice that plays the source at its own quality (ADR 0045).
+Auto is the playback choice in which the player adapts quality to bandwidth across the variants.
+A fixed quality is a playback choice that names one quality, such as 720p, and keeps that quality (link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc[ADR 0050]).
+Each client shows the playback choices in a quality control, such as a quality menu.
+Original sits at the top of that menu.
+iOS and the web client start in Auto.
+tvOS starts in Original.
+
+Direct play means that the server sends the source file itself (ADR 0045).
+A stream copy passes the source video through unchanged.
+An HLS copy is an HLS stream session whose video is a stream copy.
+An encode is video that the worker encodes.
+In Original, the server direct-plays a file that the client capability declaration covers.
+Otherwise, Original plays an HLS copy when one capability entry accepts the copy (ADR 0049).
+Otherwise, Original plays an encode, bounded by the viewer's limits (ADR 0050).
+
+A format error is a player error that concerns the media format itself, not the network or the server.
+A format attempt is one output format that the server chooses within a playback session.
+A playback session is the logical span of one viewing of a media title.
+Each playback session has a format-attempt budget that limits how many format attempts the playback session uses (https://github.com/streamarr/streamarr-server/issues/401[streamarr/streamarr-server#401]).
+The default budget is two format attempts: the initial format plus one more.
+
+Before this decision, Original recovered from one format error only.
+After a format error during direct play, the server fell back to HLS at original quality (ADR 0045).
+After a format error during an HLS copy, playback ended with a typed error.
+ADR 0013 ended playback in Original when a copy lacked its parameter sets.
+ADR 0019 ended playback in Original after a copy's output mismatch.
+ADR 0037 ended playback in Original when a copied variant ran short.
+ADR 0049 accepted that a rejected copy of a stream with an unknown codec level, codec tier or frame rate ends playback in Original.
+The reason given was that Original is a manual choice, and the server never silently replaces a manual choice.
+
+A player can refuse a copy that the client declared.
+A client capability declaration is evidence, not a guarantee (ADR 0049).
+AetherEngine, an open-source playback engine for Apple platforms, records several refusals by AVPlayer that come from the playlist or the packaging rather than from the decoder.
+AetherEngine records that AVPlayer refuses an HEVC level that the `CODECS` attribute names.
+AetherEngine also records that tvOS refuses an HDR variant while the display is not in an HDR mode.
+Rivulet, an open-source tvOS media client that uses AetherEngine, plans a transcode behind every direct route.
+Rivulet also falls back to that transcode after a load hangs for 60 seconds.
+Streamarr read both projects' source code and measured neither.
+tvOS starts in Original, so an Apple TV viewer meets a refused copy as an error.
+
+== Decision
+
+[[decision-fallback]]
+=== In Original, a format error during an HLS copy falls back to an encode
+
+In Original, the server tries up to three outputs in this order:
+
+. direct play, when the client capability declaration covers the file (ADR 0045);
+. an HLS copy at original quality, when one capability entry accepts the copy (ADR 0049);
+. an encode.
+
+The server skips every step that the declaration, the probe's property issues or the copy rules rule out.
+A file that the declaration does not cover for direct play therefore starts with the HLS copy.
+A file whose copy no capability entry accepts starts with the encode, as before.
+
+After a format error during the HLS copy, the server starts a new format attempt that encodes the video.
+The new format attempt has its own stream session, playlist and initialization segment, as every format attempt does.
+The same failures that move Auto from a copy to an encode move Original from the HLS copy to the encode:
+
+* a format error that the player reports for the copy;
+* a copy's output mismatch, such as a copy whose decoder configuration record lacks its parameter sets (ADR 0013 and ADR 0019);
+* a copied variant that runs short (ADR 0037);
+* the worker's typed failure to convert a Dolby Vision profile 7 RPU during the copy (https://github.com/streamarr/streamarr-server/issues/651[streamarr/streamarr-server#651]).
+
+The fallback applies whether the viewer picked Original or the client started in Original.
+
+*Why:* An error tells the viewer nothing that they can act on, while the server can still play the title.
+The viewer picked Original to watch the title at its best quality, not to give up on the title when that quality fails.
+Every failure in the list above is a failure of the copy that an encode avoids.
+
+[[decision-budget]]
+=== The fallback to the encode spends one format attempt
+
+The encode after the HLS copy counts as one format attempt against the playback session's format-attempt budget.
+The encode's stream session does not reset the budget or the playback session's format-failure history.
+When the budget has no room for the encode, playback ends with the typed terminal error, as Auto's recovery does (#401).
+
+[[decision-auto]]
+=== After the fallback, the playback choice is Auto
+
+The encode after the HLS copy is a format attempt in Auto.
+The server tells the client that the playback choice changed from Original to Auto.
+The client then shows Auto as the selected choice in its quality control.
+A client without a quality control shows the notice alone (<<decision-notice>>).
+
+Auto's own rules then apply to the encode:
+
+* The viewer's limits bound the encode, as ADR 0050 decides for Auto.
+* The server offers Auto's encoded quality ladder of quality tiers (ADR 0050).
+The playlist lists the variants in Auto's order, and the first variant starts first (link:0008-server-generated-hls-playlists.adoc[ADR 0008], link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044]).
+* The ladder offers no copy.
+The failed copy stays in the playback session's format-failure history, so the server does not choose the failed copy again for the encode's ladder.
+* A format error during the encode starts Auto's recovery within the budget that remains (#401).
+For example, Auto may then give up HDR for SDR.
+* The client hides the HDR toggle, as it does in Auto.
+
+The switch to Auto uses no format attempt beyond the encode.
+From Auto, the viewer can pick any playback choice again.
+
+*Why:* The quality control is a second sign, beside the notice, that the viewer watches a converted version.
+After the fallback, the stream is Auto's ladder, so the quality control describes the stream that actually plays.
+A quality control that still showed Original would claim the source's own quality while an encode plays.
+The server never silently replaces a manual choice (ADR 0013), and the notice and the quality control make this replacement visible.
+
+[[decision-notice]]
+=== The client shows a short notice
+
+When the server falls back from the HLS copy to the encode, the client shows this notice:
+
+[quote]
+This device couldn't play the original video, so a converted version is playing.
+Quality is now set to Auto.
+To choose another quality, open quality settings.
+
+The notice appears over the playing video for a few seconds and then disappears by itself.
+The notice neither pauses playback nor asks the viewer to act.
+The notice names no internal concept, such as a worker, a format attempt, a copy or a transcode.
+Each client may adapt the words "quality settings" to the name of its own quality control.
+
+The client shows no notice after the fallback from direct play to the HLS copy.
+That HLS copy still plays the source's own video, so a notice about a converted version would be false.
+
+[[explicitly-deferred]]
+=== Explicitly deferred
+
+* This decision does not change a fixed quality.
+A format error during an HLS copy in a fixed quality still ends playback with a typed error.
+https://github.com/streamarr/streamarr-server/issues/399[Epic streamarr/streamarr-server#399] keeps that question open.
+* This decision does not say what happens when the viewer picks Original again after the fallback, in the same playback session.
+Epic #399 keeps that question open.
+* This decision does not say whether an Original that starts with an encode shows the notice or Auto.
+Original starts with an encode when no capability entry accepts a copy of the source.
+Epic #399 keeps that question open.
+* This decision does not say whether Original tries the copy with Dolby Vision stripped before the encode, as Auto does for Dolby Vision profiles 8.1, 8.4, 10.1 and 10.4 (#401).
+Until that question closes, Original falls back from a failed Dolby Vision copy to the encode.
+
+== Consequences
+
+* In Original, a refused HLS copy no longer ends playback while the budget has room.
+The viewer sees the notice, and the quality control shows Auto.
+* With the default budget of two format attempts, a file that starts with direct play never reaches the encode.
+Direct play is the first format attempt, and the HLS copy is the second.
+A failed HLS copy then ends playback with the typed terminal error.
+Only a file that starts with the HLS copy reaches the encode under the default budget.
+* The encode starts on Auto's first variant, which is the variant whose average bitrate is nearest 2000 kb/s.
+The picture can therefore start below the source's size and then climb.
+* The encode costs worker capacity that the copy did not cost.
+* Under ADR 0049, a stream with an unknown codec level, codec tier or frame rate can reach a player that refuses the copy.
+In Original, that refusal now costs a format attempt and a converted picture instead of ending playback.
+* A copied variant that runs short is detected near the real end of the source.
+In Original, the viewer then sees the notice near the end, and the encode pads to the advertised end (ADR 0037).
+* After the fallback, the viewer's limits bound the stream, because Auto honors them (ADR 0050).
+* The server's answer to a format failure must carry the new playback choice, so that the client can show the notice and Auto.
+* Each client needs the notice and the switch of its quality control.
+
+== Rejected Alternatives
+
+* Ending playback after an HLS copy's format error, the earlier rule, gives the viewer an error for a title that the server can still play.
+tvOS starts in Original, so most Apple TV viewers would meet that error.
+* Falling back silently while the quality control still shows Original would replace a manual choice without telling the viewer.
+ADR 0013 forbids a silent replacement.
+* Showing the notice while the quality control still shows Original would leave the quality control describing a stream that does not play.
+* Encoding one variant at the source's size under the Auto label would show Auto while the player has nothing to adapt across.
+* Asking the viewer to try Auto after Original fails, the epic's earlier deferred idea, stops playback until the viewer acts.
+* Starting the encode beside every copy as a standby stream costs worker capacity for every copy that plays.
+Epic #399 starts another format only after a qualifying format error.
+
+== References
+
+* link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045: In Original Quality, a Client Direct-Plays Each File Its Capability Declaration Covers, and Each Client Uses Its Platform's Own Player]
+* link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049: A Client Capability Declaration Lists Capability Entries, and an Output Fits Only When One Capability Entry Accepts the Whole Output]
+* link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc[ADR 0050: Outside Original, the Viewer's Limits Bind Copies as Well as Encodes, and Each Quality Tier Is a Picture Box in Either Orientation]
+* link:0013-stream-decision-architecture.adoc[ADR 0013: Stream Decision Architecture]
+* link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019: Recoverable Just-In-Time HLS Segment Delivery]
+* link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036: Video Contracts Share One Vocabulary and Preserve Dynamic-Range Facts]
+* link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037: The Worker Delivers Fragmented MP4 Segments From FFmpeg's Standard Output, and HLS Media Segments Are fMP4 Only]
+* https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399] is the playback capabilities epic.
+* https://github.com/streamarr/streamarr-server/issues/401[streamarr/streamarr-server#401] adds format recovery and the format-attempt budget.
+* https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511] treats a copied variant that runs short as a format error.
+* https://github.com/streamarr/streamarr-server/issues/651[streamarr/streamarr-server#651] converts Dolby Vision profile 7 to profile 8.1 during a copy.
+* https://github.com/streamarr/streamarr-web/issues/29[streamarr/streamarr-web#29] adds the web client's quality control and format recovery.
+* https://github.com/streamarr/streamarr-apple/issues/60[streamarr/streamarr-apple#60] adds the Apple client's quality control and format recovery.

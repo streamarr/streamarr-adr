@@ -16,6 +16,7 @@ An amendment stops replacement attempts after a failure that would repeat (<<dec
 An amendment lets only the newest request that positioned a variant relocate or resume that variant (<<decision-newest-request>>).
 An amendment makes the current segment the media segment that the player needs next (<<decision-requested-variant>>).
 The same amendment gives a job attempt time to encode its preroll before the attempt counts as stalled.
+An amendment keeps the variant that the player leaves running until the switched variant delivers a media segment (<<decision-requested-variant>>).
 This ADR sets the relocation gap to two media segments.
 The relocation gap is how far a requested media segment may lie ahead of a running job attempt's output before the server starts a new job attempt at the requested segment.
 The two-segment relocation gap depends on the decode-only early-start seek that link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] specifies.
@@ -33,6 +34,7 @@ The server does not yet use the two-segment relocation gap (https://github.com/s
 The server still relocates forward when the segment 24 s before the requested segment has not been produced.
 https://github.com/streamarr/streamarr-server/issues/550[streamarr/streamarr-server#550] implements <<decision-newest-request>>.
 https://github.com/streamarr/streamarr-server/pull/676[streamarr/streamarr-server#676] implements the current segment as the media segment that the player needs next, and the preroll in the startup budget.
+https://github.com/streamarr/streamarr-server/pull/677[streamarr/streamarr-server#677] keeps the variant that the player leaves running until the switched variant delivers a media segment.
 The server does not yet publish the preparing-or-ready state (https://github.com/streamarr/streamarr-server/issues/507[streamarr/streamarr-server#507]).
 The worker does not yet pad an encoded variant past a source that ends early (https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511]).
 The server does not yet start extra variants from encoder headroom (https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499]).
@@ -147,6 +149,8 @@ link:0008-server-generated-hls-playlists.adoc[ADR 0008] lists first the variant 
 On the default ladder of 1080p, 720p, 480p and 360p, the first-listed variant is therefore 480p.
 The current segment is the media segment that the player needs next.
 The newest media-segment request is the stream session's latest request for a media segment of any variant.
+The played variant is the variant of the last media segment that the player received while that variant was the variant of the newest media-segment request.
+The left variant is the played variant while the player requests another variant's media segments.
 While the newest media-segment request's segment is not stored, the current segment is that segment.
 Once that segment is stored, the current segment is the segment after it.
 The current segment never lies past the last advertised segment.
@@ -158,21 +162,34 @@ The server starts, restarts and stops variants by these rules:
 * A request for the initialization segment of a variant that has no producer starts that variant at the current segment.
 * A request for an initialization segment stops no producer.
 * A request for a media segment of a variant that has no producer starts that variant at the requested segment.
-* A request for a media segment of one video variant stops the producers of the stream session's other video variants.
+* A request for a media segment of one video variant stops the producers of the stream session's other video variants, except the left variant.
+* The left variant keeps running only while its running job attempt can produce the requested segment without a relocation.
+A request whose segment lies past the left variant's relocation gap, or before its job attempt's first segment, stops the left variant too.
+A suspended left variant has no running job attempt, so the request that resumes the stream session stops it.
+* The left variant stops when the player receives a media segment of the newest media-segment request's variant.
+An initialization segment does not stop the left variant.
+* A request for a media segment of the left variant makes that variant the requested variant again.
+Its running job attempt serves the request, and the request stops the variant that the player had switched to.
+* A stream session keeps at most one left variant.
+A request for a third variant stops the variant that the player switched to before, which has delivered no media segment, and keeps the played variant.
+* A failed or replaced job attempt of the requested variant does not stop the left variant.
 * A relocation restarts only the requested variant at the requested segment.
 * After a relocation, a variant that is not running starts when the player next requests one of that variant's segments.
 * The configured transcode limit caps how many job attempts run at once across every stream session that transcodes.
 When a variant must start and the transcode limit leaves no room, the server starts nothing.
 The server answers that request with `503 Service Unavailable`, with no body and no `Retry-After`.
 The server never stops another stream session's variant to make room.
-A media-segment request stops the stream session's other video variants before the server checks the limit, so their job attempts no longer count.
+A media-segment request stops the stream session's other video variants except the left variant before the server checks the limit, so their job attempts no longer count.
+The left variant's job attempt counts against the limit and takes a worker job slot.
+When a media-segment request's variant cannot start beside the left variant, the server stops the left variant and tries the start once more.
+An initialization request never stops the played variant to make room.
 A stream session that only remuxes starts its variants without checking the limit.
 * Apart from the first-listed variant, no variant starts before the player requests one of that variant's segments, unless the headroom model of link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] allows that variant to start early.
 * Until the headroom model is validated, the headroom model allows no variant to start early.
 * Once the headroom model is validated, a variant that the headroom model started early is exempt from the rule that a media-segment request stops the other video variants.
 A variant that the headroom model started early runs while encoder headroom allows.
 That variant stops when encoder headroom runs out.
-* Once the headroom model is validated, the variant that the player leaves keeps running as an extra variant while encoder headroom allows.
+* Once the headroom model is validated, the variant that the player leaves keeps running as an extra variant while encoder headroom allows, also after the switched variant has delivered a media segment.
 That variant stops when encoder headroom runs out.
 
 These rules hold for now.
@@ -200,6 +217,18 @@ The first of those job attempts ran beside the variant that the player was leavi
 At 6 s segments, that is 12 s of media.
 With one target segment duration in the budget, a slow but healthy encode counted as stalled.
 Its replacement started from the same segment and encoded the same preroll.
+
+*Why the left variant runs until the switched variant delivers:* A player that switches to a variant that is slow to start, or whose job attempt fails, falls back to the variant that it left.
+When the left variant had already stopped, the fallback started a new job attempt from nothing, and the player waited a second time.
+A left variant that still runs serves the fallback from its running output.
+The left variant runs beside the switched variant only until the switched variant delivers its first media segment.
+So the left variant takes CPU from the switched variant only while the switched variant encodes that segment.
+The gap-based stop and the idle grace period, which this ADR rejects, kept producers running beside the requested variant for much longer.
+The played variant survives a rapid climb because the player last received media from it.
+A switched variant that has delivered nothing is not a known fallback.
+The left variant must not keep the switched variant from starting, so the left variant gives up its slot when no other slot is free.
+The left variant only helps while it can serve the player's position.
+After a seek past its relocation gap, its output no longer serves the player.
 
 *Why a media-segment request stops the other video variants:* A producer that runs beside the requested variant takes CPU from the requested variant.
 One rejected alternative is a gap-based stop.
@@ -409,14 +438,21 @@ The Apple playback change in https://github.com/streamarr/streamarr-apple/issues
 That measurement is the change's merge gate.
 Streamarr accepts a slower AVPlayer start or first seek only if no alternative is left to measure.
 
+While the left variant runs, the switched variant shares the worker's encoder with it.
+The switched variant's first media segment therefore takes longer than under the previous rule, which stopped the left variant at once.
+That cost was not measured.
+When the switched variant's start fails for a reason other than a full slot, the server still stops the left variant before it tries the start again.
+The player's next request for the left variant then starts a new job attempt.
+
 The measured sessions started no variant when the stream session was created.
 Starting the first-listed variant at creation was not measured.
 Starting a variant at its initialization request was not measured either.
 On the default ladder, ADR 0008 lists 480p first.
 Creating a stream session therefore starts a 480p encode instead of the most expensive encode.
 
-Until the headroom model is validated, the rule that a media-segment request stops the other video variants also stops the variant that the player leaves.
-A switch back to that variant therefore starts a new job attempt.
+Until the headroom model is validated, the variant that the player leaves stops once the switched variant delivers a media segment.
+A switch back to that variant before then is served by its running job attempt.
+A switch back after then starts a new job attempt.
 A player that alternates between two variants therefore starts a job attempt at each switch.
 In simulated 80 s sessions with two seeks and 3 s segments, hls.js in Chromium switched 33 times and started 31 job attempts with libx264 at the `medium` preset.
 With the `faster` preset, which ADR 0044 makes the default for libx264, hls.js switched 4 times and started 5 job attempts.
@@ -454,6 +490,16 @@ The player's next media-segment request would then lie before the new job attemp
 A player that abandons a held segment requests the same segment from the new variant, and that request would relocate the variant.
 * Keeping one target segment duration in the startup budget of an encoded job attempt that starts after the first segment.
 A slow but healthy job attempt was replaced by another job attempt that started from the same segment.
+* Stopping the variant that the player leaves at the first media-segment request for another variant, as the server did before https://github.com/streamarr/streamarr-server/pull/677[streamarr/streamarr-server#677].
+A switch whose new variant was slow or failed fell back to a variant that had to start a new job attempt from nothing.
+* Keeping every variant that the player leaves until the switched variant delivers a media segment.
+A rapid climb from 360p to 1080p would run one encode for each step, and each encode would take CPU from the variant that the player waits for.
+* Keeping the variant that the player switched to most recently instead of the played variant.
+That variant has delivered no media segment, so it is not a known fallback.
+* Stopping the left variant when the switched variant stores its initialization segment.
+The initialization segment carries no media, so the switched variant can still fail before it delivers anything the player can play.
+* Letting the left variant keep its slot and refusing the switched variant when no other slot is free.
+The player would then stay on the left variant even though it asked for another variant.
 * Starting every variant of the ladder together at session start and on every relocation, and keeping every variant running, as the server did before this amendment.
 Each variant ran about 3× slower.
 hls.js cycled between 1080p and 360p.

@@ -173,10 +173,10 @@ _Avoid_: client capabilities (what the player can decode), quality cap
 **Quality tier**:
 A named 16:9 picture box that the quality ladder offers: 360p, 480p, 720p, 1080p, 1440p or 2160p.
 The box bounds a picture in either orientation, so the 1080p box holds 1920×1080 and 1080×1920.
-A tier's variant is the source scaled to fit the box, never upscaled.
-The variant takes the tier's name as its label only when its picture reaches the box on one side; otherwise its label is its shorter side, such as 900p.
+A tier's variant is the source scaled to fit the box, never upscaled, cropped, padded or stretched.
+In Auto, the variant takes the tier's name as its label only when its picture reaches the box: it fits, and the worker's next larger picture of the source would not. Otherwise its label is its shorter side, such as 900p.
 Each tier has a nominal bitrate for each codec family.
-Each fixed quality has the box of one quality tier and encodes at that tier's bitrate, capped by the source's bitrate and the viewer's maximum bitrate (ADR 0050).
+Each fixed quality has the box of one quality tier. Its single variant has no label, and it encodes at the bitrate of the smallest tier whose box holds the encoded picture, capped by the source's bitrate and the viewer's maximum bitrate (ADR 0050).
 _Avoid_: resolution, height (as a tier's key), preset (an encoder speed setting)
 
 **Planned output**:

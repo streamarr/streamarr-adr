@@ -14,6 +14,8 @@ The headroom model of link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0
 Extra variants are variants that the player has not requested.
 An amendment stops replacement attempts after a failure that would repeat (<<decision-repeating-failures>>).
 An amendment lets only the newest request that positioned a variant relocate or resume that variant (<<decision-newest-request>>).
+An amendment makes the current segment the media segment that the player needs next (<<decision-requested-variant>>).
+The same amendment gives a job attempt time to encode its preroll before the attempt counts as stalled.
 This ADR sets the relocation gap to two media segments.
 The relocation gap is how far a requested media segment may lie ahead of a running job attempt's output before the server starts a new job attempt at the requested segment.
 The two-segment relocation gap depends on the decode-only early-start seek that link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] specifies.
@@ -30,6 +32,7 @@ Worker-side upload back-pressure retry and the worker's stall-bounded segment wa
 The server does not yet use the two-segment relocation gap (https://github.com/streamarr/streamarr-server/issues/502[streamarr/streamarr-server#502]).
 The server still relocates forward when the segment 24 s before the requested segment has not been produced.
 https://github.com/streamarr/streamarr-server/issues/550[streamarr/streamarr-server#550] implements <<decision-newest-request>>.
+https://github.com/streamarr/streamarr-server/pull/676[streamarr/streamarr-server#676] implements the current segment as the media segment that the player needs next, and the preroll in the startup budget.
 The server does not yet publish the preparing-or-ready state (https://github.com/streamarr/streamarr-server/issues/507[streamarr/streamarr-server#507]).
 The worker does not yet pad an encoded variant past a source that ends early (https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511]).
 The server does not yet start extra variants from encoder headroom (https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499]).
@@ -81,7 +84,12 @@ link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] makes 
 === Segment waits are bounded by producer liveness, not a wall clock
 
 A request for an advertised-but-unproduced segment waits while a producer for that segment is alive and making progress; a producer that publishes nothing within the configured stall threshold is classified stalled and replaced.
-A fresh producer's cold start (seek plus first-segment encode) receives the configured stall threshold plus one target-segment duration; after the first publication, the steady-state stall threshold applies by itself.
+Before a job attempt stores its first media segment, the job attempt receives the configured stall threshold plus one target segment duration for each segment that it encodes first.
+A job attempt encodes its first segment.
+An encoded job attempt that starts after the first segment also encodes one preroll segment before its first segment, because the one-period-early seek starts encoding one segment duration early.
+Such a job attempt therefore receives the stall threshold plus two target segment durations.
+A copy, or an encode that starts at the first segment, receives the stall threshold plus one target segment duration.
+After the first publication, the steady-state stall threshold applies by itself.
 The local store writes every segment completely to a temporary file before moving it into its final name. It requests an atomic replacement, but falls back to a same-filesystem replacement when the filesystem does not support atomic moves. Under the segment-store contract, only the final name is observable as ready; supported deployments must therefore provide rename visibility consistent with that contract. No successor-segment inference is needed or permitted.
 The wait ends when the segment is ready, when no producer can be made to produce it, or on request cancellation — never on a fixed wall-clock timeout.
 A slow or resource-starved transcode must not surface to the client as a missing segment.
@@ -137,8 +145,12 @@ The requested variant is the variant whose media segment the player has just req
 The first-listed variant is the variant that the multivariant playlist lists first.
 link:0008-server-generated-hls-playlists.adoc[ADR 0008] lists first the variant whose average bitrate is nearest 2000 kb/s.
 On the default ladder of 1080p, 720p, 480p and 360p, the first-listed variant is therefore 480p.
-The current segment is the first media segment of the stream session's most recently started job attempt.
-Before any job attempt starts, the current segment is the media segment at which the stream session starts.
+The current segment is the media segment that the player needs next.
+The newest media-segment request is the stream session's latest request for a media segment of any variant.
+While the newest media-segment request's segment is not stored, the current segment is that segment.
+Once that segment is stored, the current segment is the segment after it.
+The current segment never lies past the last advertised segment.
+Before the player requests any media segment, the current segment is the media segment at which the stream session starts.
 
 The server starts, restarts and stops variants by these rules:
 
@@ -176,6 +188,18 @@ A variant that starts at creation begins encoding before the player has fetched 
 
 *Why an initialization request starts a variant:* A player requests a variant's initialization segment before any of that variant's media segments.
 Starting the variant at the initialization request saves the time until the player's first media-segment request.
+
+*Why the current segment is the media segment that the player needs next:* A player that switches variants requests the new variant's initialization segment and then the new variant's media segment.
+A player that switches after it received a segment requests the segment after it.
+A player that abandons a held segment requests the same segment from the new variant.
+A variant that starts at that segment can serve the player's next media-segment request.
+A variant that started elsewhere was relocated by that request, so the switch cost two job attempts.
+The first of those job attempts ran beside the variant that the player was leaving.
+
+*Why a job attempt's startup budget counts its preroll:* An encoded job attempt that starts after the first segment encodes two segments of media before it stores a segment.
+At 6 s segments, that is 12 s of media.
+With one target segment duration in the budget, a slow but healthy encode counted as stalled.
+Its replacement started from the same segment and encoded the same preroll.
 
 *Why a media-segment request stops the other video variants:* A producer that runs beside the requested variant takes CPU from the requested variant.
 One rejected alternative is a gap-based stop.
@@ -421,6 +445,15 @@ The replacement would skip segments that no request waits for, but every way a h
 * Letting a request position a variant only when the request's new job attempt starts.
 A relocation that stopped the running job attempt and then failed to start a new one left the older request as the newest positioning request.
 The replacement then started at the older request's segment, and the newer request relocated the variant again.
+* Defining the current segment as the first media segment of the stream session's most recently started job attempt, as the server did before https://github.com/streamarr/streamarr-server/pull/676[streamarr/streamarr-server#676].
+After the player had played past the relocation gap, the player's next media-segment request relocated a variant that its initialization request had started.
+* Starting a variant that an initialization request starts at the first segment that the running variant has not stored.
+The running job attempt can lie far ahead of the player.
+The player's next media-segment request would then lie before the new job attempt's first segment and relocate the variant.
+* Starting a variant that an initialization request starts at the segment after the newest media-segment request, also while that request's segment is not stored.
+A player that abandons a held segment requests the same segment from the new variant, and that request would relocate the variant.
+* Keeping one target segment duration in the startup budget of an encoded job attempt that starts after the first segment.
+A slow but healthy job attempt was replaced by another job attempt that started from the same segment.
 * Starting every variant of the ladder together at session start and on every relocation, and keeping every variant running, as the server did before this amendment.
 Each variant ran about 3× slower.
 hls.js cycled between 1080p and 360p.

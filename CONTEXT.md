@@ -402,6 +402,14 @@ _Avoid_: scan probe, low-priority probe
 A probe that finds keyframe positions by scanning every packet of the chosen video stream. It uses its own capacity, which is 0 while the worker runs any job attempt, and runs at the lowest CPU priority.
 _Avoid_: packet scan (unqualified), keyframe probe
 
+**Bitrate scan**:
+A durable background step that reads every packet of a media file's video streams and audio streams once, in chunks, and measures each stream's bytes in every keyframe interval. It uses the keyframe packet scan capacity, after any keyframe packet scan, and runs at the lowest CPU priority (ADR 0054).
+_Avoid_: deep analysis, extensive analysis, packet scan (unqualified), bitrate probe
+
+**Measured bitrate**:
+A stream's measured bytes × 8 divided by the stream's own duration, from a measurement: an MP4 or MOV sample table, a keyframe packet scan or a bitrate scan. A measurement also holds the stream's bytes in every keyframe interval, which give the stream's peak segment bit rate. A bitrate from Matroska statistics tags is a probed bitrate, not a measured bitrate (ADR 0054).
+_Avoid_: estimated bitrate, nominal bitrate, tagged bitrate, container bitrate (the rate for the whole file)
+
 **Brake**:
 The worker's halving of its background probe capacity when a job attempt's production speed falls below the speed floor, and once when a job attempt starts (ADR 0032).
 _Avoid_: throttle, backoff (unqualified)

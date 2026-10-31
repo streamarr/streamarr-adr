@@ -166,7 +166,7 @@ _Avoid_: codec profile (a profile of the coding standard), device profile, condi
 **Viewer's limits**:
 The limits that bound a stream session's output apart from the client capability declaration: the picture box of the fixed quality that the viewer picked, and the maximum picture width, maximum picture height and maximum bitrate that the client sends.
 They bound every encode, in Original too.
-Outside Original, they also bound copies, except a copy of a source that cannot be encoded.
+Outside Original, they also bound copies, except a copy of a source that cannot be encoded or whose every encode the client capability declaration rejects.
 The maximum width and height apply as the client gives them, and the maximum bitrate covers video plus audio (ADR 0050).
 When the audio leaves no room for the 360p tier under the maximum bitrate, the server lowers the audio through the audio steps before the stream exceeds the maximum.
 Outside Original, a video copy costs its video plus the session's audio, and the server lowers the audio before it encodes the video.

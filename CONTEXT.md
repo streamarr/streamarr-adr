@@ -169,11 +169,12 @@ They bound every encode, in Original too.
 Outside Original, they also bound copies, except a copy of a source that cannot be encoded.
 The maximum width and height apply as the client gives them, and the maximum bitrate covers video plus audio (ADR 0050).
 When the audio leaves no room for the 360p tier under the maximum bitrate, the server lowers the audio through the audio steps before the stream exceeds the maximum.
+Outside Original, a video copy costs its video plus the session's audio, and the server lowers the audio before it encodes the video.
 _Avoid_: client capabilities (what the player can decode), quality cap
 
 **Audio step**:
 One audio codec, channel count and bitrate that the server can deliver in place of the stream session's audio to stay within the viewer's maximum bitrate: the session's own audio first, then multichannel steps that keep the codec and channels at lower bitrates, then AAC stereo at 128, 96 and 64 kb/s.
-The server takes one step for the whole stream session, and the step caps every audio rendition (ADR 0050).
+The server takes one step for the whole stream session, from the default track, and the step caps every audio rendition (ADR 0050).
 _Avoid_: audio tier, audio quality, audio variant (a rendition is never a variant)
 
 **Quality tier**:

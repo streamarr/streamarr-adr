@@ -8,7 +8,8 @@ link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc
 This decision covers the other bound on an output: the viewer's playback choice and the viewer's limits.
 It decides the questions that a review of https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] raised.
 The review compared the server's rules with Jellyfin, Swiftfin, jellyfin-web and Plezy.
-It also decides how the server lowers the audio when the audio leaves no room under the viewer's maximum bitrate for the smallest quality tier or for a video copy.
+It also decides when the server lowers the audio under the viewer's maximum bitrate.
+The server lowers it when the audio leaves no room for the smallest quality tier or for a video copy, and when lower multichannel audio lets a larger picture fit.
 
 == Context
 
@@ -105,7 +106,7 @@ A video copy costs the copied video's bitrate plus the stream session's audio bi
 That is the same cost as a variant's (<<decision-bitrate>>).
 When the probe does not know the copied video's bitrate, the container bitrate stands in for the video.
 The container bitrate is the bitrate that the probe reports for the whole source file.
-When the probe does not know a copied audio track's bitrate, the copy costs at least the container bitrate.
+When the probe does not know a copied audio track's bitrate, the copy costs the larger of that sum and the container bitrate.
 
 When the copy's cost is over the maximum bitrate, the server lowers the audio first (<<decision-audio-steps>>).
 It takes the first audio step at which the copy's cost is at or below the maximum bitrate.
@@ -129,6 +130,7 @@ Original has no fixed quality, so no picture box bounds its encode.
 
 A source that the server cannot encode still copies when a capability entry accepts the copy.
 It copies even when it exceeds the viewer's limits.
+The server still takes the first audio step at which that copy's cost fits, or the last step when none fits.
 A source cannot be encoded when it has no usable output frame rate (https://github.com/streamarr/streamarr-server/issues/446[streamarr/streamarr-server#446]).
 This rule holds in Auto and in a fixed quality.
 
@@ -258,13 +260,14 @@ The server offers a tier only when the tier's video bitrate for the chosen codec
 
 A variant without a tier is the single variant that Auto offers when no tier fits.
 A fixed quality and an encode in Original also have a single variant.
-For each of these variants, the video bitrate is at most the maximum bitrate minus the audio bitrate.
+For each of these variants, the video bitrate is at most the maximum bitrate minus the audio bitrate, apart from the 145 kb/s floor below.
 When the probe knows the source's bitrate, the source's bitrate caps the video too.
 
 Before the server sizes any variant, the server checks the audio against the 360p tier (<<decision-audio-steps>>).
 When the audio leaves less than the 360p tier's video bitrate, the server lowers the audio.
 When the remainder is still below the 360p tier's video bitrate, the server bounds the picture to the 360p box.
 The video then gets that remainder, but never less than 145 kb/s.
+A source whose known bitrate is lower than 145 kb/s still caps the video.
 
 *Why:* The player downloads the audio rendition beside every variant.
 A variant whose video alone fills the maximum bitrate exceeds the viewer's limit by the audio.
@@ -315,19 +318,20 @@ A copied audio track counts at its bitrate.
 When the server takes a step below a copy, the copy becomes an encode at that step.
 In Original, a video copy ignores the viewer's limits, so an audio copy beside it stays a copy.
 
+The server takes a step only when the client sends a maximum bitrate.
 The server takes one step for the whole stream session, from the default track.
 The step caps every audio rendition: every track is delivered in the step's codec, with no more than the step's channels and bitrate.
 A track that already fits the cap's codec, channels and bitrate keeps its own copy-or-encode decision.
 A step never raises a track's channel count or bitrate.
 Switching audio tracks never changes the step.
-The server sends the viewer no notice when it lowers the audio.
+Neither the server nor the player interrupts playback with a notice when the server lowers the audio.
 
 *Why:* A viewer sets a maximum bitrate because the viewer's connection carries no more.
 A stream over that limit stalls, so a lower audio bitrate serves the viewer better than the overshoot.
 A short list of steps gives encoders bitrates that they handle well and keeps the rule simple to test.
 AC-3's encoder rounds any other bitrate to its table anyway.
 Surround at 384 kb/s with the 360p tier fits a maximum bitrate of 1,184 kb/s.
-The steps therefore drop to stereo only when surround cannot fit beside the smallest tier.
+The steps therefore drop to stereo only when surround cannot fit beside the smallest tier or beside a video copy.
 384 kb/s is the lowest E-AC-3 step because FFmpeg's E-AC-3 encoder lacks the tools behind Apple's 192 kb/s.
 64 kb/s is the lowest step because AAC-LC degrades quickly below it.
 `BANDWIDTH` counts the largest rendition, so only a cap on every rendition keeps every variant within the maximum.
@@ -337,15 +341,17 @@ Audio renditions switch without restarting the video, and an unchanged step keep
 [[decision-audio-for-picture]]
 === The server lowers multichannel audio when a lower bitrate lets a larger picture fit
 
-When the session's audio leaves room for the 360p tier, the server can still take a multichannel step.
+After <<decision-audio-steps>>, the server can take a lower multichannel step than the step that rule took.
 The server takes it only when the step lets a larger picture fit:
 
 * In Auto, a step lets a larger picture fit when the ladder with that step offers a higher top tier.
-* In a fixed quality and in an encode in Original, a step lets a larger picture fit when the single variant then gets the full bitrate that it would have without a maximum bitrate.
+* In a fixed quality and in an encode in Original, a step lets a larger picture fit when the single variant falls short of the full bitrate that it would have without a maximum bitrate, and the step gives it that full bitrate.
 
 Among the multichannel steps, the server takes the first step that reaches the largest picture that any multichannel step reaches.
 The server never takes a stereo step under this rule.
-When no multichannel step gives a larger picture, the session's audio stays as the audio decision chose it.
+When no multichannel step gives a larger picture, the server lowers nothing further.
+The rule applies to encodes only.
+A video copy keeps the source's picture, so no step gives it a larger one.
 
 With 5.1 E-AC-3 at 768 kb/s, a maximum bitrate of 2,000 kb/s gives the 480p tier with E-AC-3 at 448 kb/s instead of the 360p tier with 768 kb/s.
 A maximum bitrate of 5,500 kb/s gives the 1080p tier with 448 kb/s instead of the 720p tier with 768 kb/s.
@@ -390,7 +396,7 @@ The source's bitrate suits the source's picture, which can be far larger.
 * This ADR does not decide whether Auto offers lower variants beside a copy.
 When the source fits the viewer's limits and the server copies it in Auto, Auto's ladder stays as it is today.
 https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399] keeps that question open.
-* This ADR does not decide whether a client shows that the server lowered the audio.
+* This ADR does not decide whether a client's playback details show that the server lowered the audio.
 The multivariant playlist already names the delivered audio codec and channel count.
 
 == Consequences
@@ -420,9 +426,9 @@ A codec family that the server starts to encode needs its own bitrate for every 
 * When a capability entry shrinks a higher tier to a lower tier's label, Auto offers one fewer variant.
 * When the audio leaves no room for the 360p tier, the viewer hears lower-bitrate audio, and surround can become stereo.
 A copied audio track can become an encode, which costs worker time.
-* Below a maximum bitrate of 1,184 kb/s, a session with 5.1 E-AC-3 or AC-3 audio plays in stereo, and below 1,120 kb/s a session with 5.1 AAC does.
-* Under a maximum bitrate, Auto can play 5.1 at 448 or 384 kb/s instead of the codec's usual bitrate, in exchange for a higher top tier.
-Every variant of the ladder, the lowest included, carries that lower audio.
+* Below a maximum bitrate of 1,184 kb/s, a video encode whose 5.1 audio the server encodes as E-AC-3 or AC-3 plays in stereo, and below 1,120 kb/s one with 5.1 AAC does.
+* Under a maximum bitrate, an encode can play surround at a lower multichannel step, such as 5.1 at 448 kb/s, in exchange for a higher top tier in Auto or a single variant's full bitrate.
+In Auto, every variant of the ladder, the lowest included, carries that lower audio.
 * Below a maximum bitrate of 864 kb/s, the video gets less than the 360p tier's bitrate.
 Below 209 kb/s, the stream exceeds the maximum bitrate rather than not playing at all.
 * The server can change the session's audio codec to AAC to meet the maximum bitrate, and every audio rendition then follows.
@@ -459,7 +465,8 @@ Even sides keep that film a few pixels short of the 720p box, although no larger
 * Encoding a fixed quality at the source's bitrate would spend a 4K source's bitrate on a 480p picture.
 * Encoding a fixed quality at its named tier's bitrate would spend the 2160p bitrate on a fixed 4K's 1080p picture of a 1080p source.
 * Leaving the 360p fallback uncapped by the source's bitrate would ask the encoder for more bitrate than the source holds.
-* Accepting the overshoot when the audio leaves no room for the 360p tier would send up to 768 kb/s more than the viewer's connection carries, and the stream would stall.
+* Accepting the overshoot when the audio leaves no room for the 360p tier would send the whole audio bitrate beyond what the viewer's connection carries, and the stream would stall.
+That is 768 kb/s for encoded 5.1 audio and more for a large copied track.
 * Lowering the video below the 360p tier's bitrate while the audio keeps 768 kb/s would spend half of a low maximum on audio and starve the picture.
 * Refusing the stream session below a minimum bitrate would leave the viewer with nothing to play.
 * Lowering the audio continuously to whatever bitrate remains would give encoders bitrates outside their tables, and AC-3 rounds them anyway.
@@ -476,7 +483,7 @@ That table gives 5.1 at 128 kb/s at low limits and lowers the audio even when th
 An audio encode costs far less worker capacity than a video encode.
 * Taking a stereo step to gain a higher tier would drop surround that fits at a multichannel step.
 * Shrinking the picture below the 360p box at very low limits would add a box that is not a quality tier.
-* Showing the viewer a notice adds an interruption for a change that the playlist already describes.
+* Showing the viewer a notice would interrupt playback for a change that the playlist already describes.
 
 == References
 

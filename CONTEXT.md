@@ -173,7 +173,8 @@ Outside Original, a video copy costs its video plus the session's audio, and the
 _Avoid_: client capabilities (what the player can decode), quality cap
 
 **Audio step**:
-One audio codec, channel count and bitrate that the server can deliver in place of the stream session's audio to stay within the viewer's maximum bitrate: the session's own audio first, then multichannel steps that keep the codec and channels at lower bitrates, then AAC stereo at 128, 96 and 64 kb/s.
+One audio codec, channel count and bitrate that the server can deliver in place of the stream session's audio under the viewer's maximum bitrate: the session's own audio first, then multichannel steps that keep the codec and channels at lower bitrates, then AAC stereo at 128, 96 and 64 kb/s, or AAC mono at 64 kb/s for a mono track.
+The server steps down to fit the 360p tier or a video copy, and takes a lower multichannel step when it lets a larger picture fit.
 The server takes one step for the whole stream session, from the default track, and the step caps every audio rendition (ADR 0050).
 _Avoid_: audio tier, audio quality, audio variant (a rendition is never a variant)
 

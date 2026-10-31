@@ -5,7 +5,7 @@
 Proposed
 
 This decision changes a rule that link:0013-stream-decision-architecture.adoc[ADR 0013], link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019], link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036], link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] and link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049] state.
-Those ADRs end playback in Original after a format error during an HLS copy.
+Those ADRs end playback in Original and in a fixed quality after a format error during an HLS copy.
 Each of those ADRs now points to this decision.
 This decision also replaces the rule of link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc[ADR 0050] that an encode in Original is one variant without a label.
 Every encode that Original reaches now plays in Auto.
@@ -46,6 +46,8 @@ ADR 0019 ended playback in Original after a copy's output mismatch.
 ADR 0037 ended playback in Original when a copied variant ran short.
 ADR 0049 accepted that a rejected copy of a stream with an unknown codec level, codec tier or frame rate ends playback in Original.
 The reason given was that Original is a manual choice, and the server never silently replaces a manual choice.
+A fixed quality can also play an HLS copy, when the source fits the fixed quality's picture box and the viewer's other limits (ADR 0050).
+A format error during that HLS copy also ended playback, because a fixed quality never changed format automatically.
 
 A player can refuse a copy that the client declared.
 A client capability declaration is evidence, not a guarantee (ADR 0049).
@@ -146,6 +148,25 @@ When the device cannot play the original video, the server switches the player t
 Refusing to start, as the server does today, gives the viewer an error for a title that the server can still play.
 An encode under the Original label would claim the source's own quality while a converted picture plays.
 
+[[decision-fixed-quality]]
+=== In a fixed quality, a format error during an HLS copy falls back to an encode at the same fixed quality
+
+After a format error during a fixed quality's HLS copy, the server starts a new format attempt that encodes the video at the same fixed quality.
+The same failures that move Original from the HLS copy to the encode qualify (<<decision-fallback>>).
+The encode follows the rules of ADR 0050 for a fixed quality's encode.
+The fixed quality's picture box, the viewer's other limits and one capability entry bound its single variant.
+The encode counts as one format attempt against the playback session's format-attempt budget (<<decision-budget>>).
+The failed copy stays in the playback session's format-failure history.
+
+The playback choice stays the fixed quality, and the client keeps that fixed quality selected in its quality control.
+The client shows the notice without its sentence about Auto (<<decision-notice>>).
+A fixed quality changes format after no other format error, so a format error during the encode ends playback with the typed terminal error.
+
+*Why:* A fixed quality promises a picture size, not a copy.
+An encode at the same fixed quality keeps that promise, while an error leaves the viewer with no video.
+Switching to Auto would drop the size that the viewer picked.
+The notice tells the viewer that a converted version is playing, so the server does not replace the copy silently (ADR 0013).
+
 [[decision-notice]]
 === The client shows a short notice
 
@@ -164,19 +185,23 @@ Each client may adapt the words "quality settings" to the name of its own qualit
 The client shows the same notice when Original starts with an encode.
 The words stay true then, because the device could not play the original video in that case either.
 
+After the fallback in a fixed quality, the quality control still shows the fixed quality.
+The client therefore shows the notice without the sentence "Quality is now set to Auto.":
+
+[quote]
+This device couldn't play the original video, so a converted version is playing.
+To choose another quality, open quality settings.
+
 The client shows no notice after the fallback from direct play to the HLS copy.
 That HLS copy still plays the source's own video, so a notice about a converted version would be false.
 
 [[explicitly-deferred]]
 === Explicitly deferred
 
-* This decision does not change a fixed quality.
-A format error during an HLS copy in a fixed quality still ends playback with a typed error.
-https://github.com/streamarr/streamarr-server/issues/399[Epic streamarr/streamarr-server#399] keeps open whether a fixed quality also falls back to an encode.
 * This decision does not say what happens when the viewer picks Original again after the playback choice changed to Auto, in the same playback session.
-Epic streamarr/streamarr-server#399 keeps that question open.
-* This decision does not say whether Original tries the copy with Dolby Vision stripped before the encode, as Auto does for Dolby Vision profiles 8.1, 8.4, 10.1 and 10.4 (streamarr/streamarr-server#401).
-Until that question closes, Original falls back from a failed Dolby Vision copy to the encode.
+https://github.com/streamarr/streamarr-server/issues/399[Epic streamarr/streamarr-server#399] keeps that question open.
+* This decision does not say whether Original or a fixed quality tries the copy with Dolby Vision stripped before the encode, as Auto does for Dolby Vision profiles 8.1, 8.4, 10.1 and 10.4 (streamarr/streamarr-server#401).
+Until that question closes, Original and a fixed quality fall back from a failed Dolby Vision copy to the encode.
 
 == Consequences
 
@@ -196,12 +221,17 @@ The rules of ADR 0050 for an encode in Original, one variant without a label, no
 The picture can therefore start below the source's size and then climb.
 * The encode costs worker capacity that the copy did not cost.
 * Under ADR 0049, a stream with an unknown codec level, codec tier or frame rate can reach a player that refuses the copy.
-In Original, that refusal now costs a format attempt and a converted picture instead of ending playback.
+In Original and in a fixed quality, that refusal now costs a format attempt and a converted picture instead of ending playback.
 * A copied variant that runs short is detected near the real end of the source.
-In Original, the viewer then sees the notice near the end, and the encode pads to the advertised end (ADR 0037).
+In Original and in a fixed quality, the viewer then sees the notice near the end, and the encode pads to the advertised end (ADR 0037).
 * After the fallback, the viewer's limits bound the stream, because Auto honors them (ADR 0050).
+* In a fixed quality, a refused HLS copy no longer ends playback under the default budget.
+The viewer sees the notice, and the fixed quality stays selected.
+The encode costs worker capacity that the copy did not cost.
 * The server's answer when a stream session starts, and its answer to a format failure, must carry the playback choice that plays, so that the client can show the notice and Auto.
+In a fixed quality, the answer must also tell the client that an encode replaced a failed copy, so that the client can show the notice.
 * Each client must show the notice and switch its quality control to Auto.
+In a fixed quality, each client must show the notice without its sentence about Auto and keep the fixed quality selected.
 
 == Rejected Alternatives
 
@@ -216,6 +246,8 @@ ADR 0013 forbids a silent replacement.
 * Asking the viewer to try Auto after Original fails, the epic's earlier deferred idea, stops playback until the viewer acts.
 * Starting the encode beside every copy as a standby stream costs worker capacity for every copy that plays.
 Epic streamarr/streamarr-server#399 starts another format only after a qualifying format error.
+* Keeping the earlier rule for a fixed quality, so that a format error during its HLS copy still ends playback, gives the viewer an error for a title that the server can still play at the size the viewer picked.
+* Switching a fixed quality to Auto after a failed HLS copy would drop the size that the viewer picked, although an encode at that size can play.
 * Keeping the default budget at two format attempts, and letting the budget bind, would end playback on tvOS whenever a file that starts with direct play also fails its HLS copy.
 * Skipping the HLS copy after a failed direct play, so that a budget of two reaches the encode, would give up the source's own video whenever only direct play fails.
 The HLS copy still plays the source's own video, and it can play where direct play cannot, for example when the player refuses the source container.

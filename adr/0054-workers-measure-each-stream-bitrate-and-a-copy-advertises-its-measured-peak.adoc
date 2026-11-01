@@ -245,10 +245,9 @@ So a measurement holds only when a copy delivers each packet as one sample of th
 The worker reports no measurement of a file when a copy would change the size or the number of any measured stream's packets.
 These streams change in a copy:
 
-* H.264 or HEVC video that still runs the Annex B bitstream filter (<<amends-0037>>).
+* H.264 or HEVC video that still runs the Annex B bitstream filter, such as video whose NAL unit lengths take a size other than 4 bytes (<<amends-0037>>).
 * AV1 whose samples hold OBUs that the mp4 muxer removes, such as the temporal delimiters of an IVF file.
 * Video in Annex B form, such as the video of an MPEG-TS file.
-* H.264 or HEVC video whose NAL unit lengths take a size other than 4 bytes.
 * AAC in ADTS frames.
 * E-AC-3 whose frames the mp4 muxer joins into one sample.
 
@@ -351,20 +350,22 @@ Each `traf` holds a `tfhd`, a version 1 `tfdt` and a version 1 `trun` with four 
 The `mdat` has an 8-byte header.
 A worker test pins the layout, and a change to the layout is a change to the worker contract.
 
-A video copy runs the Annex B bitstream filter only in four cases:
+The probe reports, for each H.264 or HEVC video stream, whether a copy without the Annex B bitstream filter keeps every packet's bytes.
+The server stores that fact and sets it on each copy job of the stream.
+A video copy runs the filter whenever its copy job does not carry that fact.
+The fact is false, so the copy keeps the filter, in each of these cases:
 
-* The source's sample entry is `avc3`, `hev1`, `dvav` or `dvhe`.
-* The source's decoder configuration record holds no parameter sets.
-* The record's header names a value of the codec string, such as the level, other than the value that the record's parameter sets name.
+* The source's decoder configuration record lacks an SPS or a PPS, or for HEVC a VPS.
+* The record's header names another profile, tier or level than the record's parameter sets name.
 * The source's `hvcC` record holds an SEI message other than user data unregistered, such as the mastering display or the content light level.
+* The record's NAL unit lengths take a size other than 4 bytes.
+* The source's MP4 or MOV sample entry is not `avc1` or `dva1` for H.264, or `hvc1` or `dvh1` for HEVC.
+* The source's MP4 or MOV track has more than one sample entry.
+* A NAL unit of the record would not reach the decoder, or an array of an `hvcC` record names another NAL unit type than a unit that the array holds.
 
-In the first two cases the source can keep its parameter sets only in its samples.
-The copy's `avc1` or `hvc1` record must hold the parameter sets (link:0013-stream-decision-architecture.adoc[ADR 0013]), and the filter lets the mp4 muxer take them from the samples.
-In the third case the filter makes the mp4 muxer rebuild the record's header from the parameter sets.
-In the fourth case the filter puts the record's SEI messages into every keyframe sample.
-The worker removes the SEI arrays from every `hvc1` record (ADR 0037), so without the filter the copy would lose those messages.
-User data unregistered messages, such as x265's information message, carry encoder notes rather than picture metadata.
+A Matroska track has no sample entry, so only its record counts.
 Every other copy of length-prefixed H.264 or HEVC runs neither filter and keeps the source's samples.
+The same fact decides whether a measurement counts the stream's packets (<<unchanged-packets>>).
 
 *Why:* The server computes each segment's framing from the layout (<<segment-framing>>).
 A layout change outside the contract would make every measured cost wrong without any failure.
@@ -374,11 +375,22 @@ The four copies were H.264 from MP4 and from Matroska, and HEVC with AAC and wit
 The worker's check of each copy's initialization segment still passed.
 The HEVC copy also stopped repeating its VPS, SPS, PPS and x265's information SEI message in front of every keyframe, about 2.4 kB each.
 Its record's claim to hold every parameter set then became true, as ISO/IEC 14496-15 requires.
+The copy's `avc1` or `hvc1` record must hold the parameter sets (link:0013-stream-decision-architecture.adoc[ADR 0013]).
+A record without them leaves the parameter sets only in the samples, and the filter lets the mp4 muxer take them from there.
+A sample entry other than `avc1`, `dva1`, `hvc1` and `dvh1`, such as `avc3` or `hev1`, can also keep the parameter sets only in the samples.
+The probe describes only a track's first sample entry, so it cannot establish that a copy keeps the packets of a track with another entry.
 The copy's codec string comes from the record's parameter sets (link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036]), and the worker refuses an initialization segment whose codec string differs from the probed one.
 Without the filter, a copy keeps the source's record header.
 A synthetic H.264 file whose record header names level 5.1 while its SPS names level 1.0 would then fail that check, so such a file keeps the filter.
+The worker removes the SEI arrays from every `hvc1` record (ADR 0037), so without the filter a copy would lose the record's SEI messages.
 In synthetic HEVC sources whose mastering display and content light level messages sat only in the record, a copy without the filter delivered neither message, in MP4 and in Matroska.
 With the filter, the decoded keyframe carried both messages.
+User data unregistered messages, such as x265's information message, carry encoder notes rather than picture metadata.
+With the filter, the mp4 muxer writes every sample with 4-byte NAL unit lengths, the length that every other copy delivers.
+FFmpeg's decoder never receives a record NAL unit that is empty or has its forbidden bit set, so the probe reads such a record without the unit, while a copy without the filter would deliver the unit to the player.
+Without the filter, FFmpeg's `hvcC` writer sorts the record's units by the type that each array names, so a VPS in an array that names SEI would leave the copy's record without a VPS.
+The worker decides at the start of each copy attempt and does not read the source then, so the decision comes from the probe's fact.
+A copy job without the fact, such as one from a server that does not send it, keeps the filter, as every copy did before this decision.
 
 === Explicitly deferred
 
@@ -409,6 +421,7 @@ A two-hour file with a keyframe every second holds 7,200 intervals.
 At 4 bytes each, each stream takes about 29 kB.
 * The server also stores each video stream's and audio stream's packet count per keyframe interval, another 4 bytes per interval.
 * The worker contract gains a bitrate scan request and a bitrate scan result.
+* The probe result of each H.264 or HEVC video stream, and each copy job of the stream, gain the fact that a copy keeps every packet's bytes.
 * A measured copy's cost counts every byte that the player downloads, framing included.
 In the synthetic sources, framing added 3.3 to 14.1 kb/s.
 * H.264 and HEVC copies of sources whose record holds the parameter sets stop repeating those parameter sets in front of every keyframe.

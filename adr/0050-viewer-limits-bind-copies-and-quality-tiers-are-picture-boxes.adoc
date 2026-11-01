@@ -10,6 +10,12 @@ It decides the questions that a review of https://github.com/streamarr/streamarr
 It also decides when the server lowers the audio under the viewer's maximum bitrate.
 The server lowers it when the audio leaves no room for the smallest quality tier or for a video copy, and when lower multichannel audio lets a larger picture fit.
 
+An amendment makes every audio encode name its output channel layout instead of a bare channel count (<<decision-channel-layout>>).
+A track keeps 3 or 4 channels only in a layout that the target codec carries exactly, and otherwise encodes in stereo.
+The rule covers the lower audio steps that keep a copied track's 3 or 4 channels and the 3- and 4-channel encodes that a capability entry's channel maximum produces.
+https://github.com/streamarr/streamarr-server/pull/711[streamarr/streamarr-server#711] implements the copy side.
+The layout comes from probe version 7 (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032]).
+
 NOTE: link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052] changes what this decision says about an encode in Original.
 Every encode that Original reaches now plays in Auto, and the client tells the viewer that the playback choice changed.
 That encode is Auto's encoded quality ladder, not one variant without a label.
@@ -314,15 +320,17 @@ An encode never needs more bitrate than the source holds, so the server never as
 [[decision-audio-steps]]
 === When the audio leaves no room for the 360p tier, the server lowers the audio instead of exceeding the maximum bitrate
 
-An audio step is one audio codec, channel count and bitrate that the server can deliver in place of the stream session's audio.
+An audio step is one audio codec, channel layout and bitrate that the server can deliver in place of the stream session's audio.
 The server tries the audio steps from the first to the last:
 
 . The stream session's audio, as the audio decision chooses it.
 That audio is a copy at the track's bitrate or an encode at the codec's default bitrate, such as AC-3 5.1 at 640 kb/s, E-AC-3 5.1 at 768 kb/s or AAC 5.1 at 384 kb/s.
 . The multichannel steps.
-They keep the codec and the channel count of the encode that the server would choose for the default track.
+They keep the codec and the channel layout of the encode that the server would choose for the default track.
 When the session copies the default track in AAC, AC-3 or E-AC-3, which the server also encodes, the copy's codec adds its steps too.
 Those steps keep the copy's channel count, up to the 5.1 that the server encodes in AC-3 and E-AC-3.
+A copy of 3 or 4 channels keeps its channels only in a layout that its codec carries exactly (<<decision-channel-layout>>).
+Otherwise the copy's codec adds no step for it.
 AAC above 5.1, encoded or copied, also steps through AAC 5.1.
 The steps of both codecs then run from the highest bitrate to the lowest.
 At an equal bitrate, the copy's codec comes first.
@@ -330,7 +338,7 @@ A copied codec that the server does not encode, such as FLAC, Opus or ALAC, step
 A codec adds these steps only when its encode or copy has more than two channels:
 ** E-AC-3 5.1 at 640, 448 and 384 kb/s;
 ** AC-3 5.1 at 448 and 384 kb/s;
-** multichannel AAC at 64 kb/s per full-band channel, which is 448 kb/s for 7.1 and 320 kb/s for 5.1.
+** multichannel AAC at 64 kb/s per full-band channel, which is 448 kb/s for 7.1, 320 kb/s for 5.1, 256 kb/s for 4.0 and 192 kb/s for 3.0.
 AAC 7.1 takes both steps.
 . The stereo steps: AAC stereo at 128, 96 and 64 kb/s.
 A mono track has one step instead: AAC mono at 64 kb/s.
@@ -373,6 +381,7 @@ In Original, a video copy ignores the viewer's limits, so an audio copy beside i
 The server takes a step only when the client sends a maximum bitrate.
 The server takes one step for the whole stream session, from the default track.
 A step below the session's audio caps every audio rendition: every track is delivered in the step's codec, with no more than the step's channels and bitrate.
+A track that the cap leaves at 3 or 4 channels follows <<decision-channel-layout>>.
 A track that already fits the cap's codec, channels and bitrate keeps its own copy-or-encode decision.
 A step never raises a track's channel count or bitrate.
 Switching audio tracks never changes the step.
@@ -393,6 +402,51 @@ At an equal bitrate, the step keeps the session's codec.
 The session's own audio caps nothing, because it can be a copy in a codec that the server does not encode, such as FLAC.
 ADR 0043 keeps one audio codec per stream session, so all tracks follow the default track's step.
 Audio renditions switch without restarting the video, and an unchanged step keeps that true.
+
+[[decision-channel-layout]]
+=== An audio encode names its output channel layout, and keeps 3 or 4 channels only in a layout that its codec carries exactly
+
+Every audio encode names its output channel layout, not only a channel count.
+The job carries the layout, and the worker encodes with FFmpeg's `-ch_layout` instead of `-ac`.
+The server reads each source track's layout from probe version 7 (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032]).
+A track whose stored outcome records no layout, or a layout that this section does not name, has an unknown layout.
+
+An encode of 1, 2, 6 or 8 channels names the encoder's mono, stereo, 5.1 or 7.1 layout.
+An encode keeps a track's own 3 or 4 channels only when the target codec carries the track's layout exactly:
+
+* AAC carries `3.0` and `4.0`;
+* AC-3 and E-AC-3 carry `2.1`, `3.0`, `3.0(back)`, `4.0`, `quad` and `quad(side)`.
+
+The encode then names the track's own layout.
+A 3- or 4-channel track in any other layout, or in an unknown layout, encodes in stereo.
+
+The rule applies wherever an encode would have 3 or 4 channels:
+
+* A lower audio step that keeps a copied 3- or 4-channel track's channels in the copy's codec (<<decision-audio-steps>>).
+When a copied AAC `4.0` track at 384 kb/s leaves no room, it can step to AAC `4.0` at 256 kb/s.
+A copied AAC `quad` track steps to stereo instead.
+https://github.com/streamarr/streamarr-server/pull/711[streamarr/streamarr-server#711] implements this case.
+* Another audio track that a step caps (<<decision-audio-steps>>).
+When the step changes a 3- or 4-channel track's codec, the track keeps its layout only if the step's codec carries it, and encodes in stereo otherwise.
+* An encode that a capability entry's channel maximum of 3 or 4 caps (link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049]).
+A track with more channels than the maximum has no layout of its own at that count, so it encodes in stereo.
+A 5.1 track under an AAC channel maximum of 4 therefore encodes AAC stereo, not AAC `4.0`.
+
+The server's own encode of a 3- or 4-channel track, outside these cases, stays stereo, as before this amendment.
+
+*Why:* With `-ac`, FFmpeg ignores the source's layout and picks the encoder's default layout for the count.
+For 1, 2, 6 and 8 channels, that default is the encoder's mono, stereo, 5.1 or 7.1 layout, which this rule names anyway.
+For 3 and 4 channels, the default can change what the viewer hears.
+A `quad` source encoded to AAC with `-ac 4` became AAC `4.0`, which mixes the two rear channels into one back channel.
+A rear tone in opposite phase fell from −27.1 dB to −96.8 dB, while the AAC stereo step kept it at −30.1 dB.
+A `3.0` source encoded to AAC with `-ac 3` became AAC `2.1`.
+FFmpeg writes AAC `2.1` and `quad` as channel configuration 0 with a program config element, and Chromium's AAC parser refuses channel configuration 0.
+ISO/IEC 14496-3 gives AAC channel configurations for `3.0` (configuration 3) and `4.0` (configuration 4), and FFmpeg wrote those.
+ATSC A/52's audio coding modes 2/0 with the low-frequency channel, 3/0, 2/1, 3/1 and 2/2 hold the AC-3 and E-AC-3 layouts that the rule names.
+With the source's layout named, AAC `3.0` and AC-3 `quad` kept every channel at the source's level.
+Stereo keeps every channel of the source in the mix, so stereo is the safe output for a layout that the codec cannot carry.
+A downmix of a 5.1 track to AAC's 4-channel default, `4.0`, merges its surround pair into one back channel in the same way.
+ADR 0032's evidence holds the measurements (link:0032-media-file-probe-results-are-persisted.adoc#evidence-channel-layout[ADR 0032]).
 
 [[decision-audio-for-picture]]
 === The server lowers multichannel audio when a lower bitrate lets a larger picture fit
@@ -504,6 +558,12 @@ In Auto, every variant of the ladder, the lowest included, carries that lower au
 * Below a maximum bitrate of 864 kb/s, the video gets less than the 360p tier's bitrate.
 Below 209 kb/s, the stream exceeds the maximum bitrate rather than not playing at all.
 * The server can change the session's audio codec to AAC to meet the maximum bitrate, and every audio rendition then follows.
+* A copied 3- or 4-channel track keeps surround in a lower step only in a layout that its codec carries exactly.
+A copied AAC `quad` or `2.1` track, and any 3- or 4-channel track whose layout the probe does not record, steps to stereo.
+* No AAC output carries channel configuration 0, so Chromium plays every AAC rendition that the server encodes.
+* A track with more channels than a capability entry's channel maximum of 3 or 4 plays in stereo, not in a 3- or 4-channel downmix.
+* Every job that encodes audio names a layout, and a job that names a 3- or 4-channel layout needs a worker that lists probe version 7 (ADR 0032).
+Until the server stores a file's probe version 7 outcome, that file's 3- and 4-channel tracks step to stereo.
 * When the session keeps its own audio after both audio step rules, another audio track keeps its own decision, so a track larger than the default track can take the stream over the maximum bitrate.
 * A fixed quality above the source's size plays the source's size, not the size that its name suggests.
 It encodes at the bitrate of the tier that holds that size.
@@ -563,6 +623,12 @@ An audio encode costs far less worker capacity than a video encode.
 * Taking a stereo step to gain a higher tier would drop surround that fits at a multichannel step.
 * Shrinking the picture below the 360p box at very low limits would add a box that is not a quality tier.
 * Showing the viewer a notice would interrupt playback for a change that the playlist already describes.
+* Keeping `-ac` with a channel count lets FFmpeg pick a default 3- or 4-channel layout.
+A `quad` track then loses its rear channels' opposite-phase content in AAC `4.0`, and a `3.0` track becomes AAC `2.1`, which Chromium refuses.
+* Encoding a `quad` or `2.1` track to AAC in its own layout writes channel configuration 0, which Chromium refuses.
+* Downmixing a track above a 3- or 4-channel maximum to that count merges a surround pair into one channel in AAC `4.0`.
+Stereo keeps every channel in the mix.
+* Choosing the layout from the channel count alone cannot tell `quad` from `4.0`, or `2.1` from `3.0`.
 
 == References
 
@@ -577,3 +643,8 @@ An audio encode costs far less worker capacity than a video encode.
 * https://developer.apple.com/documentation/http-live-streaming/hls-authoring-specification-for-apple-devices[Apple: HLS Authoring Specification for Apple Devices]
 * https://github.com/FFmpeg/FFmpeg/blob/4811625b5f4e5aed528aed9225d0ca868a8e6e96/libavcodec/eac3enc.c[FFmpeg's E-AC-3 encoder] writes its frames with the adaptive hybrid transform and spectral extension turned off.
 * https://www.atsc.org/atsc-documents/a522012-digital-audio-compression-ac-3-e-ac-3-standard-12172012/[ATSC A/52: Digital Audio Compression (AC-3, E-AC-3) Standard]
+* link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032: Media File Probe Results Are Persisted and Playback Reads Them]
+* https://github.com/streamarr/streamarr-server/pull/711[streamarr/streamarr-server#711] keeps a copied 3- or 4-channel track's own channels in its codec's lower audio steps.
+* https://github.com/chromium/chromium/blob/4a84ff43ddb481a1c0035b185fe384870f5e428c/media/formats/mp4/aac.cc#L269[Chromium's AAC parser] refuses channel configuration 0.
+* ISO/IEC 14496-3, MPEG-4 Audio, defines AAC's channel configurations.
+* https://ffmpeg.org/ffmpeg-utils.html#Channel-Layout[FFmpeg's channel layout names]

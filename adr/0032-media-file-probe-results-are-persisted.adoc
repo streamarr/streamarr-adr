@@ -57,10 +57,17 @@ Probe version 6 also reports, for each H.264 and HEVC video stream, whether a co
 Playback keeps using each file's probe version 5 outcome until the server stores the file's probe version 6 outcome.
 
 Another amendment adds probe version 7 (<<probe-version-7>>).
-Probe version 7 reports the start time correction that a job attempt's FFmpeg makes, which link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-media-time-zero[ADR 0037] cancels.
-When the worker cannot give an exact correction, the probe reports a fallback reason instead and still succeeds.
-The server sends a job that carries the correction only to a worker that lists probe version 7.
+Probe version 7 reports each audio stream's channel layout, as ffprobe names it.
+The server names an encode's output channel layout from that fact, as link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc#decision-channel-layout[ADR 0050] decides.
+The server sends a job that names a 3- or 4-channel layout only to a worker that lists probe version 7.
 Playback keeps using each file's probe version 6 outcome until the server stores the file's probe version 7 outcome.
+
+Another amendment adds probe version 8 (<<probe-version-8>>).
+Probe version 8 reports the start time correction that a job attempt's FFmpeg makes, which link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-media-time-zero[ADR 0037] cancels.
+When the worker cannot give an exact correction, the probe reports a fallback reason instead and still succeeds.
+The server sends a job that carries the correction only to a worker that lists probe version 8.
+Playback keeps using each file's probe version 7 outcome until the server stores the file's probe version 8 outcome.
+The start time correction was first probe version 7, and the channel layout took that number, as <<later-probe-versions>> describes.
 
 A further amendment removes the statistics that came from a sample of a private media library.
 Synthetic files, FATE samples and FFmpeg's own source now support the decisions that those statistics supported (<<evidence>>).
@@ -124,6 +131,7 @@ The row also stores the language and the default and forced flags.
 Probe version 4 adds the stream facts listed in <<probe-version-4,the probe version 4 section>>.
 Probe version 4 also reports the container's chapters.
 Probe version 5 adds the stream facts listed in <<probe-version-5,the probe version 5 section>>.
+Probe version 7 adds each audio stream's channel layout (<<probe-version-7>>).
 The database stores no `MediaFileProbePropertyIssue`.
 The server derives each issue from the stored facts, as ADR 0036 decides.
 https://github.com/streamarr/streamarr-server/issues/546[streamarr/streamarr-server#546] decides how the server stores the chapters.
@@ -529,20 +537,62 @@ streamarr/streamarr-transcode-worker#117 records each case with mkvmerge 92.0, m
 The copy fact joins probe version 6 rather than a later version, because both changes ship together and each later version probes every file again.
 A copy without the filter delivers the source's packets unchanged, so a stream measurement of those packets matches the delivered bytes (ADR 0054).
 ADR 0054 gives the reason for each condition of the copy fact.
-Unlike the start time correction (<<probe-version-7>>), the copy fact never changes what a copy plays, so the server does not hold copy jobs for workers that list probe version 6.
+Unlike the start time correction (<<probe-version-8>>), the copy fact never changes what a copy plays, so the server does not hold copy jobs for workers that list probe version 6.
 While worker versions differ, the server accepts that a copy on an older worker can cost and peak above the measured values, by whatever the filter repeats before each keyframe for that source.
 
 [[probe-version-7]]
-=== Probe version 7 reports the start time correction that a job attempt's FFmpeg makes
+=== Probe version 7 reports each audio stream's channel layout
 
 Probe version 7 reports every fact of probe version 6.
-https://github.com/streamarr/streamarr-server/issues/664[streamarr/streamarr-server#664] adds probe version 7.
-Probe version 7 adds one container fact to a successful outcome: the start time correction, or the reason why the worker gives none.
+https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] decides why the server needs the fact.
+Probe version 7 adds one stream fact to a successful outcome: the channel layout of each audio stream.
+The worker reports the layout name that ffprobe prints in the stream's `channel_layout` field, such as `stereo`, `3.0`, `quad` or `5.1(side)`.
+The worker never maps or shortens the name.
+When ffprobe prints `unknown`, the stream reports no layout.
+ffprobe prints `unknown` when the stream gives a channel count but no channel order, such as PCM in Matroska.
+Video and subtitle streams report no layout.
+The channel count stays a separate fact, so a stream without a layout still reports its channels.
+
+The server stores the layout with the stream.
+The server compares the stored name with the layouts that link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc#decision-channel-layout[ADR 0050] names, and parses nothing else from it.
+A layout that ADR 0050 does not name counts as an unknown layout.
+
+Every job that encodes audio names the encode's output layout, and the worker encodes with that layout (ADR 0050).
+The server sends a job that names a 3- or 4-channel layout only to a worker that lists probe version 7.
+Listing probe version 7 tells the server that the worker encodes each audio track in the layout that the job names.
+Every other job goes to any worker.
+A worker that does not list probe version 7 encodes by channel count.
+For 1, 2, 6 and 8 channels, FFmpeg then picks the encoder's mono, stereo, 5.1 or 7.1 layout, which is the layout that the job names.
+
+The upgrade to probe version 7 keeps every probe version 6 outcome.
+On the upgrade, the server queues a re-scan itself, as <<upgrade-rescan,the section on source changes and probe versions>> describes.
+Playback keeps using each file's probe version 6 outcome until the server stores the file's probe version 7 outcome.
+A probe version 6 outcome carries no layout, so each of its audio streams has an unknown layout.
+
+*Why:* FFmpeg's `-ac` option names a channel count only.
+For 3 and 4 channels, the pinned FFmpeg then picks the encoder's default layout for that count, whatever the source's layout.
+A quad source encoded to AAC with `-ac 4` became AAC 4.0, which mixes the two rear channels into one back channel.
+A rear tone in opposite phase then cancelled.
+A 3.0 source encoded to AAC with `-ac 3` became AAC 2.1, which FFmpeg writes as channel configuration 0 with an in-band channel map.
+Chromium's AAC parser refuses channel configuration 0.
+With the source's layout named, AAC 3.0 and AC-3 quad kept every channel.
+The measurements are in <<evidence-channel-layout>>.
+The server can name the source's layout only if the probe records it.
+The layout comes from the same ffprobe run as every other stream fact, so it adds no read.
+A 3- or 4-channel job on an older worker would get FFmpeg's default layout, which is the defect that this version fixes.
+For the other channel counts, the default layout is the layout that the job names, so those jobs need no newer worker.
+
+[[probe-version-8]]
+=== Probe version 8 reports the start time correction that a job attempt's FFmpeg makes
+
+Probe version 8 reports every fact of probe version 7.
+https://github.com/streamarr/streamarr-server/issues/664[streamarr/streamarr-server#664] adds probe version 8.
+Probe version 8 adds one container fact to a successful outcome: the start time correction, or the reason why the worker gives none.
 link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-media-time-zero[ADR 0037] defines the start time correction and decides how a job attempt uses it.
 
 The probe reads the start time correction as a job attempt's FFmpeg reads the source.
 A job attempt's FFmpeg keeps FFmpeg's default read limits, and the probe's limits (<<probe-limits>>) change which streams have a start time.
-So probe version 7 runs a second ffprobe with a job attempt's input options and FFmpeg's default limits.
+So probe version 8 runs a second ffprobe with a job attempt's input options and FFmpeg's default limits.
 The worker computes the correction from that run's container start time and stream start times.
 The rule follows FFmpeg's command line in the pinned FFmpeg: its list of demuxers that allow timestamp discontinuities, the earliest start time over every stream, and its rounding to microseconds.
 The worker owns the rule.
@@ -560,29 +610,29 @@ FFmpeg measures its wrap check from the corrected start time, so the correction 
 A source that becomes unavailable still fails the probe, as it does without the second run.
 
 A fallback never fails the probe.
-The server stores the outcome as a success without a correction, and the file's job attempts read the source as they did before probe version 7.
+The server stores the outcome as a success without a correction, and the file's job attempts read the source as they did before probe version 8.
 The server counts each stored fallback in a metric, tagged with its reason.
-A probe version 7 outcome carries either the correction or one fallback reason.
+A probe version 8 outcome carries either the correction or one fallback reason.
 An outcome with neither, or with a correction that is positive or finer than a microsecond, is a contract violation (<<probe-contract-violations>>).
 
-The server sends a job that carries the start time correction only to a worker that lists probe version 7.
-Listing probe version 7 tells the server that the worker applies the correction to every FFmpeg that reads the source.
+The server sends a job that carries the start time correction only to a worker that lists probe version 8.
+Listing probe version 8 tells the server that the worker applies the correction to every FFmpeg that reads the source.
 The check covers the first job attempt and every replacement attempt.
 A job without the correction goes to any worker.
-Before probe version 7, the listed probe versions decided only which worker may run a probe.
+Probe version 7 holds back jobs in the same way: a job that names a 3- or 4-channel layout goes only to a worker that lists probe version 7 (<<probe-version-7>>).
 
-The upgrade to probe version 7 keeps every probe version 6 outcome.
+The upgrade to probe version 8 keeps every probe version 7 outcome.
 On the upgrade, the server queues a re-scan itself, as <<upgrade-rescan,the section on source changes and probe versions>> describes.
-Playback keeps using each file's probe version 6 outcome until the server stores the file's probe version 7 outcome.
-A probe version 6 outcome carries no correction, so its job attempts read the source as before.
-A probe version 6 outcome and a probe version 7 outcome of the same file share one media time zero.
+Playback keeps using each file's probe version 7 outcome until the server stores the file's probe version 8 outcome.
+An outcome of probe version 7 or earlier carries no correction, so its job attempts read the source as before.
+An earlier outcome and a probe version 8 outcome of the same file share one media time zero.
 
 *Why:* Without the correction, a job attempt on an MPEG-TS source measured media time zero from the streams that the attempt mapped.
 With `-discard none` alone, a data stream that started 12 s early moved media time zero by 11.977 s.
 link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#evidence-timeline[ADR 0037] has the measurements.
 The probe already reads every source once, so the correction adds no work to a job attempt's start.
 The probe's limits give some subtitle streams a start time that FFmpeg's defaults do not (<<evidence-probe-limits>>), so a correction read under those limits could disagree with a job attempt's FFmpeg.
-In each fallback case, the command without the correction behaves as it did before probe version 7.
+In each fallback case, the command without the correction behaves as it did before probe version 8.
 When no stream has a start time, FFmpeg 8.1.3 computes the same wrong offset with or without `-discard none`, and no `-itsoffset` value cancels it.
 So a fallback keeps every file at least as playable as before, and failing the probe would stop a file that still plays.
 
@@ -636,7 +686,7 @@ An MPEG-TS probe can then stop once every stream has its parameters.
 Without this option, an MPEG-TS probe reads to those limits.
 The limits apply to the probe only.
 A job attempt's FFmpeg input keeps FFmpeg's defaults.
-So probe version 7 reads the start time correction in a second run with FFmpeg's defaults (<<probe-version-7>>).
+So probe version 8 reads the start time correction in a second run with FFmpeg's defaults (<<probe-version-8>>).
 
 *Why:* By default, ffprobe stops after 5 s of media or 5 MB.
 PGS is the Blu-ray image subtitle format.
@@ -832,7 +882,9 @@ Probe version 4 also reports the keyframe positions of version 3.
 https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] adds those facts.
 * Probe version 6 adds the bitrates from Matroska statistics tags, and whether a copy keeps every packet's bytes, that <<probe-version-6,the probe version 6 section>> describes.
 streamarr/streamarr-transcode-worker#117 adds those facts.
-* Probe version 7 adds the start time correction that <<probe-version-7,the probe version 7 section>> describes.
+* Probe version 7 adds each audio stream's channel layout, as <<probe-version-7,the probe version 7 section>> describes.
+https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] decides the rule that reads the layout.
+* Probe version 8 adds the start time correction that <<probe-version-8,the probe version 8 section>> describes.
 https://github.com/streamarr/streamarr-server/issues/664[streamarr/streamarr-server#664] adds that fact.
 
 Probe version 2 is unused.
@@ -841,12 +893,16 @@ The keyframe positions were ready first, so they shipped as version 3.
 No server requests probe version 2, and no worker advertises it.
 
 This ADR also first gave probe version 6 to the start time correction.
-The statistics tag bitrates are ready first, so they ship as version 6, and the start time correction is version 7.
+The statistics tag bitrates were ready first, so they shipped as version 6, and the start time correction became version 7.
+The channel layout then took version 7, and the start time correction became version 8.
+The channel layout blocks lower audio steps that keep a copy's 3 or 4 channels (https://github.com/streamarr/streamarr-server/pull/711[streamarr/streamarr-server#711]), and no change has yet implemented the start time correction.
+No server requested and no worker advertised probe version 7 for the start time correction.
 
 A change after probe version 4 does not add its facts to probe version 4.
 A change after probe version 5 does not add its facts to probe version 5.
 A change after probe version 6 does not add its facts to probe version 6.
 A change after probe version 7 does not add its facts to probe version 7.
+A change after probe version 8 does not add its facts to probe version 8.
 A later probe version adds caption detection: whether the video carries CEA-608 or CEA-708 captions.
 The probe detects the captions by decoding keyframes.
 https://github.com/streamarr/streamarr-server/issues/505[streamarr/streamarr-server#505] adds the caption detection.
@@ -1527,6 +1583,9 @@ Probe version 5 reads such static metadata from the first frame, or from the SEI
 * The re-scan on the upgrade to probe version 5 probes every file again.
 Each of those probes reads the first frames of the chosen video stream.
 Each file keeps its probe version 4 decisions until the server stores the file's probe version 5 outcome.
+* The re-scan on the upgrade to probe version 7 probes every file again, although the layout adds no read to a probe.
+Until the server stores a file's probe version 7 outcome, a copied 3- or 4-channel track of that file steps to stereo in a lower audio step, as before (ADR 0050).
+* A job that names a 3- or 4-channel layout runs only on a worker that lists probe version 7.
 * Probes and job attempts no longer compete for a worker's slots.
 Before this amendment, probes shared the playback slots, and a worker defaulted to one slot.
 A worker then ran one probe at a time, whatever its core count, so most of a many-core host's CPU stayed idle during a scan.
@@ -1557,16 +1616,25 @@ The next scan then retries that file.
 
 == Rejected Alternatives
 
+* Infer an audio stream's layout from its channel count.
+FFmpeg names three 3-channel layouts and four 4-channel layouts, so the count cannot tell quad from 4.0.
+* Let the worker choose each encode's output layout from the source without telling the server.
+The server decides whether a lower audio step keeps a track's 3 or 4 channels and writes the rendition's `CHANNELS` attribute, so the server must know the layout before the job starts.
+* Keep the start time correction as probe version 7 and give the channel layout probe version 8.
+Probe versions take numbers in the order in which they ship.
+The channel layout blocks streamarr/streamarr-server#711, and no change has yet implemented the start time correction.
+* Send a 3- or 4-channel job to any worker.
+A worker that does not list probe version 7 would encode it by channel count, in FFmpeg's default layout.
 * Fail the probe when a job attempt's FFmpeg reads a different container start time, or when no exact start time correction exists.
-The file would stop playing, although the command without the correction plays it as it did before probe version 7.
+The file would stop playing, although the command without the correction plays it as it did before probe version 8.
 * Have the server compute the start time correction from reported start times.
 The server would encode FFmpeg's command-line behaviour, and each FFmpeg upgrade in the worker would need a server change.
 * Compute the start time correction from the stream start times that the probe reads under its limits.
 The probe's limits change which streams have a start time, so the correction could disagree with a job attempt's FFmpeg.
-* Treat a probe version 6 outcome of a source whose demuxer allows timestamp discontinuities as missing, so that playback waits for the probe version 7 outcome.
+* Treat an earlier outcome of a source whose demuxer allows timestamp discontinuities as missing, so that playback waits for the probe version 8 outcome.
 The server would need its own copy of FFmpeg's demuxer list, and those files play during the re-scan as they did before.
 * Add a separate worker capability for the job's start time correction.
-Listing probe version 7 already tells the server that the worker applies the correction.
+Listing probe version 8 already tells the server that the worker applies the correction.
 * Trust every Matroska statistics tag.
 A file that FFmpeg cut or encoded again keeps tags that describe packets it no longer holds.
 * Trust statistics tags whose date is no earlier than the file's `DateUTC`.
@@ -1773,7 +1841,7 @@ Every operator, in Docker Compose and in Kubernetes, would have to grant that ca
 [[evidence]]
 == Evidence
 
-Each group below holds the measurements behind one part of probe version 4 or probe version 5.
+Each group below holds the measurements behind one part of probe version 4, 5 or 7.
 Unless a group says otherwise, the measurements ran on 2026-09-27 against ffprobe and FFmpeg 8.1.2 in the pinned worker image.
 The write-ups and harnesses for these measurements were not committed.
 This Evidence section therefore gives the results.
@@ -2111,6 +2179,30 @@ FFmpeg's MPEG-TS demuxer tells ffprobe that every program has its table only whe
 The limits raised the bytes read before the seek from 8.8 MB to 220 MB.
 The limits also raised the time to open the input by 0.5–0.9 s.
 
+[[evidence-channel-layout]]
+=== Channel layouts
+
+These measurements ran on 2026-11-01 against FFmpeg and ffprobe 8.1.3 in the pinned worker image.
+The sources were synthetic 16-bit PCM WAV files that the same FFmpeg built, which carry their channel layout.
+Each RMS level is the mean over 4 s that FFmpeg's `astats` filter reports for each channel.
+
+* ffprobe printed these `channel_layout` names: `mono`, `stereo`, `2.1`, `3.0`, `3.0(back)`, `4.0`, `quad`, `quad(side)`, `5.1`, `5.1(side)` and `7.1`.
+A 3- or 4-channel PCM stream in Matroska printed `unknown`, because Matroska stores no layout for PCM.
+FFmpeg's encoders then guess a layout from the count.
+* A quad source carried a 440 Hz tone on its two rear channels, in opposite phase, at −27.1 dB RMS on each, and silence on the front pair.
+** AAC with `-ac 4` wrote AAC 4.0, whose one back channel held the tone at −96.8 dB.
+** AAC with `-ac 2` wrote stereo with the tone at −30.1 dB on each channel.
+** AC-3 and E-AC-3 with `-ac 4` or `-ch_layout quad` wrote `quad(side)` with the tone at −27.1 dB on both rear channels.
+* A 3.0 source carried 300, 500 and 700 Hz tones on its left, right and center channels, at −21.1 dB RMS each.
+** AAC with `-ac 3` wrote AAC 2.1: the center was mixed into the front pair, and the low-frequency channel stayed silent.
+** AAC with `-ch_layout 3.0` wrote AAC 3.0, with every channel within 0.2 dB of the source.
+** AC-3 with `-ac 3` wrote `3.0(back)`: the center was mixed into the front pair, and the back channel stayed silent.
+** AC-3 with `-ch_layout 3.0` wrote 3.0, with every channel at the source's level.
+* AAC 3.0 and 4.0 wrote channel configurations 3 and 4 in the `esds` box.
+AAC 2.1 and quad wrote channel configuration 0 with a program config element.
+* Chromium's AAC parser fails a configuration whose channel configuration is 0 (`RCHECK(channel_config_ != 0)` in `media/formats/mp4/aac.cc`).
+* For 1, 2, 6 and 8 channels, `-ac` gave each encoder's mono, stereo, 5.1 or 7.1 layout: AAC wrote `5.1` and AC-3 and E-AC-3 wrote `5.1(side)` for 6 channels.
+
 == References
 
 * link:0007-transcode-first-with-smart-remux.adoc[ADR 0007: Transcode-First With Smart Remux]
@@ -2127,6 +2219,8 @@ The limits also raised the time to open the input by 0.5–0.9 s.
 * https://www.rfc-editor.org/rfc/rfc896[RFC 896: Congestion Control in IP/TCP Internetworks]
 * https://www.rfc-editor.org/rfc/rfc5681[RFC 5681: TCP Congestion Control]
 * https://github.com/FFmpeg/FFmpeg/blob/23151b11c75aa44d9ab8db796a53c76acf00f6c0/fftools/ffprobe.c#L2440-L2442[FFmpeg 8.1.3's ffprobe sets `scan_all_pmts` by default] and https://github.com/FFmpeg/FFmpeg/blob/23151b11c75aa44d9ab8db796a53c76acf00f6c0/libavformat/mpegts.c#L3109-L3121[its MPEG-TS demuxer reports every program's table only with `scan_all_pmts` off]
+* https://github.com/chromium/chromium/blob/4a84ff43ddb481a1c0035b185fe384870f5e428c/media/formats/mp4/aac.cc#L269[Chromium's AAC parser refuses channel configuration 0]
+* https://ffmpeg.org/ffmpeg-utils.html#Channel-Layout[FFmpeg channel layout names]
 * https://docs.kernel.org/accounting/psi.html[Linux kernel documentation: PSI - Pressure Stall Information]
 * https://ffmpeg.org/ffprobe.html[ffprobe documentation]
 * https://ffmpeg.org/ffmpeg-formats.html#Format-Options[FFmpeg format options: `analyzeduration` and `probesize`] and https://ffmpeg.org/ffmpeg-formats.html#mpegts[the MPEG-TS demuxer's `scan_all_pmts`]
@@ -2144,6 +2238,7 @@ The limits also raised the time to open the input by 0.5–0.9 s.
 * https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499: Start extra quality levels and pick presets from measured encoder headroom]
 * https://github.com/streamarr/streamarr-server/issues/344[streamarr/streamarr-server#344: Backfill missing and outdated persisted outcomes], closed as not planned
 * https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394: Probe version 5's facts, with its server and worker parts]
+* https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395: Let clients declare typed playback capabilities]
 * https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399: Playback capabilities epic]
 * https://github.com/streamarr/streamarr-server/issues/446[streamarr/streamarr-server#446: Refuse a video encode without a usable frame rate]
 * https://github.com/streamarr/streamarr-server/issues/501[streamarr/streamarr-server#501: Play HDR and 10-bit sources as SDR in every client]
@@ -2159,5 +2254,7 @@ The limits also raised the time to open the input by 0.5–0.9 s.
 * https://github.com/streamarr/streamarr-transcode-worker/issues/104[streamarr/streamarr-transcode-worker#104: Slow background probes on every host when the host is busy and nothing plays]
 * https://github.com/streamarr/streamarr-server/issues/632[streamarr/streamarr-server#632: Tell the worker when a probe ends at the probe timeout]
 * https://github.com/streamarr/streamarr-server/issues/480[streamarr/streamarr-server#480: Scan every library on a server-wide schedule, on by default every 24 hours at 00:00]
+* https://github.com/streamarr/streamarr-server/pull/711[streamarr/streamarr-server#711: Keep a copied 3- or 4-channel audio track's own channels in its codec's lower audio steps]
+* https://github.com/streamarr/streamarr-server/issues/664[streamarr/streamarr-server#664: Keep media time zero at the container's start time whatever streams an MPEG-TS job maps]
 * https://github.com/streamarr/streamarr-server/pull/646[streamarr/streamarr-server#646: Stop retrying a keyframe scan forever when the worker's reply breaks the contract]
 * https://github.com/streamarr/streamarr-server/issues/649[streamarr/streamarr-server#649: Stop probing a file forever when the worker's probe reply breaks the contract]

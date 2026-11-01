@@ -11,6 +11,8 @@ This decision also replaces the rule of link:0050-viewer-limits-bind-copies-and-
 Every encode that Original reaches now plays in Auto.
 ADR 0050 still decides when Original copies, and ADR 0050 still decides how the viewer's limits bound every encode.
 ADR 0050 now points to this decision too.
+This decision also narrows the rule of ADR 0037 that a copied variant that runs short is a format error.
+When the whole source has ended, playback now ends normally at the real end (<<decision-short-copy>>).
 link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045] keeps its fallback from direct play to HLS at original quality.
 
 == Context
@@ -46,6 +48,7 @@ After a format error during an HLS copy, playback ended with a typed error.
 ADR 0013 ended playback in Original when a copy lacked its parameter sets.
 ADR 0019 ended playback in Original after a copy's output mismatch.
 ADR 0037 ended playback in Original when a copied variant ran short.
+In Auto, ADR 0037 moved a copied variant that runs short to an encode, which pads past the real end with the last frame and silence.
 ADR 0049 accepted that a rejected copy of a stream with an unknown codec level, codec tier or frame rate ends playback in Original.
 The reason given was that Original is a manual choice, and the server never silently replaces a manual choice.
 A fixed quality can also play an HLS copy, when the source fits the fixed quality's picture box and the viewer's other limits (ADR 0050).
@@ -89,7 +92,7 @@ The same failures that move Auto from a copy to an encode move Original from the
 
 * a format error that the player reports for the copy;
 * a copy's output mismatch, such as a copy whose decoder configuration record lacks its parameter sets (ADR 0013 and ADR 0019);
-* a copied variant that runs short (ADR 0037);
+* a copied variant that runs short while some source stream still has media after the copy's last segment (<<decision-short-copy>>);
 * the worker's typed failure to convert a Dolby Vision profile 7 RPU during the copy (https://github.com/streamarr/streamarr-server/issues/651[streamarr/streamarr-server#651]).
 
 The fallback applies whether the viewer picked Original or the client started in Original.
@@ -226,6 +229,25 @@ The stripped copy still plays the source's own video stream at the source's own 
 A quality control that switched to Auto would describe a ladder that does not play.
 The notice and the mark make the loss of Dolby Vision visible, so the server does not replace the copy silently (ADR 0013).
 
+[[decision-short-copy]]
+=== A copy that runs short after the whole source has ended ends playback normally
+
+A copied variant runs short when the source ends before the media segments that the copy's playlist advertises (ADR 0037).
+When every source stream has ended by the copy's last segment, playback ends at the real end as a normal end.
+The server starts no encode and spends no format attempt.
+The server tells the client where the real end is, and the client ends playback there itself, as it does at the end of the media title.
+The client shows no notice, and its quality control shows no mark.
+The server starts no job attempt past the real end.
+A segment request past the real end receives `503 Service Unavailable`, the only refusal of an advertised segment that link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019] allows.
+
+When some source stream still has media after the copy's last segment, such as audio that runs on after the video, the short copy is a format error.
+The fallbacks of this decision then apply: Original and a fixed quality fall back to the encode, which pads to the advertised end (ADR 0037).
+The same rule holds in Auto, where the short copy that is a format error starts Auto's recovery (streamarr/streamarr-server#401).
+
+*Why:* When the whole source has ended, an encode adds only a frozen frame and silence (https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511]).
+The viewer would see a notice, a change to Auto and a new stream session during the credits, for nothing that the viewer could watch.
+A request past the real end breaks hls.js, AVPlayer and WebKit's native player, so the client must end playback itself.
+
 [[decision-notice]]
 === The client shows a short notice
 
@@ -326,13 +348,16 @@ The picture can therefore start below the source's size and then climb.
 * The encode costs worker capacity that the copy did not cost.
 * Under ADR 0049, a stream with an unknown codec level, codec tier or frame rate can reach a player that refuses the copy.
 In Original and in a fixed quality, that refusal now costs a format attempt and a converted picture instead of ending playback.
-* A copied variant that runs short is detected near the real end of the source.
+* A copied variant that runs short after the whole source has ended now ends playback normally at the real end, in every playback choice.
+The player never reaches the advertised end, so the client must stop it there.
+* A copied variant that runs short while some source stream still has media is detected near the real end of the source.
 In Original and in a fixed quality, the viewer then sees the notice near the end, and the encode pads to the advertised end (ADR 0037).
 * After the fallback, the viewer's limits bound the stream, because Auto honors them (ADR 0050).
 * The server's answer when a stream session starts, and its answer to a format failure, must carry the playback choice that plays, so that the client can show the notice and Auto.
 In a fixed quality, the answer must also tell the client that an encode replaced a failed copy, so that the client can show the notice.
 The answer must also carry the encode's dynamic range, so that the client's HDR toggle shows SDR after an SDR fallback.
 In Original and in a fixed quality, the answer must tell the client that the copy with Dolby Vision stripped replaced a failed Dolby Vision copy, so that the client can show the Dolby Vision notice.
+* The server must tell the client where a copy that runs short after the whole source has ended really ends, so that the client can end playback there.
 * Each client must show the notice and switch its quality control to Auto.
 Each client must also mark the playback choice whose output fell back, with an explanation.
 In a fixed quality, each client must show the notice without its sentence about Auto and keep the fixed quality selected.
@@ -363,6 +388,7 @@ Epic streamarr/streamarr-server#399 starts another format only after a qualifyin
 * Falling back from a failed Dolby Vision copy straight to the encode in Original and in a fixed quality would give up HDR until streamarr/streamarr-server#397 adds HDR10 encodes, and it would cost worker capacity.
 The copy with Dolby Vision stripped keeps the source's pixels and HDR base.
 * Switching Original to Auto after the fallback to the copy with Dolby Vision stripped would show a ladder in the quality control while the source's own video stream plays.
+* Falling back to an encode that pads when a copy runs short after the whole source has ended would show the viewer a notice and a change to Auto during the credits, for a frozen frame and silence.
 * Skipping the HLS copy after a failed direct play, so that a budget of two reaches the encode, would give up the source's own video whenever only direct play fails.
 The HLS copy still plays the source's own video, and it can play where direct play cannot, for example when the player refuses the source container.
 

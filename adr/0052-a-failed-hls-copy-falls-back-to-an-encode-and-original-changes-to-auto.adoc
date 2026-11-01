@@ -1,0 +1,421 @@
+= ADR 0052: A Failed HLS Copy Falls Back to an Encode, and Original Changes to Auto Whenever It Must Encode
+
+== Status
+
+Proposed
+
+This decision changes a rule that link:0013-stream-decision-architecture.adoc[ADR 0013], link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019], link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036], link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] and link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049] state.
+Those ADRs end playback in Original and in a fixed quality after a format error during an HLS copy.
+Each of those ADRs now points to this decision.
+This decision also replaces the rule of link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc[ADR 0050] that an encode in Original is one variant without a label.
+Every encode that Original reaches now plays in Auto.
+ADR 0050 still decides when Original copies, and ADR 0050 still decides how the viewer's limits bound every encode.
+ADR 0050 now points to this decision too.
+This decision also narrows the rule of ADR 0037 that a copied variant that runs short is a format error.
+When the whole source has ended, playback now ends normally at the real end (<<decision-short-copy>>).
+link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045] keeps its fallback from direct play to HLS at original quality.
+
+== Context
+
+The viewer picks a playback choice when a stream session starts.
+Original is the playback choice that plays the source at its own quality (ADR 0045).
+Auto is the playback choice in which the player adapts quality to bandwidth across the variants.
+A fixed quality is a playback choice that names one quality, such as 720p, and keeps that quality (link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc[ADR 0050]).
+Each client shows the playback choices in a quality control, such as a quality menu.
+Original sits at the top of that menu.
+iOS and the web client start in Auto.
+tvOS starts in Original.
+
+Direct play means that the server sends the source file itself (ADR 0045).
+A stream copy passes the source video through unchanged.
+An HLS copy is an HLS stream session whose video is a stream copy.
+An encode is video that the worker encodes.
+In Original, the server direct-plays a file that the client capability declaration covers.
+Otherwise, Original plays an HLS copy when one capability entry accepts the copy (ADR 0049).
+Otherwise, ADR 0050 decides that Original plays an encode of one variant, bounded by the viewer's limits.
+The server today plays Original as copy-only instead.
+When no capability entry accepts a copy, the server refuses to start and asks the viewer to set Quality to Auto or to try another device.
+
+A format error is a player error that concerns the media format itself, not the network or the server.
+A format attempt is one output format that the server chooses within a playback session.
+A playback session is the logical span of one viewing of a media title.
+Each playback session has a format-attempt budget that limits how many format attempts the playback session uses (https://github.com/streamarr/streamarr-server/issues/401[streamarr/streamarr-server#401]).
+Before this decision, the default budget was two format attempts: the initial format plus one more.
+
+Before this decision, Original recovered from one format error only.
+After a format error during direct play, the server fell back to HLS at original quality (ADR 0045).
+After a format error during an HLS copy, playback ended with a typed error.
+ADR 0013 ended playback in Original when a copy lacked its parameter sets.
+ADR 0019 ended playback in Original after a copy's output mismatch.
+ADR 0037 ended playback in Original when a copied variant ran short.
+In Auto, ADR 0037 moved a copied variant that runs short to an encode, which pads past the real end with the last frame and silence.
+ADR 0049 accepted that a rejected copy of a stream with an unknown codec level, codec tier or frame rate ends playback in Original.
+The reason given was that Original is a manual choice, and the server never silently replaces a manual choice.
+A fixed quality can also play an HLS copy, when the source fits the fixed quality's picture box and the viewer's other limits (ADR 0050).
+A format error during that HLS copy also ended playback, because a fixed quality never changed format automatically.
+
+Auto recovers from a failed Dolby Vision copy in a fixed order (streamarr/streamarr-server#401).
+For Dolby Vision profiles 8.1, 8.4, 10.1 and 10.4, and for profile 7 that the worker converts to profile 8.1 (https://github.com/streamarr/streamarr-server/issues/651[streamarr/streamarr-server#651]), Auto first tries the copy with Dolby Vision stripped and then an encode.
+The copy with Dolby Vision stripped plays the same video stream on its PQ or HLG base (ADR 0049).
+Dolby Vision profiles 5 and 10.0 have no compatible base, so Auto goes straight from the Dolby Vision copy to an encode.
+Every encode is 8-bit SDR until https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397] adds HDR10 encodes.
+
+A player can refuse a copy that the client declared.
+A client capability declaration is evidence, not a guarantee (ADR 0049).
+AetherEngine, an open-source playback engine for Apple platforms, records several cases in which AVPlayer refuses a stream because of the playlist or the packaging rather than the decoder.
+AetherEngine records that AVPlayer refuses an HEVC level that the `CODECS` attribute names.
+AetherEngine also records that tvOS refuses an HDR variant while the display is not in an HDR mode.
+Rivulet, an open-source tvOS media client that uses AetherEngine, plans a transcode as the fallback for every route that plays the source directly.
+Rivulet also falls back to that transcode after a load hangs for 60 seconds.
+Streamarr read both projects' source code and measured neither.
+tvOS starts in Original, so an Apple TV viewer meets a refused copy as an error.
+
+== Decision
+
+[[decision-fallback]]
+=== In Original, a format error during an HLS copy falls back to an encode
+
+In Original, the server tries up to four outputs in this order:
+
+. direct play, when the client capability declaration covers the file (ADR 0045);
+. an HLS copy at original quality, when one capability entry accepts the copy (ADR 0049);
+. the copy with Dolby Vision stripped, after a failed Dolby Vision copy (<<decision-dolby-vision>>);
+. an encode.
+
+The server skips every step that the declaration, the probe's property issues or the copy rules rule out.
+A file that the declaration does not cover for direct play therefore starts with the HLS copy.
+A file that the server cannot copy starts with the encode, which plays in Auto (<<decision-start>>).
+
+After a format error during the HLS copy, the server starts a new format attempt that encodes the video, unless the copy with Dolby Vision stripped comes first (<<decision-dolby-vision>>).
+The new format attempt has its own stream session, playlist and initialization segment, as every format attempt does.
+The same failures that move Auto from a copy to an encode move Original from the HLS copy to the encode:
+
+* a format error that the player reports for the copy;
+* a copy's output mismatch, such as a copy whose decoder configuration record lacks its parameter sets (ADR 0013 and ADR 0019);
+* a copied variant that runs short while some source stream still has media after the copy's last segment (<<decision-short-copy>>);
+* the worker's typed failure to convert a Dolby Vision profile 7 RPU during the copy (https://github.com/streamarr/streamarr-server/issues/651[streamarr/streamarr-server#651]).
+
+The fallback applies whether the viewer picked Original or the client started in Original.
+
+The fallback needs an encode that the client accepts.
+Some sources cannot be encoded, for example a source with no usable output frame rate (https://github.com/streamarr/streamarr-server/issues/446[streamarr/streamarr-server#446]).
+When the server cannot make an encode that the client accepts, no fallback to an encode exists.
+A format error during the HLS copy then ends playback with the typed terminal error, as Auto's recovery does when no eligible replacement exists (streamarr/streamarr-server#401).
+The one exception is a failed Dolby Vision copy whose copy with Dolby Vision stripped is eligible: that copy still plays first (<<decision-dolby-vision>>).
+
+*Why:* An error leaves the viewer with no action to take, while the server can still play the title.
+The viewer picked Original to watch the title at its best quality, not to give up on the title when that quality fails.
+Every failure in the list above is a failure of the copy that an encode avoids.
+
+[[decision-budget]]
+=== The default budget is four format attempts, and each fallback spends one
+
+The default format-attempt budget is four format attempts: the initial format plus three more.
+Four format attempts hold each of Original's four outputs for a Dolby Vision source: direct play, the Dolby Vision HLS copy, the copy with Dolby Vision stripped and the encode.
+The budget stays configurable.
+
+The encode after the HLS copy counts as one format attempt against the playback session's format-attempt budget.
+The copy with Dolby Vision stripped after a failed Dolby Vision copy also counts as one format attempt.
+A new stream session does not reset the budget or the playback session's format-failure history.
+When a configured budget has no room for the next output, playback ends with the typed terminal error, as Auto's recovery does (streamarr/streamarr-server#401).
+
+*Why:* tvOS starts in Original and direct-plays every file that its declaration covers.
+Under a budget of two, direct play and the HLS copy used both format attempts, so a refused copy on tvOS still ended playback.
+Under a budget of three, a Dolby Vision file that the declaration covers would spend the budget on direct play and the two copies, so a refused stripped copy would still end playback.
+Some video is better than no video, so the default budget lets every Original reach the encode.
+
+[[decision-auto]]
+=== When Original plays an encode, the playback choice is Auto
+
+Every encode that Original reaches is a format attempt in Auto.
+That holds for the encode after the HLS copy, and for an encode that Original starts with (<<decision-start>>).
+The server tells the client that the playback choice changed from Original to Auto.
+The client then shows Auto as the selected choice in its quality control.
+A client without a quality control shows the notice alone (<<decision-notice>>).
+
+Auto's own rules then apply to the encode:
+
+* The viewer's limits bound the encode, as ADR 0050 decides for Auto.
+* The server offers Auto's encoded quality ladder of quality tiers (ADR 0050).
+The playlist lists the variants in Auto's order, and the first variant starts first (link:0008-server-generated-hls-playlists.adoc[ADR 0008], link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044]).
+* The ladder offers no copy.
+After a failed HLS copy, the failed copy stays in the playback session's format-failure history, so the server does not choose the failed copy again for the encode's ladder.
+* A format error during the encode starts Auto's recovery within the budget that remains (streamarr/streamarr-server#401).
+For example, Auto may then give up HDR for SDR.
+* The client hides the HDR toggle, as it does in Auto.
+
+Changing the playback choice to Auto uses no format attempt beyond the encode.
+From Auto, the viewer can pick any playback choice again.
+A pick of Original starts Original afresh (<<decision-repick>>).
+
+*Why:* The quality control is a second sign, beside the notice, that the viewer watches a converted version.
+After the change, the stream is Auto's ladder, so the quality control describes the stream that actually plays.
+A quality control that still showed Original would claim the source's own quality while an encode plays.
+The server never silently replaces a manual choice (ADR 0013), and the notice and the quality control make this replacement visible.
+
+[[decision-start]]
+=== An Original that starts with an encode plays the encode in Auto
+
+Original starts with an encode when the server rules out both direct play and the HLS copy.
+That happens, for example, when no capability entry accepts a copy of the source, or when a property issue rules out a copy.
+The server then plays the encode in Auto, as it plays the encode after a failed HLS copy (<<decision-auto>>).
+The client shows the notice, and its quality control shows Auto (<<decision-notice>>).
+The encode is the playback session's first format attempt, so the change to Auto spends no format attempt.
+The same holds when direct play fails and the server rules out the HLS copy: the encode that follows plays in Auto.
+The rule applies whether the viewer picked Original or the client started in Original.
+
+*Why:* Some video is better than no video.
+When the device cannot play the original video, the server switches the player to Auto, whether the server learns that from the declaration or from a failed copy.
+Refusing to start, as the server does today, gives the viewer an error for a title that the server can still play.
+An encode under the Original label would claim the source's own quality while a converted picture plays.
+
+[[decision-fixed-quality]]
+=== In a fixed quality, a format error during an HLS copy falls back to an encode at the same fixed quality
+
+After a format error during a fixed quality's HLS copy, the server starts a new format attempt that encodes the video at the same fixed quality, unless the copy with Dolby Vision stripped comes first (<<decision-dolby-vision>>).
+The same failures that move Original from the HLS copy to the encode qualify (<<decision-fallback>>).
+The encode follows the rules of ADR 0050 for a fixed quality's encode.
+The fixed quality's picture box, the viewer's other limits and one capability entry bound its single variant.
+The encode counts as one format attempt against the playback session's format-attempt budget (<<decision-budget>>).
+The failed copy stays in the playback session's format-failure history.
+When the server cannot make an encode that the client accepts, the format error ends playback with the typed terminal error (<<decision-fallback>>).
+
+The playback choice stays the fixed quality, and the client keeps that fixed quality selected in its quality control.
+The client shows the notice without its sentence about Auto (<<decision-notice>>).
+When the failed copy was HDR and the device cannot play an HDR encode, the encode is SDR.
+The notice already tells the viewer that a converted version is playing, so the change to SDR is not silent.
+The server tells the client that the encode is SDR, and the client's HDR toggle then shows SDR.
+A fixed quality changes format after no other format error, so a format error during the encode ends playback with the typed terminal error.
+
+*Why:* A fixed quality promises a picture size, not a copy.
+An encode at the same fixed quality keeps that promise, while an error leaves the viewer with no video.
+Switching to Auto would drop the size that the viewer picked.
+An SDR picture at the chosen size is better than no picture, because some video is better than no video.
+The notice tells the viewer that a converted version is playing, so the server does not replace the copy silently (ADR 0013).
+
+[[decision-dolby-vision]]
+=== In Original and in a fixed quality, a failed Dolby Vision copy first falls back to the copy with Dolby Vision stripped
+
+Original and a fixed quality follow Auto's order for a failed Dolby Vision copy (streamarr/streamarr-server#401).
+The order applies to Dolby Vision profiles 8.1, 8.4, 10.1 and 10.4, and to profile 7 that the worker converts to profile 8.1.
+It applies when one capability entry accepts the copy's PQ or HLG base, so the client declares the base range.
+In Original, the server then tries direct play, the Dolby Vision HLS copy, the copy with Dolby Vision stripped and the encode, in that order.
+In a fixed quality, the server tries the Dolby Vision copy, the copy with Dolby Vision stripped and the encode at the same fixed quality.
+The server skips every step that the declaration, the probe's property issues or the copy rules rule out.
+
+Two failures of the Dolby Vision copy lead to the copy with Dolby Vision stripped:
+
+* a format error that the player reports for the Dolby Vision copy;
+* the worker's typed failure to convert a Dolby Vision profile 7 RPU during the copy (streamarr/streamarr-server#651).
+
+A copy's output mismatch and a copied variant that runs short go straight to the encode, as in Auto, because the copy with Dolby Vision stripped copies the same video stream and would fail in the same way.
+Profiles 5 and 10.0 have no compatible base, so a failed Dolby Vision copy of either goes straight to the encode.
+
+The copy with Dolby Vision stripped is a new format attempt with its own stream session, playlist and initialization segment.
+It counts as one format attempt against the playback session's format-attempt budget (<<decision-budget>>).
+The failed Dolby Vision copy stays in the playback session's format-failure history.
+The playback choice stays Original or the fixed quality, and the client keeps that choice selected in its quality control.
+The client shows the Dolby Vision notice (<<decision-notice>>), and its quality control marks the selected choice (<<decision-marking>>).
+In a fixed quality, the HDR toggle keeps showing HDR, because the copy plays on the source's HDR base.
+A format error during the copy with Dolby Vision stripped falls back to the encode, as a format error during any HLS copy does.
+In Original, the playback choice then changes to Auto (<<decision-auto>>).
+In a fixed quality, the encode keeps the same fixed quality (<<decision-fixed-quality>>).
+
+*Why:* The copy with Dolby Vision stripped keeps the source's pixels, picture size and PQ or HLG base, and it costs no encoder capacity.
+An encode gives up HDR until streamarr/streamarr-server#397 adds HDR10 encodes, and it costs worker capacity.
+AetherEngine's first fallback for a refused Dolby Vision master is the same segments without Dolby Vision.
+Jellyfin strips Dolby Vision with a bitstream filter, never with an encode, when the client asks for HDR10.
+The stripped copy still plays the source's own video stream at the source's own size, so Original keeps its promise of the source's own quality, apart from the Dolby Vision information.
+A quality control that switched to Auto would describe a ladder that does not play.
+The notice and the mark make the loss of Dolby Vision visible, so the server does not replace the copy silently (ADR 0013).
+
+[[decision-short-copy]]
+=== A copy that runs short after the whole source has ended ends playback normally
+
+A copied variant runs short when the source ends before the media segments that the copy's playlist advertises (ADR 0037).
+When every source stream has ended by the copy's last segment, playback ends at the real end as a normal end.
+The server starts no encode and spends no format attempt.
+The client ends playback at the real end itself, as it does at the end of the media title.
+The client shows no notice, and its quality control shows no mark.
+The server starts no job attempt past the real end.
+
+The normal end is part of the stream session's current state, and the server keeps it until the stream session ends.
+The state names the real end's position.
+The server publishes the state when the copy runs short, and a recovery query returns it, so a late or missed event does not lose it (link:0042-graphql-subscriptions-run-over-websocket-until-token-expiry.adoc[ADR 0042]).
+The normal end takes precedence over every failure in that stream session.
+The server answers a failure report for that stream session with the normal end, never with a fallback or with the typed terminal error.
+The server holds a segment request past the real end and never answers it with `503 Service Unavailable`.
+The held request ends when the client ends playback or when the stream session ends.
+A player that reaches the real end before the client learns of it therefore waits there instead of failing, and the client then ends playback.
+This is the one held segment request that link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]'s producer liveness does not bound, because no producer can make that segment.
+
+When some source stream still has media after the copy's last segment, such as audio that runs on after the video, the short copy is a format error.
+The fallbacks of this decision then apply: Original and a fixed quality fall back to the encode, which pads to the advertised end (ADR 0037).
+The same rule holds in Auto, where the short copy that is a format error starts Auto's recovery (streamarr/streamarr-server#401).
+
+*Why:* When the whole source has ended, an encode adds only a frozen frame and silence (https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511]).
+The viewer would see a notice, a change to Auto and a new stream session during the credits, for nothing that the viewer could watch.
+A request past the real end breaks hls.js, AVPlayer and WebKit's native player, so the client must end playback itself.
+A refusal of that request would race with the client's normal end, so the server holds the request, and a player that waits does not fail.
+
+[[decision-notice]]
+=== The client shows a short notice
+
+When Original changes to Auto, the client shows this notice:
+
+[quote]
+This video couldn't play in its original form, so a converted version is playing.
+Quality is now set to Auto.
+To choose another quality, open quality settings.
+
+The notice appears over the playing video for a few seconds and then disappears by itself.
+The notice neither pauses playback nor asks the viewer to act.
+The notice names no internal concept, such as a worker, a format attempt, a copy or a transcode.
+Each client may adapt the words "quality settings" to the name of its own quality control.
+
+The client shows the same notice for every cause of the change to Auto: a refused copy, a copy that the worker could not make, a declaration that accepts no copy, a property issue that rules out a copy, and a stream that ends early.
+The client shows it when Original starts with an encode too.
+The notice names no cause, because the file rather than the device can force the encode.
+
+After the fallback in a fixed quality, the quality control still shows the fixed quality.
+The client therefore shows the notice without the sentence "Quality is now set to Auto.":
+
+[quote]
+This video couldn't play in its original form, so a converted version is playing.
+To choose another quality, open quality settings.
+
+After the fallback to the copy with Dolby Vision stripped, in Original or in a fixed quality, the client shows this notice:
+
+[quote]
+This video couldn't play in Dolby Vision, so the HDR version is playing.
+
+The selected choice stays, so this notice has no sentence about quality settings.
+The notice names no cause, because either the player or the worker's failed profile 7 conversion can force the stripped copy.
+
+The client shows no notice after the fallback from direct play to the HLS copy.
+That HLS copy still plays the source's own video, so a notice about a converted version would be false.
+
+*Why:* A notice that blamed the device would be false whenever the file forces the encode, for example through a property issue or a stream that ends early.
+One text for every cause keeps each client simple and keeps the notice true.
+
+[[decision-marking]]
+=== The quality control marks a playback choice whose output fell back
+
+After a fallback, the client's quality control marks the playback choice whose output fell back, and the mark explains why.
+
+* After Original changes to Auto, the quality control marks Original, and Auto is the selected choice.
+That holds after a failed HLS copy, after a failed direct play whose HLS copy the server rules out, and when Original starts with an encode.
+* After the fallback to the copy with Dolby Vision stripped, the quality control marks the selected choice, Original or the fixed quality, which stays selected.
+* After a fixed quality's fallback to an encode, the quality control marks the fixed quality, which stays selected.
+
+The quality control shows no mark after the fallback from direct play to the HLS copy, because that HLS copy plays the source's own video.
+The mark stays until the viewer leaves the media title, or until the marked choice plays without a fallback.
+Every viewer can reach the mark's explanation, including through a screen reader.
+Each client decides how the mark looks and how its explanation appears (streamarr/streamarr-web#29, streamarr/streamarr-apple#60).
+
+*Why:* The notice disappears after a few seconds.
+The mark keeps the reason in the place where the viewer chooses quality.
+A viewer who sees the mark beside Original knows that Original may fall back again before picking it.
+
+[[decision-repick]]
+=== A viewer who picks Original again starts Original afresh
+
+After the playback choice changed to Auto, the viewer can pick Original again while watching the same media title.
+The server then tries Original from the top, as a fresh request.
+It tries direct play, the HLS copy, the copy with Dolby Vision stripped and the encode in that order, and skips every step that the declaration, the probe's property issues or the copy rules rule out.
+The pick is the viewer's own choice, not format recovery, so it spends no format attempt, even when the budget is used up.
+The server handles the pick as it handles reopening the media title: Original starts with the full format-attempt budget and without the earlier format-failure history.
+A fallback after the pick follows this decision again, with its notice and its mark.
+
+*Why:* AetherEngine stopped remembering a refused HDR master for the rest of a session, because tvOS refused the master during a display mode switch and played the same master a moment later.
+Rivulet resets its fallback when the viewer goes back to Original.
+Epic streamarr/streamarr-server#399 already starts fresh when the viewer reopens the media title.
+A pick that skipped every failed output would send the viewer straight back to Auto and to the same notice.
+A pick that spent a format attempt could end playback with the typed terminal error, although the viewer only asked to try again.
+
+== Consequences
+
+* In Original, a refused HLS copy no longer ends playback under the default budget.
+The viewer sees the notice, and the quality control shows Auto.
+* In a fixed quality, a refused HLS copy no longer ends playback under the default budget.
+The viewer sees the notice, and the fixed quality stays selected.
+* With the default budget of four format attempts, a file that starts with direct play reaches the encode.
+For a Dolby Vision source whose copy with Dolby Vision stripped is eligible, direct play is the first format attempt, the Dolby Vision HLS copy is the second, the copy with Dolby Vision stripped is the third, and the encode is the fourth.
+A format error during that encode then ends playback with the typed terminal error, because no format attempt remains for Auto's recovery.
+Any other file that starts with direct play keeps one format attempt for Auto's recovery after the encode.
+* The default budget holds for every playback choice, so Auto's recovery also gets a fourth format attempt.
+For a Dolby Vision profile 8.1, 8.4, 10.1 or 10.4 source, Auto then keeps one format attempt after the encode that follows the copy with Dolby Vision stripped (streamarr/streamarr-server#401).
+* A playback session can spend four format attempts before the typed terminal error, so a viewer may wait through up to three failed starts before the error.
+* In Original and in a fixed quality, a refused Dolby Vision copy of profile 8.1, 8.4, 10.1 or 10.4, or of converted profile 7, keeps HDR and the source's picture through the copy with Dolby Vision stripped, and it costs no worker capacity.
+The viewer sees the Dolby Vision notice, and the selected choice stays.
+* tvOS starts in Original, so every tvOS stream that starts with an encode now starts with the notice and with Auto selected.
+* A viewer who picks Original again can meet the same failure, the same notice and the same change to Auto again.
+Each such pick costs another failed start and, after a failed copy, another encode.
+* Original never plays an encode.
+The rules of ADR 0050 for an encode in Original, one variant without a label, no longer apply, because that encode is Auto's ladder.
+* The encode starts on Auto's first variant, which is the variant whose average bitrate is nearest 2000 kb/s.
+The picture can therefore start below the source's size and then climb.
+* The encode costs worker capacity that the copy did not cost.
+* Under ADR 0049, a stream with an unknown codec level, codec tier or frame rate can reach a player that refuses the copy.
+In Original and in a fixed quality, that refusal now costs a format attempt and a converted picture instead of ending playback.
+* A copied variant that runs short after the whole source has ended now ends playback normally at the real end, in every playback choice.
+The player never reaches the advertised end, so the client must stop it there.
+* A copied variant that runs short while some source stream still has media is detected near the real end of the source.
+In Original and in a fixed quality, the viewer then sees the notice near the end, and the encode pads to the advertised end (ADR 0037).
+* After the fallback, the viewer's limits bound the stream, because Auto honors them (ADR 0050).
+* The server's answer when a stream session starts, and its answer to a format failure, must carry the playback choice that plays, so that the client can show the notice and Auto.
+In a fixed quality, the answer must also tell the client that an encode replaced a failed copy, so that the client can show the notice.
+The answer must also carry the encode's dynamic range, so that the client's HDR toggle shows SDR after an SDR fallback.
+In Original and in a fixed quality, the answer must tell the client that the copy with Dolby Vision stripped replaced a failed Dolby Vision copy, so that the client can show the Dolby Vision notice.
+* The server must keep the normal end of a copy that runs short after the whole source has ended as stream session state, publish it, return it from a recovery query and answer failure reports with it, so that the client can end playback at the real end.
+The server holds a segment request past that real end until the client ends playback or the stream session ends.
+* Each client must show the notice and switch its quality control to Auto.
+Each client must also mark the playback choice whose output fell back, with an explanation.
+In a fixed quality, each client must show the notice without its sentence about Auto and keep the fixed quality selected.
+After the fallback to the copy with Dolby Vision stripped, each client must show the Dolby Vision notice and keep the selected choice.
+
+== Rejected Alternatives
+
+* Ending playback after an HLS copy's format error, the earlier rule, gives the viewer an error for a title that the server can still play.
+tvOS starts in Original, so most Apple TV viewers would meet that error.
+* Falling back silently while the quality control still shows Original would replace a manual choice without telling the viewer.
+ADR 0013 forbids a silent replacement.
+* Showing the notice while the quality control still shows Original would leave the quality control describing a stream that does not play.
+* Refusing to start Original when the server must encode, as the server does today, gives the viewer an error for a title that the server can still play.
+* Playing an encode in Original as one variant without a label, as ADR 0050 decided, would keep Original selected while a converted picture plays.
+* Encoding one variant at the source's size under the Auto label would show Auto while the player has only one variant, so the player cannot adapt quality.
+* Asking the viewer to try Auto after Original fails, the epic's earlier deferred idea, stops playback until the viewer acts.
+* Skipping every failed output when the viewer picks Original again would send the viewer straight back to Auto, and it would keep a refusal that does not repeat, such as tvOS's refusal during a display mode switch, for the rest of the viewing.
+* Charging the viewer's pick of Original against the format-attempt budget would end playback when the viewer asks to try again.
+* Marking Original with a line of text such as "Didn't play on this device" would blame the device, which is false when the file forces the encode.
+* Telling the viewer about a fallback only through the notice would lose the reason once the notice disappears.
+* A notice that says "This device couldn't play the original video" would be false when a property issue or a stream that ends early forces the encode.
+* Starting the encode beside every copy as a standby stream costs worker capacity for every copy that plays.
+Epic streamarr/streamarr-server#399 starts another format only after a qualifying format error.
+* Keeping the earlier rule for a fixed quality, so that a format error during its HLS copy still ends playback, gives the viewer an error for a title that the server can still play at the size the viewer picked.
+* Switching a fixed quality to Auto after a failed HLS copy would drop the size that the viewer picked, although an encode at that size can play.
+* Keeping the default budget at two format attempts, and letting the budget bind, would end playback on tvOS whenever a file that starts with direct play also fails its HLS copy.
+* A default budget of three format attempts would end playback on tvOS whenever a Dolby Vision file that starts with direct play also fails both copies.
+* Falling back from a failed Dolby Vision copy straight to the encode in Original and in a fixed quality would give up HDR until streamarr/streamarr-server#397 adds HDR10 encodes, and it would cost worker capacity.
+The copy with Dolby Vision stripped keeps the source's pixels and HDR base.
+* Switching Original to Auto after the fallback to the copy with Dolby Vision stripped would show a ladder in the quality control while the source's own video stream plays.
+* Falling back to an encode that pads when a copy runs short after the whole source has ended would show the viewer a notice and a change to Auto during the credits, for a frozen frame and silence.
+* Skipping the HLS copy after a failed direct play, so that a budget of two reaches the encode, would give up the source's own video whenever only direct play fails.
+The HLS copy still plays the source's own video, and it can play where direct play cannot, for example when the player refuses the source container.
+
+== References
+
+* link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045: In Original Quality, a Client Direct-Plays Each File Its Capability Declaration Covers, and Each Client Uses Its Platform's Own Player]
+* link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049: A Client Capability Declaration Lists Capability Entries, and an Output Fits Only When One Capability Entry Accepts the Whole Output]
+* link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc[ADR 0050: Outside Original, the Viewer's Limits Bind Copies as Well as Encodes, and Each Quality Tier Is a Picture Box in Either Orientation]
+* link:0013-stream-decision-architecture.adoc[ADR 0013: Stream Decision Architecture]
+* link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019: Recoverable Just-In-Time HLS Segment Delivery]
+* link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036: Video Contracts Share One Vocabulary and Preserve Dynamic-Range Facts]
+* link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037: The Worker Delivers Fragmented MP4 Segments From FFmpeg's Standard Output, and HLS Media Segments Are fMP4 Only]
+* link:0042-graphql-subscriptions-run-over-websocket-until-token-expiry.adoc[ADR 0042: GraphQL Subscriptions Keep Queried Screens Current over WebSocket until Token Expiry]
+* https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399] is the playback capabilities epic.
+* https://github.com/streamarr/streamarr-server/issues/401[streamarr/streamarr-server#401] adds format recovery and the format-attempt budget.
+* https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511] treats a copied variant that runs short as a format error.
+* https://github.com/streamarr/streamarr-server/issues/651[streamarr/streamarr-server#651] converts Dolby Vision profile 7 to profile 8.1 during a copy.
+* https://github.com/streamarr/streamarr-web/issues/29[streamarr/streamarr-web#29] adds the web client's quality control and format recovery.
+* https://github.com/streamarr/streamarr-apple/issues/60[streamarr/streamarr-apple#60] adds the Apple client's quality control and format recovery.

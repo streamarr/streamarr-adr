@@ -168,7 +168,7 @@ _Avoid_: codec profile (a profile of the coding standard), device profile, condi
 
 **Viewer's limits**:
 The limits that bound a stream session's output apart from the client capability declaration: the picture box of the fixed quality that the viewer picked, and the maximum picture width, maximum picture height and maximum bitrate that the client sends.
-They bound every encode, in Original too.
+They bound every encode. An encode that Original reaches plays in Auto (ADR 0052).
 Outside Original, they also bound copies, except a copy of a source that cannot be encoded or that the server has nothing to encode to.
 The server has nothing to encode to when the client capability declaration rejects every encode of the source, or when workers are connected but none has a worker-verified encoder for a codec that the declaration accepts an encode in.
 The maximum width and height apply as the client gives them, and the maximum bitrate covers video plus audio (ADR 0050).
@@ -364,7 +364,7 @@ A planned restart of the requested variant's job at the media segment that a pla
 _Avoid_: seek (the player's action), restart (unqualified), recovery
 
 **Format attempt**:
-One output format that the server chooses within a playback session. Each format attempt has its own stream session. An HLS format attempt also has its own initialization segment. The initial format is the first attempt. Each Auto recovery after a format error counts as one format attempt against the playback session's format-attempt budget. In Original, the HLS format attempt that follows a format error on a direct-played file also counts against that budget (ADR 0045).
+One output format that the server chooses within a playback session. Each format attempt has its own stream session. An HLS format attempt also has its own initialization segment. The initial format is the first attempt. Each Auto recovery after a format error counts as one format attempt against the playback session's format-attempt budget. In Original, the HLS format attempt that follows a format error on a direct-played file also counts against that budget (ADR 0045). The encode that follows a format error during an HLS copy in Original or in a fixed quality also counts against that budget, and so does the copy with Dolby Vision stripped that follows a failed Dolby Vision copy. In Original, the playback choice is Auto during that encode (ADR 0052).
 _Avoid_: fallback stream, replacement (unqualified)
 
 **Encoder backend**:

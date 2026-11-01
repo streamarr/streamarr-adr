@@ -11,6 +11,18 @@ The review compared the server's rules with Jellyfin, Swiftfin, jellyfin-web and
 It also decides when the server lowers the audio under the viewer's maximum bitrate.
 The server lowers it when the audio leaves no room for the smallest quality tier or for a video copy, and when lower multichannel audio lets a larger picture fit.
 
+NOTE: link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052] changes what this decision says about an encode in Original.
+Every encode that Original reaches now plays in Auto, and the client tells the viewer that the playback choice changed.
+That encode is Auto's encoded quality ladder, not one variant without a label.
+This ADR still decides when Original copies, and a copy in Original still ignores the viewer's limits.
+This ADR also still decides how the viewer's limits bound every encode, including an encode that Original reaches.
+ADR 0052 decides what happens after a format error during an HLS copy.
+In Original, the server then falls back to an encode in Auto, and the viewer's limits bound that encode.
+In a fixed quality, the server falls back to an encode at the same fixed quality, and this ADR's rules for a fixed quality bound that encode.
+A source that the server cannot encode still copies over the viewer's limits in Auto and in a fixed quality, as this ADR decides.
+When the player refuses that copy, no encode can replace the copy.
+Playback then ends with the typed terminal error, unless another eligible format remains, such as the copy with Dolby Vision stripped (https://github.com/streamarr/streamarr-server/issues/401[streamarr/streamarr-server#401]).
+
 == Context
 
 The viewer picks a playback choice when a stream session starts.
@@ -128,9 +140,10 @@ The server does not lower the audio beside that copy.
 
 When Original must encode, the encode follows the viewer's limits, as an encode in Auto does.
 Original must encode when no capability entry accepts a copy of the source.
+That encode plays in Auto, as link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052] decides, so Auto's rules apply to the encode.
 The maximum width and the maximum height bound the encode as the client gives them.
 The maximum bitrate, less the audio bitrate, bounds the encode's video (<<decision-bitrate>>).
-Original has no fixed quality, so no picture box bounds its encode.
+Original has no fixed quality, so no picture box bounds that encode.
 
 A source that the server cannot encode still copies when a capability entry accepts the copy.
 It copies even when it exceeds the viewer's limits.
@@ -162,7 +175,7 @@ A video copy keeps the source's full picture, so lower audio costs the viewer le
 The container bitrate holds the video and every copied track, so it never counts less than they do.
 Original promises the source's own quality, and the server never silently replaces a manual choice (link:0013-stream-decision-architecture.adoc[ADR 0013]).
 A viewer who wants their limits honored picks Auto or a fixed quality.
-An encode in Original already gives up the source's own quality.
+An encode that Original reaches already gives up the source's own quality.
 Nothing that Original promises is then left to protect, so the encode honors the limits as Auto does.
 A stream over the viewer's limits is better than no stream at all.
 A client that accepts a copy but no encode of the source has nothing else to play, just as a source that cannot be encoded has nothing else.
@@ -257,8 +270,9 @@ A variant without a tier takes the label of a tier whose box it reaches.
 That includes Auto's single variant that the viewer's limits and a capability entry bound.
 A source smaller than the 360p box therefore gets one variant in Auto, labelled by its shorter side.
 
-A fixed quality's encode and an encode in Original are a ladder of one variant.
+A fixed quality's encode is a ladder of one variant.
 That variant takes no label, and its media playlist keeps the path named "default".
+An encode that Original reaches is Auto's ladder, so the labels of Auto's ladder apply to its variants (ADR 0052).
 
 *Why:* Players show a variant's label to the viewer.
 A label should tell the viewer the size that they get.
@@ -280,7 +294,7 @@ Every variant shares the same audio rendition (ADR 0043), so every variant adds 
 The server offers a tier only when the tier's video bitrate for the chosen codec family plus the audio bitrate is at or below the maximum bitrate.
 
 A variant without a tier is the single variant that Auto offers when no tier fits.
-A fixed quality and an encode in Original also have a single variant.
+A fixed quality also has a single variant.
 For each of these variants, the video bitrate is at most the maximum bitrate minus the audio bitrate, apart from the 145 kb/s floor below.
 When the probe knows the source's bitrate, the source's bitrate caps the video too.
 
@@ -449,10 +463,11 @@ The multivariant playlist already names the delivered audio codec and channel co
 That encode costs worker capacity and some picture quality.
 * A viewer in Original receives a copy of the source even when the source exceeds their limits.
 The stream can then buffer on a slow connection.
-* In Original, the viewer's limits apply to an encode but not to a copy.
-Whether a limit holds in Original therefore depends on whether a capability entry accepts the copy.
+* In Original, the viewer's limits never bind a copy.
+When Original must encode, the playback choice changes to Auto, and the viewer's limits bind the encode (ADR 0052).
 * A source that cannot be encoded can play over the viewer's limits in Auto and in a fixed quality.
 So can a source whose copy the client accepts when the client accepts no encode that the server makes of it.
+When the player refuses the copy of such a source, no encode can replace the copy, so playback ends with the typed terminal error unless another eligible format remains (ADR 0052).
 * When workers are connected but none has a worker-verified encoder for a codec that the client accepts an encode in, the source plays over the viewer's limits until the worker is fixed.
 * When the client accepts an encode, a busy worker or no connected worker leaves the viewer with an answer that the client can retry rather than a copy over the viewer's limits.
 * A copy of a source whose copied video's bitrate and container bitrate are both unknown can exceed the viewer's maximum bitrate.
@@ -493,14 +508,14 @@ Below 209 kb/s, the stream exceeds the maximum bitrate rather than not playing a
 * A fixed quality above the source's size plays the source's size, not the size that its name suggests.
 It encodes at the bitrate of the tier that holds that size.
 * A source wider than 3840 is encoded at 3840 wide, even on a screen that could show more.
-* Players show no label for a fixed quality's encode or an encode in Original.
+* Players show no label for a fixed quality's encode.
 * A fixed quality on a source whose bitrate is below the tier's bitrate plays at the source's bitrate.
 
 == Rejected Alternatives
 
 * Applying the viewer's limits to encodes only would let a copy exceed every limit the viewer set.
 * Applying the viewer's limits to a copy in Original would break Original's promise of the source's own quality.
-* Letting an encode in Original ignore the viewer's limits would keep no promise of Original, because the encode already changes the source.
+* Letting an encode that Original reaches ignore the viewer's limits would keep no promise of Original, because the encode already changes the source.
 It would only give the viewer a larger stream than they asked for.
 * Refusing to copy a source that cannot be encoded when it exceeds the viewer's limits would leave the viewer with nothing to play.
 Refusing a copy over the limits when the client capability declaration accepts no encode of the source would do the same.
@@ -518,7 +533,7 @@ An open Jellyfin issue reports that behavior as a bug.
 * Requiring one side to equal the box's side would call a 1276×532 scope film 532p.
 Even sides keep that film a few pixels short of the 720p box, although no larger picture of it fits.
 * Cropping, padding or stretching a source to fill its tier's 16:9 box would change the picture that a home theater should show as it is.
-* Labelling a fixed quality's or Original's single variant would name a choice that the player cannot make.
+* Labelling a fixed quality's single variant would name a choice that the player cannot make.
 * Keeping both variants when a shrunken higher tier takes a lower tier's label would show the viewer two choices with one name.
 * Comparing the maximum bitrate with the video bitrate alone would let every variant exceed the viewer's limit by the audio.
 * Letting the remaining video bitrate reach zero or below would give the encoder no bitrate limit.
@@ -557,6 +572,7 @@ An audio encode costs far less worker capacity than a video encode.
 * link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044: Encoder Headroom, Measured in Pixel Rate, Decides When Extra Variants Start, and One Preset Scale Serves Every Software Encoder]
 * link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043: Audio Tracks and Text Subtitles Are HLS Renditions, so Switching Them Never Restarts the Video]
 * link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045: In Original Quality, a Client Direct-Plays Each File Its Capability Declaration Covers, and Each Client Uses Its Platform's Own Player]
+* link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052: A Failed HLS Copy Falls Back to an Encode, and Original Changes to Auto Whenever It Must Encode]
 * https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399] is the playback capabilities epic.
 * https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] adds typed client capability declarations.
 * https://github.com/streamarr/streamarr-server/issues/446[streamarr/streamarr-server#446] refuses a video encode without a usable frame rate.

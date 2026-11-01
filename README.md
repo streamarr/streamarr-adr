@@ -66,6 +66,7 @@ None at present.
 - [ADR 0046: Home Continue Watching Keeps a Cap without Backfill Reads](adr/0046-home-continue-watching-keeps-a-cap-without-backfill-reads.adoc)
 - [ADR 0049: A Client Capability Declaration Lists Capability Entries, and an Output Fits Only When One Capability Entry Accepts the Whole Output](adr/0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc)
 - [ADR 0050: Outside Original, the Viewer's Limits Bind Copies as Well as Encodes, and Each Quality Tier Is a Picture Box in Either Orientation](adr/0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc)
+- [ADR 0052: A Failed HLS Copy Falls Back to an Encode, and Original Changes to Auto Whenever It Must Encode](adr/0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc)
 - [ADR 0054: Workers Measure Stream Bitrates Once, and a Video Copy Costs Its Measured Average and Advertises Its Measured Peak](adr/0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc)
 
 ## Domain language

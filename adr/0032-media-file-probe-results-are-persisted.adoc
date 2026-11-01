@@ -62,6 +62,9 @@ When the worker cannot give an exact correction, the probe reports a fallback re
 The server sends a job that carries the correction only to a worker that lists probe version 7.
 Playback keeps using each file's probe version 6 outcome until the server stores the file's probe version 7 outcome.
 
+A further amendment removes the statistics that came from a sample of a private media library.
+Synthetic files, FATE samples and FFmpeg's own source now support the decisions that those statistics supported (<<evidence>>).
+
 == Context
 
 Streamarr learns a media file's technical properties by running ffprobe.
@@ -341,7 +344,6 @@ The titles and handler names of one result take at most 16,384 bytes in their pr
 When the titles and handler names would take more, the worker reports neither and marks both as omitted.
 The server accepts at most 128 KiB in one session message, so the two limits keep the titles and handler names from closing the worker's session (https://github.com/streamarr/streamarr-server/issues/554[streamarr/streamarr-server#554]).
 Without the second limit, one video stream and 256 subtitle streams with 512-byte titles took 139,438 bytes.
-In the library sample, the titles of one file took at most 1,727 bytes.
 Video streams report none of these three facts, because nothing reads a video stream's title, handler name or flag yet.
 * The exact codec string of every video and audio stream, in the form that RFC 6381 defines.
 The probe computes the codec string from the stream's decoder configuration record.
@@ -383,7 +385,7 @@ The worker reports every handler name, because the list of generic handler names
 A rule in the worker would need a new probe version for each fix, and every file would then need a new probe.
 For example, a rule that treats a name as generic when the name ends with "Handler" would keep "ISO Media file produced by Google Inc." as a track name.
 The server can fix its own rule without a new probe.
-link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043] holds the library sample's handler names, which test the server's rule.
+link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043] holds the server's rule.
 The hearing-impaired flag comes from the same ffprobe run as the other version 4 facts (<<evidence-hearing-impaired>>).
 So https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60] marks SDH renditions without a later probe version.
 
@@ -611,10 +613,9 @@ The outcome then holds no output frame rate.
 In that case, the server leaves out each variant that would encode the file's chosen video stream.
 The server refuses the stream session only when every variant would encode that video stream, as https://github.com/streamarr/streamarr-server/issues/446[streamarr/streamarr-server#446] describes.
 
-*Why:* In a 300-file library sample, the rule chose the rate of 294 files from their declared rates alone.
-The other 6 files needed a packet scan over 30 s of media.
-Each of those scans read 8–113 MB.
-Each of those scans took 58–336 ms when the file was already in the operating system's cache.
+*Why:* The rule scans packets only when a file's declared rates do not settle the rate.
+A scan reads 30 s of the file.
+At Ultra HD Blu-ray's highest rate of 128 Mbit/s, 30 s is 480 MB.
 Because the probe job runs the rule, the worker pays the scan cost once per file rather than in every job attempt.
 A job attempt that computed its own rate could disagree with an earlier attempt.
 For example, a worker upgrade could change the rule between the two attempts.
@@ -638,22 +639,21 @@ A job attempt's FFmpeg input keeps FFmpeg's defaults.
 So probe version 7 reads the start time correction in a second run with FFmpeg's defaults (<<probe-version-7>>).
 
 *Why:* By default, ffprobe stops after 5 s of media or 5 MB.
-In the 300-file library sample, the default stop missed the width and height of 334 PGS subtitle streams in 49 files.
 PGS is the Blu-ray image subtitle format.
-The first packets of those 334 streams came after the default stop.
-The limits filled in the width and height of 319 of those streams.
-The limits changed no video or audio field in any file.
+A PGS stream sends its first packet when its first subtitle appears, which can be minutes into a film.
+ffprobe reads a PGS stream's width and height from that first packet, so a stream whose first packet comes after the default stop has no width or height.
+In a synthetic 300 s Matroska file whose PGS stream started at 60 s, the default stop read 5.0 MB and missed the PGS stream's width and height.
+With the limits, ffprobe read 61 MB and reported 1920×1080.
+The limits changed no video or audio field.
 No playback path reads subtitle dimensions yet.
-With the limits, ffprobe read more of 66 of the 300 files.
-The median extra read was 189 MB.
-The largest extra read was 1.05 GB.
+A file whose streams all send a packet before the default stop reads no more with the limits.
+A file with a late stream reads until that stream's first packet, and at most 200 s of media or 1 GB.
 Each file pays the extra read once.
-With the limits but without `-scan_all_pmts 0`, every MPEG-TS probe read to a limit.
-By default, ffprobe scans for every program map table.
-The 14 transport streams without PGS subtitles read 66–1,053 MB.
-Their results did not change.
-With `-scan_all_pmts 0`, all 19 transport streams gave the same results as with the limits alone.
-The 14 transport streams without PGS subtitles then read 0.4–1.9 MB.
+With the limits but without `-scan_all_pmts 0`, every MPEG-TS probe reads to a limit.
+ffprobe sets `scan_all_pmts` by default.
+With it set, FFmpeg's MPEG-TS demuxer never tells ffprobe that every program has its table, so ffprobe waits for new streams until a limit.
+A synthetic 300 s MPEG-TS file at 10 Mbit/s then read 251 MB, which is 200 s of media.
+With `-scan_all_pmts 0`, the same file read 1.5 MB and gave the same results.
 The measurements are in <<evidence-probe-limits>>.
 
 [[keyframe-positions]]
@@ -983,7 +983,6 @@ Before this amendment, the server retried a contract violation forever.
 The backoff started at 5 s and doubled up to 300 s.
 Once the backoff reached 300 s, each retry cost a worker probe and a database write every five minutes.
 The broken reply never succeeded.
-A keyframe packet scan on a real library reached 17 consecutive identical failures.
 Keyframe packet scans already stop after three failed scans.
 https://github.com/streamarr/streamarr-server/pull/646[streamarr/streamarr-server#646] counts contract violations toward that limit.
 Probes use the same limit of three.
@@ -1029,7 +1028,7 @@ Any worker with a free unit of the right capacity can then take the probe.
 The worker alone sees the other services on the host, the host's disks and the cores that the worker's own job attempts use.
 The server sees viewers, but the server cannot see a worker's host.
 A worker that grants capacity also fits workers of different sizes.
-A 72-core host, a 4-CPU Kubernetes pod and a GPU node each grant what each one can run.
+A 64-core server, a 4-CPU Kubernetes pod and a GPU node each grant what each one can run.
 The server adds up the capacities and needs no knowledge of each host.
 A capacity for each kind of work keeps urgent work from waiting behind work that the worker already accepted.
 Temporal's workers keep a separate slot pool for each task type in the same way, and Kubernetes' API Priority and Fairness keeps separate limits for each priority level.
@@ -1163,27 +1162,18 @@ The brake for timed-out probes works on every host and needs no extra privilege.
 
 *Why:* A busy disk can stop every probe from finishing.
 The brake for job attempts cannot see a busy disk while nothing plays.
-A RHEL 8 host showed the failure.
-A library manager gave every movie file of a library a new path.
-A scan then had to probe most of the library again.
-Nothing played.
-Another media server on the same host read the same files at the same time.
-The limit stayed at 72, the host's core count.
-Between 65 and 73 probes ran at once.
-The worker logs a probe summary each minute.
-Over eight minutes, the average probe time in those summaries rose from 1.4 s to 60 s.
-In the last observed minute, all 69 probes that ended had reached the 60 s probe timeout.
-The server recorded 207 probe timeouts in about 6 minutes.
-The ffprobe processes waited for the disk in uninterruptible sleep.
-No brake applied, because no job attempt ran.
-Three days earlier, a cold scan of the same library took 2 to 3 s per file.
-Only 12 of that scan's probes reached the timeout.
+A scan that probes many files while another service reads the same disk shows the failure.
+Nothing plays, so the brake for job attempts never applies.
+The limit grows to its maximum during a long scan, so the worker runs as many probes at once as its JVM has processors.
+Each probe waits for the disk behind the other probes and the other service.
+The ffprobe processes wait in uninterruptible sleep, so their low CPU priority does not help.
+Probe times rise until the probes reach the probe timeout.
 
-The probes did no useful work.
+The probes then do no useful work.
 A probe that reaches the timeout discards every byte that the probe read.
 The server retries each timed-out probe, so the retries keep the disk as busy as before.
-The number of finished probes fell to zero while the limit stayed at its maximum.
-Networks call this failure congestion collapse.
+The number of finished probes falls toward zero while the limit stays at its maximum.
+Networks call this failure congestion collapse, which RFC 896 describes.
 TCP avoids congestion collapse with the rule that the limit already follows.
 TCP halves its congestion window when the network loses a packet.
 TCP then grows the window by one step at a time.
@@ -1197,7 +1187,7 @@ RFC 5681 describes that rule.
 When the first probe times out, many other probes may already be running.
 The first brake cannot help the probes that started before the brake.
 Those earlier probes keep reaching the timeout for up to 60 s after the first brake.
-With only the 15 s wait between brakes, the earlier probes would apply about 4 more brakes and lower a limit of 72 to about 2.
+With only the 15 s wait between brakes, the earlier probes would apply about 4 more brakes and lower a limit of 64 to 2.
 
 A playback probe that times out also applies the brake.
 A playback probe that waits behind the disk reads of background probes is the worst case, because a viewer is waiting.
@@ -1514,11 +1504,10 @@ The pipeline itself is unchanged.
 The server queues a re-scan itself on the upgrade to probe version 4.
 * A full scan under probe version 4 reads more of each library.
 The re-scan on the upgrade to probe version 4 is such a full scan.
-For a library of 23,210 video files, a version 1 scan reads about 21 GB.
-The probe limits of version 4 read an estimated 570 GB more.
-The 95 % interval for that extra amount is 270–990 GB.
-At 110 MB/s, the extra 570 GB takes about 86 minutes to transfer.
-About 2 % of files also need the frame-rate rule's packet scan over 30 s of media.
+A file whose streams all send a packet within FFmpeg's default 5 s or 5 MB reads no more.
+A file with a stream that starts later reads up to that stream's first packet, and at most 200 s of media or 1 GB.
+At 110 MB/s, about what a 1 Gbit/s network carries, 1 GB takes about 9 s.
+A file whose declared rates do not settle its rate also needs the frame-rate rule's packet scan over 30 s of media.
 * A source whose container has no usable keyframe index plays through an encode until its keyframe step finishes.
 A source whose index lists a last keyframe that the probe cannot read also plays through an encode until its keyframe step finishes.
 That step reads the whole file once.
@@ -1526,9 +1515,8 @@ That step reads the whole file once.
 Each source without a usable container index then needs its keyframe step again.
 * Probe version 4 leaves four known gaps.
 First, `-scan_all_pmts 0` could omit the streams of a later program in a multi-program transport stream.
-The library sample held no multi-program transport stream.
-Second, 15 PGS subtitle streams in 7 of the 300 sampled files still had no size.
-None of the packets of those streams fell within 200 s or 1 GB.
+Streamarr has not measured how often a media file holds more than one program.
+Second, a PGS subtitle stream whose first packet lies beyond 200 s of media and beyond 1 GB still has no size.
 Third, a Dolby Vision profile 5 stream in MPEG-TS without the Dolby Vision descriptor reads as `UNSPECIFIED`.
 Fourth, a stream that carries its HDR10 static metadata only in its HEVC bitstream reports none.
 Every HEVC stream in MPEG-TS or in a raw HEVC file works this way.
@@ -1541,8 +1529,7 @@ Each of those probes reads the first frames of the chosen video stream.
 Each file keeps its probe version 4 decisions until the server stores the file's probe version 5 outcome.
 * Probes and job attempts no longer compete for a worker's slots.
 Before this amendment, probes shared the playback slots, and a worker defaulted to one slot.
-A cold scan of about 1,800 movies on a 72-core host then spent about 20 minutes probing, at about 1.6 files per second.
-About 90 % of the host's CPU stayed idle during that scan.
+A worker then ran one probe at a time, whatever its core count, so most of a many-core host's CPU stayed idle during a scan.
 A large first scan now probes as fast as the worker's cores and storage allow.
 * While nothing plays, background probes can load every core of the worker's host.
 The brake for job attempts protects only the worker's own job attempts.
@@ -1665,9 +1652,8 @@ Playback start would wait for a job attempt to produce the initialization segmen
 * Keep ffprobe's default limits until the server delivers subtitles.
 Raising the limits later would need another probe version and another re-scan of every library.
 * Run ffprobe with the 200 s and 1 GB limits but keep its default scan for every program map table.
-Every MPEG-TS probe then read to a limit.
-The 14 transport streams without PGS subtitles read 66–1,053 MB.
-Their results did not change.
+Every MPEG-TS probe then reads to a limit.
+A synthetic 300 s MPEG-TS file at 10 Mbit/s read 251 MB instead of 1.5 MB, with the same results.
 * Apply the same limits to a job attempt's FFmpeg input.
 FFmpeg analyzes the start of the file before it seeks.
 With the limits, an input that seeks into one MPEG-TS source read 220 MB instead of 8.8 MB.
@@ -1756,7 +1742,7 @@ The probe request therefore still carries no deadline, and the worker still ends
 The brake would then apply at every server shutdown or restart.
 * Let every probe that reaches the timeout apply a brake.
 Only the 15 s wait between brakes would space those brakes out.
-The probes that started before the first brake would then apply about 4 more brakes and lower a limit of 72 to about 2.
+The probes that started before the first brake would then apply about 4 more brakes and lower a limit of 64 to 2.
 * Read the worker's own cgroup `io.pressure` for the brake from pressure.
 That file misses the disk stalls of other services on the host.
 * Count CPU pressure in the brake from pressure.
@@ -1784,14 +1770,14 @@ The running probe usually finishes first.
 * Give the worker the Linux capability to raise a running probe's CPU priority.
 Every operator, in Docker Compose and in Kubernetes, would have to grant that capability.
 
+[[evidence]]
 == Evidence
 
 Each group below holds the measurements behind one part of probe version 4 or probe version 5.
-The measurements ran on 2026-09-27 against ffprobe and FFmpeg 8.1.2 in the pinned worker image.
+Unless a group says otherwise, the measurements ran on 2026-09-27 against ffprobe and FFmpeg 8.1.2 in the pinned worker image.
 The write-ups and harnesses for these measurements were not committed.
 This Evidence section therefore gives the results.
-The library sample is 300 files drawn by container and category from a real library of 23,210 video files.
-The measurements only read those files.
+The sources are FATE samples, synthetic files and local test sources.
 
 [[evidence-stream-facts]]
 === Stream facts and codec strings
@@ -2090,47 +2076,40 @@ So ffprobe reports no flag for a track that only the media characteristics of Ap
 [[evidence-frame-rate]]
 === Output frame rate
 
-* The measurements checked the rule on 1,622 video streams.
-Those streams came from the library sample, from 1,253 files in FATE (FFmpeg's automated test suite), and from 69 local test sources.
-* The rule chose the rate of 294 of the 300 library files from their declared rates alone.
-* The packet scan over 30 s of media read 8–113 MB on the other 6 files.
-Each scan took 58–336 ms when the file was already in the operating system's cache.
-At 110 MB/s, the largest scan would take about 1 s.
-* The rule refused 3 test-suite streams and no library file.
+* The measurements checked the rule on 1,322 video streams.
+Those streams came from 1,253 files in FATE (FFmpeg's automated test suite) and from 69 local test sources.
+* The rule refused 3 of the FATE streams.
 * At the rule's rates, 46 of 46 junctions between a first attempt and a replacement attempt passed.
 All 20,934 compared output frame positions carried the same source frame and checksum in both attempts.
+The junctions came from 23 local test sources.
 
 [[evidence-probe-limits]]
 === ffprobe limits
 
+These measurements ran on 2026-11-01 against ffprobe 8.1.3 in the pinned worker image.
+The sources were synthetic files that the same FFmpeg built.
+Each holds 300 s of 1280×720 H.264 video at about 8 Mbit/s and an AAC audio stream.
+ffprobe's debug log gave the bytes that each run read.
+
 * Without the limits, ffprobe stops after 5 s of media or 5 MB.
 For MPEG-TS, the media limit is 7 s.
-* The limits changed what ffprobe reported for 50 of the 300 files.
-Every change was on a subtitle stream.
-49 files gained the width and height of 319 PGS subtitle streams.
-In 50 files, subtitle streams gained a start time at their first packet.
-The same subtitle streams lost the stream duration that FFmpeg had copied from the container.
-* The limits added or dropped no stream.
-Video size and pixel format, audio sample rate and channels, durations, bitrates, `r_frame_rate` and `avg_frame_rate` were identical in all 300 files.
-* With the limits, ffprobe read more of 66 files.
-The median extra read was 189 MB.
-The largest extra read was 1.05 GB.
-Without the limits, ffprobe read about 5 MB of each file.
-The extra CPU time had a median of 0.2 s and a maximum of 4.6 s.
-At 110 MB/s, the extra transfer per affected file would have a median of 1.7 s and a maximum of 9.5 s.
-* The 66 files were all 19 MPEG-TS and M2TS files, 45 Matroska files whose PGS subtitle streams had no packet in the first 5 MB or 5 s, and 2 Matroska files with an attachment of unknown type.
-* ffprobe sets `scan_all_pmts` by default.
-That default disables the early stop for MPEG-TS.
-With `-scan_all_pmts 0`, the 19 transport streams gave results identical to the limits alone in every compared field.
-The 14 transport streams without PGS subtitles read 0.4–1.9 MB.
-Without the limits, those 14 transport streams read 1.6–5.7 MB.
-* With the limits, 15 PGS streams in 7 files still had no size.
-For the 2 files with an attachment of unknown type, ffprobe read 200 s of media and reported nothing new.
-* One measurement used an FFmpeg input that seeks into one MPEG-TS test source.
+* A Matroska file with only the video and audio read 0.8 MB with and without the limits.
+* A Matroska file with the PGS stream of FATE's `sub/pgs_sub.sup` added, shifted to start at 60 s, read 5.0 MB without the limits.
+ffprobe reported no width or height for the PGS stream.
+It reported the PGS stream's start time as 0 and its duration as the container's 300 s.
+With the limits, it read 61 MB and reported the PGS stream's 1920×1080.
+It then reported the PGS stream's start time as 60 s, at its first packet, and no duration.
+The video and audio fields were the same in both runs.
+* The same video and audio in MPEG-TS, padded to a constant 10 Mbit/s, read 6.6 MB without the limits.
+With the limits and ffprobe's default `scan_all_pmts`, it read 251 MB, which is 200 s at 10 Mbit/s.
+With the limits and `-scan_all_pmts 0`, it read 1.5 MB.
+All three runs reported the same streams and fields.
+* FFmpeg's source shows the mechanism.
+ffprobe sets `scan_all_pmts` unless the command line sets it.
+FFmpeg's MPEG-TS demuxer tells ffprobe that every program has its table only when `scan_all_pmts` is off.
+* One measurement used an FFmpeg input that seeks to 120 s in an MPEG-TS copy of Tears of Steel, a Creative Commons film.
 The limits raised the bytes read before the seek from 8.8 MB to 220 MB.
 The limits also raised the time to open the input by 0.5–0.9 s.
-* The library-wide estimate weights each container and category by its size in the library.
-Its 95 % intervals come from bootstrap resampling.
 
 == References
 
@@ -2145,7 +2124,9 @@ Its 95 % intervals come from bootstrap resampling.
 * link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037: The Worker Delivers Fragmented MP4 Segments From FFmpeg's Standard Output, and HLS Media Segments Are fMP4 Only]
 * link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043: Audio Tracks and Text Subtitles Are HLS Renditions, so Switching Them Never Restarts the Video]
 * link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044: Encoder Headroom, Measured in Pixel Rate, Decides When Extra Variants Start, and One Preset Scale Serves Every Software Encoder]
+* https://www.rfc-editor.org/rfc/rfc896[RFC 896: Congestion Control in IP/TCP Internetworks]
 * https://www.rfc-editor.org/rfc/rfc5681[RFC 5681: TCP Congestion Control]
+* https://github.com/FFmpeg/FFmpeg/blob/23151b11c75aa44d9ab8db796a53c76acf00f6c0/fftools/ffprobe.c#L2440-L2442[FFmpeg 8.1.3's ffprobe sets `scan_all_pmts` by default] and https://github.com/FFmpeg/FFmpeg/blob/23151b11c75aa44d9ab8db796a53c76acf00f6c0/libavformat/mpegts.c#L3109-L3121[its MPEG-TS demuxer reports every program's table only with `scan_all_pmts` off]
 * https://docs.kernel.org/accounting/psi.html[Linux kernel documentation: PSI - Pressure Stall Information]
 * https://ffmpeg.org/ffprobe.html[ffprobe documentation]
 * https://ffmpeg.org/ffmpeg-formats.html#Format-Options[FFmpeg format options: `analyzeduration` and `probesize`] and https://ffmpeg.org/ffmpeg-formats.html#mpegts[the MPEG-TS demuxer's `scan_all_pmts`]

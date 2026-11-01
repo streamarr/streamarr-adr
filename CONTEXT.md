@@ -174,7 +174,7 @@ Outside Original, a video copy costs its video plus the session's audio, and the
 _Avoid_: client capabilities (what the player can decode), quality cap
 
 **Audio step**:
-One audio codec, channel count and bitrate that the server can deliver in place of the stream session's audio under the viewer's maximum bitrate: the session's own audio first, then multichannel steps at lower bitrates, then AAC stereo at 128, 96 and 64 kb/s, or AAC mono at 64 kb/s for a mono track or a one-channel AAC entry.
+One audio codec, channel count and bitrate that the server can deliver in place of the stream session's audio under the viewer's maximum bitrate: the session's own audio first, then multichannel steps at lower bitrates, then AAC stereo at 128, 96 and 64 kb/s, or AAC mono at 64 kb/s for a mono track or when no AAC entry for HLS accepts more than one channel.
 Multichannel steps keep the codec and channels of the encode that the server would choose, and AAC above 5.1 also steps through AAC 5.1 at 320 kb/s.
 A copied track in a codec that the server encodes (AAC, AC-3 or E-AC-3) adds steps in its own codec, up to 5.1 in AC-3 and E-AC-3.
 All of these steps run from the highest bitrate to the lowest.

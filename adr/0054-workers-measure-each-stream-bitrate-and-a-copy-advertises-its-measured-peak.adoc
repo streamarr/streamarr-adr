@@ -351,20 +351,20 @@ Each `traf` holds a `tfhd`, a version 1 `tfdt` and a version 1 `trun` with four 
 The `mdat` has an 8-byte header.
 A worker test pins the layout, and a change to the layout is a change to the worker contract.
 
-A video copy runs the Annex B bitstream filter only in three cases:
+A video copy runs the Annex B bitstream filter only in four cases:
 
 * The source's sample entry is `avc3`, `hev1`, `dvav` or `dvhe`.
 * The source's decoder configuration record holds no parameter sets.
 * The record's header names a value of the codec string, such as the level, other than the value that the record's parameter sets name.
+* The source's `hvcC` record holds an SEI message other than user data unregistered, such as the mastering display or the content light level.
 
 In the first two cases the source can keep its parameter sets only in its samples.
 The copy's `avc1` or `hvc1` record must hold the parameter sets (link:0013-stream-decision-architecture.adoc[ADR 0013]), and the filter lets the mp4 muxer take them from the samples.
 In the third case the filter makes the mp4 muxer rebuild the record's header from the parameter sets.
+In the fourth case the filter puts the record's SEI messages into every keyframe sample.
+The worker removes the SEI arrays from every `hvc1` record (ADR 0037), so without the filter the copy would lose those messages.
+User data unregistered messages, such as x265's information message, carry encoder notes rather than picture metadata.
 Every other copy of length-prefixed H.264 or HEVC runs neither filter and keeps the source's samples.
-
-The filter change ships only after a check finds no source that keeps HDR SEI messages only in its `hvcC` record.
-The worker removes the SEI arrays from every `hvc1` record (ADR 0037).
-The filter puts the record's SEI messages back into every keyframe sample, and without the filter nothing puts them back.
 
 *Why:* The server computes each segment's framing from the layout (<<segment-framing>>).
 A layout change outside the contract would make every measured cost wrong without any failure.
@@ -377,6 +377,8 @@ Its record's claim to hold every parameter set then became true, as ISO/IEC 1449
 The copy's codec string comes from the record's parameter sets (link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036]), and the worker refuses an initialization segment whose codec string differs from the probed one.
 Without the filter, a copy keeps the source's record header.
 A synthetic H.264 file whose record header names level 5.1 while its SPS names level 1.0 would then fail that check, so such a file keeps the filter.
+In synthetic HEVC sources whose mastering display and content light level messages sat only in the record, a copy without the filter delivered neither message, in MP4 and in Matroska.
+With the filter, the decoded keyframe carried both messages.
 
 === Explicitly deferred
 
@@ -391,7 +393,7 @@ A worker could run a copy's own filters and muxer during the measurement and rep
 == Consequences
 
 * A copy of a Matroska source with trusted statistics tags gets an honest cost at the first probe.
-* A copy of an MP4 or MOV source that is not fragmented gets an exact cost and an exact `BANDWIDTH` at the first probe.
+* A copy of an MP4 or MOV source that is not fragmented gets an exact cost and an exact `BANDWIDTH` at the first probe, unless the copy would change the source's packets (<<unchanged-packets>>).
 * Other sources keep the unmeasured cost until a keyframe packet scan or a bitrate scan measures the file.
 * A library's first bitrate scans read most Matroska files once.
 A two-hour source at an average of 60 Mb/s holds 54 GB.

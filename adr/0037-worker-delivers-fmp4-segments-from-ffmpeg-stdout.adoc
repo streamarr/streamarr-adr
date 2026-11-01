@@ -15,6 +15,10 @@ A job attempt passes `-discard none`, plus `-itsoffset` with the correction when
 Media time zero then stays the source container's start time, whatever streams the attempt maps.
 A job attempt whose stored probe outcome carries no correction reads the source as before the amendment.
 
+NOTE: An amendment lets an encode of an interlaced source write one frame per field (<<decision-frame-rate>>).
+The encode then runs at twice the output frame rate that the probe outcome stores, when twice that rate is at most 60 frames per second.
+Every other encode runs at the stored output frame rate, as before the amendment.
+
 NOTE: Under link:0013-stream-decision-architecture.adoc#reshape-rpus-starting-samples[ADR 0013], a job attempt that encodes an HEVC Dolby Vision source with no compatible base, such as profile 5, runs two FFmpeg processes when ADR 0013's conditions for moving the source's RPUs hold.
 The first FFmpeg copies the source and the job's audio into fragmented MP4, the worker moves the RPUs and gives each video sample its duration in the source, and the second FFmpeg reads the result on its standard input and writes the fMP4 that this decision describes.
 The first FFmpeg reads the source with the same input flags as a single FFmpeg, including `-start_at_zero` and the start time correction (<<decision-media-time-zero>>), so it places media time zero.
@@ -240,6 +244,16 @@ The rule refuses to choose a rate only when the scan finds fewer than 2 frames a
 The output frame rate stays an exact fraction from the probe to the worker's `-r:v:0` argument.
 No step converts it to a decimal.
 
+An interlaced source is a video stream whose probe reports an interlaced field order.
+Every encode of an interlaced source deinterlaces the source.
+The deinterlacer writes one frame per field when twice the stored output frame rate is at most 60 frames per second.
+The server then doubles the stored output frame rate, and the transcode job carries the doubled rate.
+For example, a 29.97 frames-per-second interlaced source encodes at 59.94 frames per second, and a 25 frames-per-second interlaced source encodes at 50 frames per second.
+When twice the stored rate exceeds 60 frames per second, the deinterlacer writes one frame per source frame, and the encode keeps the stored rate.
+The server doubles the rate only in the transcode decision.
+The probe outcome keeps the rate that the frame-rate rule chose.
+Every attempt of a stream session therefore still encodes on one frame grid.
+
 *Why:* The rule was modeled on the packet times of 1,622 video streams.
 300 of them came from a library sample, 1,253 from FFmpeg's test suite and 69 from local sources.
 The earlier rule snapped the average rate to the list.
@@ -249,6 +263,16 @@ The frame-rate rule refuses 3 of the test-suite streams, against 13 under the ea
 294 of the 300 library files keep their declared rate, so about 2 % of files need a packet scan.
 On the six library files that needed a scan, the scan read 8 to 113 MB and took 58 to 336 ms with the files cached.
 Evidence: https://github.com/streamarr/streamarr-transcode-worker/issues/24[streamarr/streamarr-transcode-worker#24].
+
+*Why one frame per field:* An interlaced source captures each field at a different moment.
+A 29.97 frames-per-second interlaced source therefore holds 59.94 distinct moments per second.
+One frame per source frame discards half of those moments, and fast motion then looks less smooth than on a broadcast television.
+Apple's HLS Authoring Specification recommends that an encode deinterlace 30i content to 60p (item 1.15), and the specification limits frame rates to 60 frames per second (item 1.19).
+The specification also counts 30i as 60 frames per second when it sets bitrate limits (item 1.25), so a 59.94 frames-per-second encode needs no higher bitrate ladder than the specification already assumes.
+On the pinned FFmpeg, one frame per field took 33 to 56 % more encode time than one frame per source frame.
+The measurement encoded synthetic 1080i sources to 1080p, 720p and 480p, and synthetic 480i sources to 480p.
+A replacement attempt after a seek wrote a byte-identical initialization segment and the same output frame rate as the first attempt.
+Evidence: https://github.com/streamarr/streamarr-server/issues/653[streamarr/streamarr-server#653].
 
 [[decision-segment-list]]
 === Every variant of a stream session shares one segment list
@@ -1185,6 +1209,11 @@ The HLS muxer's behavior is an internal variant that `-copyts` selects and that 
 That suits time-based forced keyframes but stretches a frame-count GOP until segment numbers lack a keyframe.
 * Choosing `vfr` for encoders that use time-based keyframes and a forced rate for encoders that use frame-count GOPs worked in the measurements.
 It adds a second rule without improving on one forced rate that reproduces the previous worker's output for every encoder.
+* An encode that writes one frame per source frame of an interlaced source halves the source's motion rate.
+Jellyfin does so by default, and Plex users report 29.97 frames-per-second output from 1080i sources.
+The halved rate saves encode time, but fast motion looks less smooth than the source.
+* A probe outcome that stores the doubled rate would describe the encode instead of the source.
+The stored rate would then change whenever the server changes how it encodes an interlaced source.
 * Carrying the frame rate as a double cannot hold a rate such as 24000/1001 exactly, so the rate that reaches `-r:v:0` would differ from the rate that the rule chose.
 * Having the worker convert a double to the nearest fraction repeats a choice that the probe job has already made, and the conversion can pick a different fraction.
 * The frame-rate rule without the packet scan keeps snapping a variable-frame-rate file's average rate, which dropped 9 to 70 % of the frames of some files.

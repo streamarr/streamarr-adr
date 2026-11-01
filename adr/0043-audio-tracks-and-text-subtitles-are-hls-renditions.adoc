@@ -100,21 +100,37 @@ Evidence: <<evidence-switching>>.
 A stream session has one audio codec, and every audio rendition of the stream session uses that codec.
 The session's audio codec is the codec of the default track as delivered.
 The client capability declaration is the record of the combinations that a player and its delivery path can accept.
-When the client capability declaration covers the default track's codec, the default track is copied, and the session's audio codec is the default track's codec.
-When the declaration does not cover the default track's codec, the default track is encoded to AAC, and the session's audio codec is AAC.
-Each other track keeps its own copy-or-encode decision.
-Another track is copied only when that track already has the session's audio codec.
-Otherwise that track is encoded to the session's audio codec.
-So the worker can copy one track and encode another.
+A track can be copied only when one audio capability entry for HLS accepts the track's codec and channel count (link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049]).
 
-A track is copied only when the client capability declaration covers the track's codec.
-Typed declarations will carry a channel count for each codec (https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395]).
-Once typed declarations carry that channel count, a track is copied only when the declaration also covers the track's channel count.
-Until then, no rule limits the channel count of a copied Opus track, because no client can declare Opus.
+The server encodes audio to AAC, AC-3, E-AC-3, FLAC, Opus and ALAC.
+The default track decides the session's audio codec:
+
+* When the default track can be copied, the default track is copied, and the session's audio codec is the default track's codec.
+* When the default track cannot be copied, the default track is encoded, and the session's audio codec is the codec of that encode.
+That encode follows link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc[ADR 0050]'s encode for the default track.
+It takes the first of E-AC-3, AC-3 and AAC whose capability entry for HLS keeps more than two of the track's channels.
+When none does, it takes AAC with at most two channels.
+* When the default track can be copied but its codec has no encoder that the server uses, and another track would have to be encoded to that codec, the default track is encoded too.
+DTS and TrueHD are those codecs today.
+The session's audio codec is then the codec of ADR 0050's encode for the default track, as in the previous case.
+
+Each other track keeps its own copy-or-encode decision.
+Another track is copied only when that track already has the session's audio codec and a capability entry accepts the track.
+Otherwise that track is encoded to the session's audio codec, with no more channels than that codec's capability entry accepts.
+So the worker can copy one track and encode another.
+A lower audio step under the viewer's maximum bitrate caps every track, as link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc[ADR 0050] decides.
+
+Every audio encode names its output channel layout under the channel layout rule of https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395].
+A 3- or 4-channel track keeps its layout only where the target codec carries that layout exactly, and otherwise steps to stereo.
+AAC carries 3.0 and 4.0.
+AC-3 and E-AC-3 carry 2.1, 3.0, 3.0(back), 4.0, quad and quad(side).
+FLAC and Opus carry 3.0 and quad.
+ALAC carries 3.0 and 4.0.
 
 DTS and TrueHD follow the same declared-codec rule as every other codec.
 A DTS or TrueHD track is copied only when the client declares that codec in fMP4.
 Otherwise the DTS or TrueHD track is encoded.
+A file whose only audio track is DTS or TrueHD keeps that copy, because no other track needs the codec.
 No tested browser or Apple player decoded DTS or TrueHD from fMP4, in 0 of 36 plays across six players.
 Media3, the Android media library, can play both codecs on the SHIELD TV Pro by passthrough to an HDMI receiver, or with Media3's FFmpeg decoder module.
 A reading of Media3 1.11.1's source found both Media3 paths, and no measurement covers them.
@@ -129,7 +145,16 @@ When a variant's `CODECS` attribute listed `ec-3` or `ac-3`, hls.js in Chromium,
 So one rendition that a player cannot decode fails the whole stream, and a copy needs the client's declaration.
 Stereo Opus played in all six tested players, but 5.1 Opus failed in every Apple player.
 So a safe Opus copy depends on the channel count as well as the codec.
-Evidence: <<evidence-audio-cases>>.
+A copied FLAC, Opus or ALAC default track used to force every other track into a codec that the server could not encode.
+FFmpeg 8.1.3 in the pinned worker image lists its native `flac` and `alac` encoders and the `libopus` encoder as ready for use.
+So the server can keep a lossless or passthrough default track as a copy and still encode the other tracks to its codec.
+The same FFmpeg marks its `dca` (DTS) and `truehd` encoders as experimental, so the server encodes neither codec.
+An encode of the default track keeps every track in one codec, so a switch stays in sync.
+ADR 0050's encode takes E-AC-3 before AC-3 and AAC, so the encoded default track keeps surround wherever the client declares it.
+In the same FFmpeg, an Opus encode refused 2.1, 3.0(back), 4.0 and quad(side).
+An ALAC encode wrote 2.1 as stereo, and quad, quad(side) and 3.0(back) as five channels.
+A FLAC encode wrote 2.1, 3.0(back) and 4.0 under another layout, with only a warning.
+Evidence: <<evidence-audio-cases>>, <<evidence-encoders>>.
 
 [[decision-video-job]]
 === Every running variant's job attempt produces the audio renditions
@@ -536,11 +561,11 @@ The acceptance tests of https://github.com/streamarr/streamarr-server/issues/503
 * Deliver image subtitles as renditions.
 * Deliver teletext subtitles, which come from DVB broadcast recordings.
 * Deliver external subtitle files that sit beside the source, in a follow-on to https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60].
-* Copy Opus with more than two channels.
-Copies of multichannel Opus wait until typed declarations carry a channel limit for each codec (https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395]).
-* Declare audio from the browser's own report of what the browser decodes, with channel counts (https://github.com/streamarr/streamarr-web/issues/29[streamarr/streamarr-web#29]).
-Until then, the web client declares AAC, with at most 6 channels in Firefox.
-* Lift the 6-channel AAC limit in Firefox after a test of 7.1 channel order on real speakers (https://github.com/streamarr/streamarr-web/issues/29[streamarr/streamarr-web#29]).
+* Declare more than 6 channels from the web client.
+The web client's declaration (https://github.com/streamarr/streamarr-web/pull/130[streamarr/streamarr-web#130]) always carries an AAC capability entry for HLS.
+It adds AC-3, E-AC-3, Opus, FLAC and ALAC entries only when the browser's `decodingInfo()` confirms them.
+It probes 6 and 2 channels for each codec, so no entry accepts more than 6 channels, and Opus stays at 2 channels in WebKit.
+Lifting the 6-channel cap waits for a test of 7.1 channel order on real speakers (https://github.com/streamarr/streamarr-web/issues/29[streamarr/streamarr-web#29]).
 Firefox plays 7.1 AAC in AAC's own channel order and plays 5.1 AAC in WAVE order.
 * Allow more than one audio codec per stream session for Apple clients.
 Apple clients get that exception only if a check shows that their switches between codecs stay in sync.
@@ -591,6 +616,18 @@ No player showed an error.
 An AC-3 or E-AC-3 rendition loses about 27 ms of real audio at the start of the stream, and an Opus rendition loses about 14 ms.
 * An Apple client loses the copy of a FLAC or E-AC-3 track when the file's default track uses another codec.
 The one-codec rule encodes that track to the session's audio codec.
+* When the session copies a FLAC or ALAC default track, every other track that is not already in that codec is encoded to it.
+A lossless encode of a lossy track keeps every decoded sample, so its bitrate follows the decoded audio, not the source track's bitrate.
+Stereo PCM at 48 kHz and 16 bits runs 1,536 kb/s, and FLAC and ALAC remove only the redundancy in it.
+Even if FLAC halves that rate, a stereo rendition runs 768 kb/s, six times a 128 kb/s AAC source.
+The lossless encode adds no quality, because the lossy source already lost it.
+* Under link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc[ADR 0054], every variant's cost and `BANDWIDTH` count the largest audio rendition.
+A lossless rendition encoded from a lossy multichannel track can be larger than the copied default track, and it then raises every variant's cost and `BANDWIDTH`.
+A larger cost can make the server take a lower audio step under the viewer's maximum bitrate (ADR 0050), which caps every rendition.
+* A client that declares DTS or TrueHD loses the copy of a DTS or TrueHD default track when another track would need an encode to that codec.
+The default track is then encoded with the other tracks, so a switch stays in sync.
+* The worker encodes FLAC, Opus and ALAC as well as AAC, AC-3 and E-AC-3.
+Each new audio encode only adds to the worker contract, as link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033] requires.
 * An audio track that ends at least one media segment before the video is always encoded, even when the client could play a copy of the track.
 * Once the server delivers audio renditions, video-only variants replace link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]'s multiplexed variants.
 An init per rendition then replaces ADR 0037's single init per variant.
@@ -654,6 +691,11 @@ That second copy of the language can disagree with the playlist's `LANGUAGE` att
 * One audio codec per stream session for hls.js clients only needs a second rule for the other clients.
 Nobody measured whether Apple players stay in sync after a switch that changes the codec.
 * Accepting the drift leaves the audio 90 to 140 ms late after a switch that changes the codec, until the next seek.
+* Keeping the copied default track and encoding every other track to AAC mixes codecs in one stream session.
+After a switch that changed the codec, hls.js left the audio 90 to 140 ms late until the next seek.
+* Switching the whole stream session to AAC whenever another track needs an encode loses the copy of a lossless or passthrough default track, such as FLAC or E-AC-3.
+* Encoding DTS or TrueHD with FFmpeg's `dca` or `truehd` encoder relies on encoders that FFmpeg marks as experimental.
+* Encoding a default track that cannot be copied always to AAC gives up surround that the client declares in E-AC-3 or AC-3.
 * Never copying Opus gives up copies that every tested player plays, because stereo Opus played in all six players.
 * Renditions for the default track and the viewer's preferred languages only leave the file's other languages out of the menu.
 * Encoding DTS and TrueHD whatever the client declares refuses a copy to a client that can play the codec, such as Media3 with an HDMI receiver.
@@ -1032,16 +1074,35 @@ MediaInfo's rule misses both names.
 * The test set also holds each four-character handler type, such as `soun`, `vide`, `sbtl` and `text`.
 * GPAC's MP4Box writes the name that its `name` import option sets into the handler name.
 
+[[evidence-encoders]]
+=== Audio encoders and channel layouts
+
+The checks ran FFmpeg 8.1.3 from the pinned worker image, `streamarr/streamarr-transcode-worker:0.1.0-SNAPSHOT@sha256:f2011e95de3323e4b31de2fd3e22c0bee980ee2d2993ac404aa1bc5ac7d78691`, on 2026-11-01.
+The sources were synthetic 48 kHz tones.
+
+* `ffmpeg -encoders` listed `aac`, `ac3`, `eac3`, `flac`, `alac` and `libopus` as ready for use.
+It marked `dca` (DTS), `truehd`, `mlp` and FFmpeg's native `opus` encoder as experimental.
+* Each encode below wrote fragmented MP4, and ffprobe read back its channel layout.
+* FLAC wrote 3.0 and quad unchanged, and wrote quad(side) as quad.
+It wrote 2.1 and 3.0(back) as 3.0, and 4.0 as quad, each with only a warning that FLAC does not support the layout.
+FLAC's channel assignment gives 3 channels as left, right and center, and 4 channels as front left, front right, back left and back right (RFC 9639).
+* `libopus` wrote 3.0 and quad, and refused 2.1, 3.0(back), 4.0 and quad(side).
+Opus channel mapping family 1 orders 3 channels as left, center and right, and 4 channels as front left, front right, rear left and rear right (RFC 7845).
+* ALAC wrote 3.0 and 4.0.
+It wrote 2.1 as stereo, and 3.0(back), quad and quad(side) as five channels.
+FFmpeg's ALAC encoder lists mono, stereo, 3.0, 4.0, 5.0, 5.1, 6.1(back) and 7.1(wide) as its layouts.
+* FFmpeg's AC-3 and E-AC-3 encoders list 2.1, 3.0, 3.0(back), 4.0, quad and quad(side) among their layouts.
+
 == References
 
 * Issue https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60] (subtitle extraction and WebVTT, in the server and the worker).
 * Issue https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503] (audio renditions), issue https://github.com/streamarr/streamarr-server/issues/505[streamarr/streamarr-server#505] (captions), issue https://github.com/streamarr/streamarr-server/issues/508[streamarr/streamarr-server#508] (subtitles that extraction finishes during playback) and issue https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511] (streams that end early).
-* Issue https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] (typed capability declarations) and issue https://github.com/streamarr/streamarr-web/issues/29[streamarr/streamarr-web#29] (the web client's declarations).
+* Issue https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] (typed capability declarations and the channel layout rule), pull request https://github.com/streamarr/streamarr-web/pull/130[streamarr/streamarr-web#130] (the web client's declaration) and issue https://github.com/streamarr/streamarr-web/issues/29[streamarr/streamarr-web#29] (7.1 channel order in the web client).
 * Issue https://github.com/streamarr/streamarr-server/issues/496[streamarr/streamarr-server#496] (the epic for switching audio and subtitles without restarting the video) and issue https://github.com/streamarr/streamarr-server/issues/506[streamarr/streamarr-server#506] (image subtitle burn-in).
 * Issue https://github.com/streamarr/streamarr-apple/issues/4[streamarr/streamarr-apple#4] (audio and subtitle switching in the Apple client), issue https://github.com/streamarr/streamarr-web/issues/74[streamarr/streamarr-web#74] (the web player's menus) and issue https://github.com/streamarr/streamarr-android/issues/1[streamarr/streamarr-android#1] (playback with Media3 on Android TV).
 * Issue https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] (the VAAPI, QSV, AMF and RKMPP encoders), issue https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56] (NVENC) and issue https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57] (VideoToolbox).
 * Pull request https://github.com/streamarr/streamarr-transcode-worker/pull/50[streamarr/streamarr-transcode-worker#50], which declares copied audio's bitrate unknown.
-* link:0013-stream-decision-architecture.adoc[ADR 0013], link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018], link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019], link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032], link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033], link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036], link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037], link:0042-graphql-subscriptions-run-over-websocket-until-token-expiry.adoc[ADR 0042] and link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045].
+* link:0013-stream-decision-architecture.adoc[ADR 0013], link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018], link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019], link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032], link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033], link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036], link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037], link:0042-graphql-subscriptions-run-over-websocket-until-token-expiry.adoc[ADR 0042], link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045], link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049], link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc[ADR 0050] and link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc[ADR 0054].
 * The measurements of 2026-09-27 to 2026-09-30 and their harnesses were not committed, so the Evidence section gives their results.
 * https://datatracker.ietf.org/doc/html/rfc8216#section-4.3.4.1[RFC 8216 §4.3.4.1: `EXT-X-MEDIA`], https://datatracker.ietf.org/doc/html/rfc8216#section-4.3.4.2[§4.3.4.2: `EXT-X-STREAM-INF`, `CODECS` and `BANDWIDTH`] and https://datatracker.ietf.org/doc/html/rfc8216#section-3.5[§3.5: WebVTT segments and `X-TIMESTAMP-MAP`]
 * https://developer.apple.com/documentation/http-live-streaming/hls-authoring-specification-for-apple-devices/[Apple HLS authoring specification: audio and subtitle renditions]
@@ -1050,3 +1111,5 @@ MediaInfo's rule misses both names.
 * https://github.com/FFmpeg/FFmpeg/blob/n8.1/libavformat/movenc.c#L3537-L3573[FFmpeg n8.1 `movenc.c`: the handler names that the MP4 muxer writes]
 * https://github.com/MediaArea/MediaInfoLib/blob/v26.10/Source/MediaInfo/Multiple/File_Mpeg4_Elements.cpp#L4678[MediaInfoLib v26.10 `File_Mpeg4_Elements.cpp`: MediaInfo's rule for generic handler names]
 * https://github.com/gpac/gpac/blob/v2.4.0/applications/mp4box/fileimport.c#L919-L921[GPAC v2.4.0 `fileimport.c`: the `name` import option] and https://github.com/gpac/gpac/blob/v2.4.0/applications/mp4box/fileimport.c#L1731-L1733[its write into the handler name]
+* https://www.rfc-editor.org/rfc/rfc9639#section-9.1.3[RFC 9639 §9.1.3: FLAC channel assignment]
+* https://www.rfc-editor.org/rfc/rfc7845#section-5.1.1.2[RFC 7845 §5.1.1.2: Opus channel mapping family 1]

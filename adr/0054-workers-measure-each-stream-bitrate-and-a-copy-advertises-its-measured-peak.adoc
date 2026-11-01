@@ -1,0 +1,507 @@
+= ADR 0054: Workers Measure Stream Bitrates Once, and a Video Copy Costs Its Measured Average and Advertises Its Measured Peak
+
+== Status
+
+Proposed
+
+This decision changes what a video copy costs under link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc[ADR 0050] once the server holds a measurement of the copied streams.
+Before a measurement exists, trusted Matroska statistics tags also change the cost of a copy.
+This decision also changes the `BANDWIDTH` attribute that a video copy advertises.
+link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] keeps `BANDWIDTH` at 1.2 × `AVERAGE-BANDWIDTH` for encoded variants.
+This decision adds a background step to link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032].
+The background step uses ADR 0032's keyframe packet scan capacity.
+This decision adds Matroska statistics tags to the probe facts, so the probe version rises with that change (ADR 0032).
+This decision amends link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] (<<amends-0037>>).
+The layout of a delivered media segment becomes part of the worker contract.
+A video copy keeps the source's length-prefixed samples unless the source can keep its parameter sets in its samples or the source's record header disagrees with its parameter sets.
+
+== Context
+
+A stream is one video, audio or subtitle track of a media file as the probe describes the track.
+A video copy is a variant that copies the source's chosen video stream instead of encoding the video (link:0013-stream-decision-architecture.adoc[ADR 0013]).
+ADR 0050 checks a video copy against the viewer's maximum bitrate.
+A video copy costs the copied video's bitrate plus the stream session's audio bitrate.
+
+The worker reads two bitrates from ffprobe today.
+The first bitrate is each stream's `bit_rate`.
+The second bitrate is the container's `bit_rate`, which covers the whole file.
+FFmpeg's Matroska demuxer reports no `bit_rate` for a stream.
+ffprobe gives a `bit_rate` only for audio codecs such as AC-3 and DTS, whose headers state a rate.
+So for a Matroska source's video, the server knows only the container bitrate.
+The container bitrate holds every track of the file, including audio languages and commentary that the stream session does not deliver.
+A video copy of a Matroska source therefore costs more than the player downloads.
+The extra cost can refuse a copy that fits the viewer's maximum bitrate.
+
+The server cannot take the other tracks out of the container bitrate.
+A track that starts late or ends early adds less than the track's own bitrate to the container's average.
+Jellyfin estimates each audio track's bitrate from a table and subtracts the estimates from the container bitrate.
+Estimates make the error worse.
+
+mkvmerge writes statistics tags for each track of a Matroska file.
+The tags are `BPS`, `DURATION`, `NUMBER_OF_BYTES` and `NUMBER_OF_FRAMES`.
+mkvmerge also writes `_STATISTICS_WRITING_APP` with the same value as the segment's `WritingApp` element.
+mkvmerge also writes `_STATISTICS_WRITING_DATE_UTC` with the same time as the segment's `DateUTC` element.
+mkvpropedit can add statistics tags to a file that mkvmerge wrote, and then writes its own name as `_STATISTICS_WRITING_APP`.
+FFmpeg copies the statistics tags whenever FFmpeg rewrites a Matroska file, even when FFmpeg cuts the file or encodes a stream again.
+FFmpeg rewrites only `DURATION`, so the other tags then describe packets that the file no longer holds.
+FFmpeg writes its own name as `WritingApp`.
+With `-map_metadata 0`, FFmpeg also keeps the file's old `DateUTC`.
+Jellyfin reads `BPS`, or `NUMBER_OF_BYTES` × 8 / `DURATION`, without checking whether the tags are stale.
+
+RFC 8216 defines the two bandwidth attributes of an `EXT-X-STREAM-INF` tag.
+`BANDWIDTH` is the peak segment bit rate of the variant.
+`AVERAGE-BANDWIDTH` is the average segment bit rate of the variant.
+A segment's bit rate is the segment's size divided by the segment's duration.
+The peak segment bit rate is the largest bit rate of any run of consecutive segments whose total duration is between 0.5 and 1.5 times the target duration.
+When a variant has audio renditions, `BANDWIDTH` is the largest sum of peak segment bit rates over the playable combinations of renditions.
+The server advertises a video copy's `BANDWIDTH` as 1.2 × the copy's average.
+A source with uneven scenes can exceed that value in many segments.
+Apple's players report error −12318, "Segment exceeds specified bandwidth", when a segment's bit rate exceeds `BANDWIDTH` by more than 10 %.
+ADR 0037 records that error at 1.161 times the advertised `BANDWIDTH`.
+
+The segments of a video copy open at source keyframes (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]).
+ADR 0037 is moving every stream session to 3 s slots and to merged segment lists.
+So the length of a copy's segments is a server setting that can change, and a copy's segments differ in length.
+
+The player never receives the fragments that FFmpeg writes.
+The worker rebuilds each delivered media segment as one `moof` and one `mdat` (ADR 0037).
+Every H.264 and HEVC copy runs FFmpeg's Annex B bitstream filter, `h264_mp4toannexb` or `hevc_mp4toannexb`.
+The filter puts the parameter sets of the source's decoder configuration record in front of every keyframe sample.
+So a copy delivers more video bytes than the source's packets hold.
+In synthetic sources, an H.264 copy added 37 bytes to each keyframe.
+An x265 HEVC copy added about 2.4 kB to each keyframe, because x265 also writes a long information SEI message into the record.
+The HEVC copy's record still says that the record holds every VPS, SPS and PPS, while every keyframe sample repeats them.
+ISO/IEC 14496-15 forbids that combination.
+
+Plex's optional scheduled task "Perform extensive media analysis during maintenance" reads every file once.
+The task computes the bandwidth that each stream needs at several client buffer sizes.
+The task runs only inside Plex's maintenance window.
+Before the task reaches a file, Plex estimates the bandwidth from the file's average bitrate plus a margin.
+Jellyfin has no step that reads the packets of a file.
+
+== Decision
+
+[[measured-bitrate]]
+=== The server holds a measured bitrate for each measured stream when a measurement exists
+
+A stream's measured bytes are the sum of the sizes of the stream's packets.
+A packet's size counts the packet's payload only, without the source container's framing.
+A stream's measured duration runs from the stream's first presentation time to the end of the stream's last packet.
+A stream's measured bitrate is the stream's measured bytes × 8 divided by the stream's measured duration.
+Only a measurement gives a measured bitrate.
+
+A keyframe interval runs from one keyframe of the chosen video stream to the next keyframe of the chosen video stream.
+The measurement holds each stream's bytes and packet count for the whole stream and in every keyframe interval.
+A video packet belongs to the keyframe interval in which the packet's decode order places the packet.
+An audio packet belongs to the keyframe interval that holds the packet's presentation time.
+The packet counts per keyframe interval follow the same rules as the bytes.
+The keyframe intervals follow the keyframe positions that the server stores for the file (ADR 0032).
+
+The measurement covers the streams that a video copy delivers: the chosen video stream and every audio stream.
+The measurement does not cover subtitle streams or data streams.
+
+*Why:* Bytes and packet counts per keyframe interval let the server compute the size of any segment of a video copy.
+A copy's segments open at keyframes, so the video of every copy segment is a run of whole keyframe intervals.
+A segment's audio follows the segment's interval instead, and the server bounds that audio from the keyframe intervals (<<copy-cost>>).
+The server can then change the segment length, or merge slots into segments, without measuring the file again.
+A measurement that the worker took on fixed windows of one segment length would hold for one segment length only.
+Most of a segment's framing is a fixed size for each sample, so a segment's size needs the segment's sample count as well as the segment's bytes (<<segment-framing>>).
+
+[[measurement-sources]]
+=== Three steps give a measurement, and trusted statistics tags give only a probed bitrate
+
+The worker measures the streams of a file in one of three steps.
+Each step lists every packet, so each measurement is exact.
+
+. *MP4 and MOV sample tables.* The probe reads each sample's size and times from the sample tables of an MP4 or MOV file that is not fragmented.
+The probe takes this measurement when the probe reads the keyframes from the same sample tables.
+The probe reads no media data for this measurement.
+. *Keyframe packet scan.* A keyframe packet scan already reads every packet of the file (<<keyframe-packet-scan-measures>>).
+. *Bitrate scan.* A bitrate scan reads every packet of the measured streams once (<<bitrate-scan>>).
+
+A stream's probed bitrate is the bitrate that the probe reports for the stream.
+That bitrate is ffprobe's `bit_rate`, or else the bitrate from the stream's trusted Matroska statistics tags (<<trusted-tags>>).
+A probed bitrate is a probe fact, not a measurement.
+Statistics tags give no bytes per keyframe interval, so a probed bitrate gives no peak.
+
+The server never subtracts one stream's bitrate from the container bitrate to find another stream's bitrate.
+The server never estimates a stream's bitrate from the stream's codec or channel count.
+
+*Why:* An MP4 file already lists every sample's size in the file's index.
+Reading that index costs one read of the movie box, which the keyframe step already reads.
+The tags cost nothing to read, so a copy of a file with trusted tags gets an honest cost at the first probe.
+
+[[trusted-tags]]
+=== The probe trusts statistics tags whose writer matches the file's writer and whose byte counts fit in the file
+
+A stream's statistics tags count only when both of these rules hold.
+
+. The stream's `_STATISTICS_WRITING_APP` equals the segment's `WritingApp`.
+Statistics that mkvpropedit wrote also count in a file that mkvmerge wrote.
+. The `NUMBER_OF_BYTES` of every stream whose tags pass the first rule add up to no more than the file's size.
+That sum includes subtitle streams.
+When the sum exceeds the file's size, no stream's tags count.
+
+A trusted stream's bitrate is the stream's `BPS` tag.
+When `BPS` is missing, the bitrate is `NUMBER_OF_BYTES` × 8 / `DURATION`.
+When ffprobe reports a `bit_rate` for the stream, ffprobe's value wins over the tags.
+Only video streams and audio streams take a bitrate from the tags.
+The tags reach existing files through a new probe version, which the worker and the server raise together (streamarr/streamarr-transcode-worker#117).
+
+*Why:* A program that rewrites a Matroska file writes its own `WritingApp`.
+mkvmerge and mkvpropedit write fresh statistics.
+FFmpeg keeps the old statistics.
+So a file whose `WritingApp` differs from the statistics' writer may carry tags that describe an older version of the file.
+mkvpropedit edits a file that mkvmerge wrote without changing the file's packets, so its statistics stay true.
+The size rule catches tags that no single writer check catches, such as hand-written tags.
+A stream that fails the first rule loses only its own tags.
+A file that fails the size rule loses the tags of every stream.
+Rejecting fresh tags costs only time, while trusting stale tags costs a wrong copy decision.
+
+[[bitrate-scan]]
+=== A bitrate scan reads the file in background chunks that start only on a worker that runs no job attempt
+
+A bitrate scan is a durable background step, like ADR 0032's keyframe packet scan.
+The worker runs every process of a bitrate scan at the lowest CPU priority.
+The worker reads packets with ffprobe and decodes no frame.
+
+A bitrate scan uses the keyframe packet scan capacity.
+That capacity is 0 while the worker runs any job attempt (ADR 0032).
+The server sends a keyframe packet scan before any bitrate scan.
+A keyframe packet scan lets the server copy a file at all, while a bitrate scan only corrects the cost of a copy.
+
+A bitrate scan reads the file in chunks.
+A chunk is a run of consecutive keyframe intervals.
+The server sizes each chunk so that the chunk holds about 1 GiB of the file.
+Each chunk is one request to a worker.
+The server stores the result of each finished chunk.
+After a worker loss, a timeout or a server restart, the server sends only the chunks that have no stored result.
+The server publishes the file's measurement after every chunk has a result.
+The server never publishes a measurement from part of a file.
+
+*Why:* A capacity drop never stops work that already runs (ADR 0032).
+A whole-file read of a 100 GB file takes about 14 minutes at 117 MB/s.
+TCP carries at most about 117 MB/s of data over gigabit Ethernet with 1,500-byte frames.
+A whole-file scan that started just before a viewer pressed play would compete with that playback for the disk for up to 14 minutes.
+A 1 GiB chunk takes about 9 s at the same rate.
+So a chunk that started before playback stops competing within about 9 s.
+A whole-file scan also needs an idle gap as long as the whole read.
+On a busy server, a large file could wait for such a gap forever.
+A chunk needs an idle gap of a few seconds only.
+
+The bitrate scan runs only for a file whose chosen video stream the server could copy for some client.
+Such a file has known keyframe positions and a codec family that fMP4 HLS carries.
+The server sends the bitrate scans of files whose chosen video stream has no probed bitrate first.
+The server sends the bitrate scans of files whose chosen video stream has a probed bitrate, such as one from trusted statistics tags, after those files.
+A file with a usable measurement gets no bitrate scan.
+A file whose measurement is unavailable gets no bitrate scan until the file's source changes or the measurement version rises.
+
+[[keyframe-packet-scan-measures]]
+=== A keyframe packet scan also measures the file
+
+A keyframe packet scan already reads every packet of the file.
+The keyframe packet scan also reports the file's measurement.
+A file that such a keyframe packet scan measured needs no separate bitrate scan.
+
+*Why:* A Matroska file whose Cues the probe cannot trust would otherwise pay two whole-file reads.
+MPEG-TS video is in Annex B form, so a keyframe packet scan of an MPEG-TS file reports no measurement (<<unchanged-packets>>).
+
+[[measurement-lifetime]]
+=== A measurement lasts while the source file and the keyframe positions stay the same
+
+The server keeps measurements in their own tables, apart from the stored probe outcome.
+The server stores each measurement with the source snapshot that the measurement read.
+The source snapshot is the file's size and modification time (ADR 0032).
+The server also stores the keyframe positions that the measurement's keyframe intervals follow.
+The server uses a measurement only while both match the file's stored probe outcome.
+A new probe version does not discard a measurement.
+A measurement version, apart from the probe version, discards measurements when the measurement's own format changes.
+The packet counts per keyframe interval and the rule of <<unchanged-packets>> raise the measurement version, not the probe version.
+A source change, other keyframe positions or a new measurement version deletes the file's measurement and the file's stored chunk results.
+Each of these then requests a new bitrate scan when the file needs one.
+
+*Why:* A bitrate scan reads the whole file.
+ADR 0032 raises the probe version for each change that adds probe facts.
+If measurements followed the probe version, every such change would read the whole library again.
+The bytes of an unchanged file do not change when the probe learns a new fact.
+The server checks the measurement version whenever it reads a measurement.
+A later probe that reports no measurement leaves the stored measurement in place.
+So a new probe version alone would keep measurements without packet counts, and measurements of files that the new rule leaves unmeasured.
+
+=== Failures leave the copy on the unmeasured cost
+
+A scan of a source that changed during the scan publishes nothing.
+A transient failure retries the chunk with backoff, as ADR 0032's keyframe packet scan does.
+A worker that disconnects fails the worker's chunk, and the chunk retries on any worker.
+A chunk that FFmpeg's demuxer cannot finish counts as a failed chunk.
+Three failed attempts of one chunk mark the file's measurement unavailable for the file's source snapshot.
+A file whose measurement is unavailable keeps the unmeasured cost until the source changes.
+
+[[unchanged-packets]]
+=== The worker reports no measurement when a copy would change a measured stream's packets
+
+A measurement counts the source's packets.
+So a measurement holds only when a copy delivers each packet as one sample of the same size.
+The worker reports no measurement of a file when a copy would change the size or the number of any measured stream's packets.
+These streams change in a copy:
+
+* H.264 or HEVC video that still runs the Annex B bitstream filter, such as video whose NAL unit lengths take a size other than 4 bytes (<<amends-0037>>).
+* AV1 whose samples hold OBUs that the mp4 muxer removes, such as the temporal delimiters of an IVF file.
+* Video in Annex B form, such as the video of an MPEG-TS file.
+* AAC in ADTS frames.
+* E-AC-3 whose frames the mp4 muxer joins into one sample.
+
+The worker then reports no measurement for any stream of the file, not a measurement without the stream that changes.
+A bitrate scan that finds such a stream marks the file's measurement unavailable for the file's source snapshot.
+Such a file keeps the unmeasured cost.
+
+*Why:* A measurement covers the chosen video stream and every audio stream.
+The server refuses a measurement that leaves out the chosen video stream or any audio stream, and a refused measurement fails the probe.
+The probe would then retry instead of leaving the copy on the unmeasured cost.
+An unmeasured cost errs in a known way, while a measurement of packets that the copy changes looks exact and is not.
+
+[[segment-framing]]
+=== The server counts a copy's segment framing from the delivered segment layout
+
+A segment's framing is every byte of the delivered media segment outside its samples: the `moof` with every box inside it, and the `mdat` header.
+The delivered segment layout fixes the framing (<<amends-0037>>).
+A segment's framing is 32 bytes, plus 64 bytes for each track with samples in the segment, plus 16 bytes for each sample.
+The 32 bytes are the `moof` header, the `mfhd` and the 8-byte `mdat` header.
+The 64 bytes of a track are the track's `traf` header, `tfhd`, version 1 `tfdt` and `trun` header.
+The 16 bytes of a sample are the sample's `trun` entry: duration, size, flags and composition offset.
+The copied video's framing holds each segment's 32 bytes, the video track's 64 bytes and 16 bytes for each video sample.
+A copied audio track's framing holds the audio track's 64 bytes in every segment, even a segment that holds no sample of that track, and 16 bytes for each audio sample.
+Once an audio rendition has segments of its own (ADR 0043), the audio's framing also holds each of those segments' 32 bytes.
+The server takes the number of samples from the measured packet counts.
+The server never reads the worker's fragmentation target.
+
+*Why:* The server counts every delivered byte of a copy without asking the worker.
+The formula matched all 327 delivered segments of 30 copies on the pinned worker image.
+The copies came from 10 synthetic sources: H.264 and HEVC, with and without B-frames, with irregular keyframes, in MP4 and Matroska, with AAC or E-AC-3 audio and without audio.
+Each source was copied at fragmentation targets of 250 ms, 1 s and 3 s, and each source's delivered framing was the same at all three targets.
+For one 23.976 fps source, FFmpeg's own fragments held 35,736, 17,880 and 14,892 bytes of framing at the three targets, but the player never receives those fragments.
+The framing came to 9.5 kb/s for 23.976 fps video with 48 kHz AAC, 14.1 kb/s at 59.94 fps, and 3.3 kb/s for video alone.
+Charging an audio track's 64 bytes in every segment overcounts only a segment without an audio sample, by 64 bytes.
+
+[[copy-cost]]
+=== A video copy costs its measured average and advertises its measured peak
+
+The average segment bit rate of a stream is the stream's measured bytes, plus the segment framing that the stream adds to the delivered segments, × 8 divided by the media playlist's duration.
+The media playlist's duration is the sum of the playlist's `EXTINF` durations, as the playlist writes them.
+The cost uses the average segment bit rate, not the measured bitrate.
+So a track that starts late or ends early adds less than the track's own measured bitrate.
+
+A video copy's cost under ADR 0050 is the copied video's average segment bit rate plus the stream session's audio bitrate.
+The stream session's audio bitrate counts the largest audio rendition (link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043]).
+A copied audio rendition counts the rendition's average segment bit rate.
+An encoded audio rendition counts the encoded audio's bitrate plus the encoded audio's framing, which <<segment-framing>> counts as for a copied audio track.
+The number of encoded frames is the media playlist's duration × the sample rate, plus the encoder's priming samples, divided by the frame size and rounded up.
+The encoded audio's bitrate stays an estimate of the encoded audio's bytes.
+The viewer's maximum bitrate bounds that cost.
+`AVERAGE-BANDWIDTH` advertises that cost.
+
+A video copy's `BANDWIDTH` is the copied video's peak segment bit rate plus the largest peak segment bit rate among the stream session's audio renditions.
+The server computes each peak with RFC 8216's rule over the stream session's own media segments.
+A copied audio rendition's peak comes from the audio stream's bytes and packet counts per keyframe interval.
+Audio renditions follow the stream session's segment list (ADR 0043).
+An audio sample joins the segment whose interval holds the sample's start, in a multiplexed variant and in an audio rendition alike (ADR 0037).
+So a segment's audio follows the segment's interval, not the keyframe intervals that the segment's video spans.
+The server bounds a segment's audio bytes and audio samples by the keyframe intervals that overlap the segment's interval, widened by one audio frame on each side.
+An encoded audio rendition's segment holds the encoded audio of the segment's interval at 1.2 × the encoded audio's bitrate, plus its framing, and its peak follows the same rule.
+Each peak, like each average, counts the segment framing that the delivered segments carry.
+
+Until the server holds a measurement, a video copy costs the unmeasured cost.
+The unmeasured cost is the copied video's probed bitrate plus the stream session's audio bitrate.
+Without a probed bitrate, the unmeasured cost is the container-based cost that ADR 0050 gives.
+A copy without a peak advertises `BANDWIDTH` as 1.2 × `AVERAGE-BANDWIDTH`, as ADR 0044 does for encoded variants.
+
+*Why:* An encoded variant's bitrate is a cap that the encoder holds, so the encoded variant's average stays close to that bitrate.
+A video copy's peak can be several times the copy's average.
+Checking the peak against the viewer's maximum bitrate would refuse most copies of uneven sources and encode those sources.
+An encode costs worker capacity and picture quality.
+The player's buffer absorbs a peak that lasts a few segments.
+`BANDWIDTH` tells an adaptive player how fast the link must be.
+An adaptive player that knows the real peak picks an encoded variant when the player's link is too slow for the copy's peaks.
+RFC 8216 computes a segment's bit rate from the segment's whole size, so the average and the peak count the framing.
+RFC 8216 also computes the average over the segments' durations, and the source's probed duration can differ from their sum, for example 8.999999 s against 9 s.
+An AAC encoder writes a priming frame of 1,024 samples, which a multiplexed segment 0 delivers (ADR 0037), so a frame count from the duration alone falls one frame short.
+In a synthetic source with irregular keyframes, one segment held 0.709 s of video and 94 E-AC-3 frames, which is 3.0 s of audio.
+ADR 0037's snap of copied audio can move an audio frame across the edge of a segment's interval, so the audio bound widens by one frame on each side.
+The same segment shows why a fixed 1.2 × the encoded audio's bitrate would understate an encoded audio rendition's peak: the segment's `EXTINF` follows its video, while its audio follows its interval.
+
+[[playback-moves-the-scan]]
+=== A copy without a measurement moves the file's bitrate scan forward
+
+When a stream session copies the video of a file without a measurement, the server moves the file's bitrate scan ahead of every other bitrate scan.
+The bitrate scan still waits for the keyframe packet scan capacity.
+So a chunk of that bitrate scan never starts on the worker that runs the stream session's job attempt.
+No playback request waits for a bitrate scan.
+
+*Why:* The stream session that moved the scan keeps the cost that the stream session started with.
+The viewer's next stream session of the same file then gets the measured cost.
+
+[[amends-0037]]
+=== This decision amends ADR 0037: the delivered segment layout is part of the worker contract, and a copy keeps the source's length-prefixed samples
+
+ADR 0037 rebuilds each delivered media segment as one `moof` and one `mdat`.
+That layout becomes part of the worker contract.
+The `moof` holds an `mfhd` and one `traf` for each track with samples in the segment.
+Each `traf` holds a `tfhd`, a version 1 `tfdt` and a version 1 `trun` with four fields for every sample: duration, size, flags and composition offset.
+The `mdat` has an 8-byte header.
+A worker test pins the layout, and a change to the layout is a change to the worker contract.
+
+The probe reports, for each H.264 or HEVC video stream, whether a copy without the Annex B bitstream filter keeps every packet's bytes.
+The server stores that fact and sets it on each copy job of the stream.
+A video copy runs the filter whenever its copy job does not carry that fact.
+The fact is false, so the copy keeps the filter, in each of these cases:
+
+* The source's decoder configuration record lacks an SPS or a PPS, or for HEVC a VPS.
+* The record's header names another profile, tier or level than the record's parameter sets name.
+* The source's `hvcC` record holds an SEI message other than user data unregistered, such as the mastering display or the content light level.
+* The record's NAL unit lengths take a size other than 4 bytes.
+* The source's MP4 or MOV sample entry is not `avc1` or `dva1` for H.264, or `hvc1` or `dvh1` for HEVC.
+* The source's MP4 or MOV track has more than one sample entry.
+* A NAL unit of the record would not reach the decoder, or an array of an `hvcC` record names another NAL unit type than a unit that the array holds.
+
+A Matroska track has no sample entry, so only its record counts.
+Every other copy of length-prefixed H.264 or HEVC runs neither filter and keeps the source's samples.
+The same fact decides whether a measurement counts the stream's packets (<<unchanged-packets>>).
+
+*Why:* The server computes each segment's framing from the layout (<<segment-framing>>).
+A layout change outside the contract would make every measured cost wrong without any failure.
+A segment never needs a 64-bit `mdat` size, because ADR 0037's segment cap is far below 4 GiB.
+Without the filter, the delivered samples of four synthetic copies equalled the source packets byte for byte.
+The four copies were H.264 from MP4 and from Matroska, and HEVC with AAC and with E-AC-3.
+The worker's check of each copy's initialization segment still passed.
+The HEVC copy also stopped repeating its VPS, SPS, PPS and x265's information SEI message in front of every keyframe, about 2.4 kB each.
+Its record's claim to hold every parameter set then became true, as ISO/IEC 14496-15 requires.
+The copy's `avc1` or `hvc1` record must hold the parameter sets (link:0013-stream-decision-architecture.adoc[ADR 0013]).
+A record without them leaves the parameter sets only in the samples, and the filter lets the mp4 muxer take them from there.
+A sample entry other than `avc1`, `dva1`, `hvc1` and `dvh1`, such as `avc3` or `hev1`, can also keep the parameter sets only in the samples.
+The probe describes only a track's first sample entry, so it cannot establish that a copy keeps the packets of a track with another entry.
+The copy's codec string comes from the record's parameter sets (link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036]), and the worker refuses an initialization segment whose codec string differs from the probed one.
+Without the filter, a copy keeps the source's record header.
+A synthetic H.264 file whose record header names level 5.1 while its SPS names level 1.0 would then fail that check, so such a file keeps the filter.
+The worker removes the SEI arrays from every `hvc1` record (ADR 0037), so without the filter a copy would lose the record's SEI messages.
+In synthetic HEVC sources whose mastering display and content light level messages sat only in the record, a copy without the filter delivered neither message, in MP4 and in Matroska.
+With the filter, the decoded keyframe carried both messages.
+User data unregistered messages, such as x265's information message, carry encoder notes rather than picture metadata.
+With the filter, the mp4 muxer writes every sample with 4-byte NAL unit lengths, the length that every other copy delivers.
+FFmpeg's decoder never receives a record NAL unit that is empty or has its forbidden bit set, so the probe reads such a record without the unit, while a copy without the filter would deliver the unit to the player.
+Without the filter, FFmpeg's `hvcC` writer sorts the record's units by the type that each array names, so a VPS in an array that names SEI would leave the copy's record without a VPS.
+The worker decides at the start of each copy attempt and does not read the source then, so the decision comes from the probe's fact.
+A copy job without the fact, such as one from a server that does not send it, keeps the filter, as every copy did before this decision.
+
+=== Explicitly deferred
+
+* A check of the viewer's maximum bitrate against the busiest window of a player's buffer length.
+The stored bytes per keyframe interval allow that check without a new scan.
+* A measured peak for encoded variants.
+* Bitrates of subtitle streams.
+* A ServerAdmin action that starts or forces a bitrate scan.
+* A measurement of the files that <<unchanged-packets>> leaves unmeasured.
+A worker could run a copy's own filters and muxer during the measurement and report the delivered bytes and samples of each keyframe interval.
+
+== Consequences
+
+* A copy of a Matroska source with trusted statistics tags gets an honest cost at the first probe.
+* A copy of an MP4 or MOV source that is not fragmented gets a measured cost and a measured `BANDWIDTH` at the first probe, unless the copy would change the source's packets (<<unchanged-packets>>).
+* Other sources keep the unmeasured cost until a keyframe packet scan or a bitrate scan measures the file.
+* A library's first bitrate scans read most Matroska files once.
+A two-hour source at an average of 60 Mb/s holds 54 GB.
+At 117 MB/s, a 54 GB file takes about 8 minutes.
+1,000 such files take about 5.3 days of time in which no job attempt runs.
+Workers spend that time only while they run no job attempt.
+* On the worker that runs a playback's job attempt, a bitrate scan competes with that playback for at most one chunk, about 9 s at gigabit speed.
+* Chunks on another, idle worker can read a file that a playback reads from the same disk.
+* A video copy's `BANDWIDTH` rises for sources whose peaks exceed 1.2 × the average.
+An adaptive player then picks the copy less often on a link that cannot carry the copy's peaks.
+* The server stores the bytes per keyframe interval of each measured stream.
+A two-hour file with a keyframe every second holds 7,200 intervals.
+At 4 bytes each, each stream takes about 29 kB.
+* The server also stores each measured stream's packet count per keyframe interval, another 4 bytes per interval.
+* The worker contract gains a bitrate scan request and a bitrate scan result.
+* The probe result of each H.264 or HEVC video stream, and each copy job of the stream, gain the fact that a copy keeps every packet's bytes.
+* A measured copy's cost counts every byte that the player downloads, framing included.
+In the synthetic sources, framing added 3.3 to 14.1 kb/s.
+* H.264 and HEVC copies of sources whose record holds the parameter sets stop repeating those parameter sets in front of every keyframe.
+The synthetic x265 copy then delivered about 2.4 kB less per keyframe, about 9.9 kb/s at a keyframe every 2 s.
+* Copies of MPEG-TS files, of IVF AV1 files, of the sources that still run the Annex B filter and of sources with ADTS AAC get no measurement and keep the unmeasured cost.
+* A change to the delivered segment layout is a change to the worker contract, and it changes the server's framing count in the same release.
+
+== Rejected Alternatives
+
+* Subtract the other tracks' bitrates from the container bitrate.
+A track that starts late or ends early adds less than the track's bitrate to the container's average.
+* Estimate audio bitrates from the codec and the channel count, as Jellyfin does.
+An estimate can be far from a lossless or variable-rate track's real bitrate.
+* Trust Matroska statistics tags without a staleness check, as Jellyfin does.
+FFmpeg keeps the tags when FFmpeg cuts a file or encodes a stream again, so the tags can describe packets that the file no longer holds.
+* Trust the tags when `_STATISTICS_WRITING_DATE_UTC` matches the segment's `DateUTC`, alone or beside the writing application check.
+FFmpeg with `-map_metadata 0` keeps the file's `DateUTC` while FFmpeg makes the tags stale.
+In the worker's tests, a cut and a video encode both passed a date check and the size rule.
+Beside the writing application check, the date caught no stale file that the writing application missed.
+The date would also reject fresh statistics that mkvpropedit added to a file that mkvmerge wrote.
+* Scan only files without trusted tags.
+Those tags give no peak, so a copy of such a file would keep advertising 1.2 × the average.
+* Scan MP4 and MOV files whose sample tables the probe reads.
+The sample tables already list every packet's size.
+* Measure the peak on the worker over fixed windows of one segment length.
+The measurement would hold for one segment length only, and ADR 0037 is changing that length.
+* Measure the peak over a sliding window of one segment length.
+A sliding window does not follow the copy's real segments, and the measurement would hold for one segment length only.
+* Store bytes per second instead of bytes per keyframe interval.
+A copy segment's edges fall between whole seconds, so the server would have to guess the bytes at each edge.
+* Decode frames to measure the streams.
+Decoding costs CPU and adds nothing, because a copy delivers the packets as they are.
+* Publish a measurement from the chunks that finished.
+A peak over part of the file misses the busiest scenes of the rest.
+* Scan the whole file in one request.
+A scan that started before playback would compete with that playback for the disk for minutes, and a large file could wait forever for a long enough idle gap.
+* Pause FFmpeg with a stop signal while a job attempt runs.
+The paused process keeps the file open on a network share, and the server's timeout would have to learn about pauses.
+* Give bitrate scans their own capacity.
+Two whole-file reads on one disk would slow each other.
+* Run bitrate scans on the background probe capacity.
+That capacity stays above 0 during playback.
+* Discard measurements when the probe version rises.
+Every probe version would read the whole library again.
+* Run a bitrate scan at playback priority when a copy lacks a measurement.
+The scan would run beside the playback's job attempt on the same worker for the whole file.
+* Check the copy's peak against the viewer's maximum bitrate.
+The check would refuse most copies of uneven sources, and the player's buffer absorbs short peaks.
+* Run the scans only inside a maintenance window, as Plex does.
+Workers can scan whenever they run no job attempt, and a window delays files that a viewer wants now.
+* Parse Matroska and MPEG-TS packets in Java.
+FFmpeg's demuxers already define the packets that a job attempt copies.
+* Keep the Annex B filter on every copy, and add an allowance for the parameter sets from the source's record.
+The allowance is not a bound.
+When a sample carries an SPS but no PPS, H.264's filter can insert a cached PPS in front of every IDR slice: 80 bytes against an allowance of 39 bytes.
+That cache follows the parameter sets in the samples, not the record.
+HEVC's filter inserts the parameter sets even when the sample already holds them.
+* Have the worker report its fragment cadence and its framing sizes when it registers.
+The delivered framing was the same at every fragmentation target, and the framing sizes follow from the worker's code, not its settings.
+* Bound the framing in the server with no new facts.
+The stream's packet count gives an exact average, but nothing gives each segment's sample count for the peak.
+* Have the worker run the copy's filters and muxer during every measurement and report the delivered bytes of each keyframe interval.
+That count is exact for every container, but the MP4 and MOV sample table step would then read every file in full.
+Stored measurements would also go stale whenever the copy's FFmpeg arguments change, so they would need a version of their own.
+It stays a follow-up for the files that <<unchanged-packets>> leaves unmeasured.
+* Leave out of the measurement only the stream that a copy changes.
+The server refuses a measurement without the chosen video stream or any audio stream, so the probe would fail and retry.
+* Divide the average by the source's probed duration.
+RFC 8216 defines the average over the segments' durations, and the two can differ.
+
+== References
+
+* https://www.rfc-editor.org/rfc/rfc8216#section-4.1[RFC 8216 §4.1: segment bit rate, peak segment bit rate and average segment bit rate]
+* https://www.rfc-editor.org/rfc/rfc8216#section-4.3.4.2[RFC 8216 §4.3.4.2: `BANDWIDTH` and `AVERAGE-BANDWIDTH`]
+* ISO/IEC 14496-15: `array_completeness` in the HEVC decoder configuration record, and the `hvc1` and `hev1` sample entries
+* https://www.bunkus.org/2014/06/mkvtoolnix-v7-0-0-released-2/[MKVToolNix 7.0.0 release notes: track statistics tags and `_STATISTICS_WRITING_APP` / `_STATISTICS_WRITING_DATE_UTC`]
+* https://forums.plex.tv/t/question-regarding-extensive-media-analysis/880650[Plex forum: what extensive media analysis reads and when the analysis runs]
+* https://forums.plex.tv/t/what-is-plex-media-scanner-deep-analysis-and-how-do-i-disable-it/461799[Plex forum: deep analysis and the estimate from the average bitrate plus a margin]
+* https://github.com/jellyfin/jellyfin/blob/054706333d0c76b2fe676c91fbdf19b39d3d7b8b/MediaBrowser.MediaEncoding/Probing/ProbeResultNormalizer.cs[Jellyfin `ProbeResultNormalizer.cs`]: statistics tags without a staleness check, and audio estimates subtracted from the container bitrate
+* https://github.com/streamarr/streamarr-transcode-worker/pull/117[streamarr/streamarr-transcode-worker#117]: the worker reads trusted statistics tags, with the tool sequences that make tags stale
+* https://github.com/streamarr/streamarr-server/pull/684[streamarr/streamarr-server#684]: a video copy's bandwidth from the copied video plus the session's audio
+* https://github.com/streamarr/streamarr-server/pull/686[streamarr/streamarr-server#686]: a video copy's cost against the viewer's maximum bitrate
+* https://github.com/streamarr/streamarr-adr/pull/79[streamarr/streamarr-adr#79]: ADR 0050's copy cost

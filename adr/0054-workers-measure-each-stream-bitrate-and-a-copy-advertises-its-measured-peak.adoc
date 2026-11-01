@@ -13,7 +13,7 @@ The background step uses ADR 0032's keyframe packet scan capacity.
 This decision adds Matroska statistics tags to the probe facts, so the probe version rises with that change (ADR 0032).
 This decision amends link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] (<<amends-0037>>).
 The layout of a delivered media segment becomes part of the worker contract.
-A video copy keeps the source's length-prefixed samples unless the source can keep its parameter sets in its samples.
+A video copy keeps the source's length-prefixed samples unless the source can keep its parameter sets in its samples or the source's record header disagrees with its parameter sets.
 
 == Context
 
@@ -245,7 +245,8 @@ So a measurement holds only when a copy delivers each packet as one sample of th
 The worker reports no measurement of a file when a copy would change the size or the number of any measured stream's packets.
 These streams change in a copy:
 
-* H.264 or HEVC video that still runs the Annex B bitstream filter: a source sample entry of `avc3`, `hev1`, `dvav` or `dvhe`, or a decoder configuration record without parameter sets (<<amends-0037>>).
+* H.264 or HEVC video that still runs the Annex B bitstream filter (<<amends-0037>>).
+* AV1 whose samples hold OBUs that the mp4 muxer removes, such as the temporal delimiters of an IVF file.
 * Video in Annex B form, such as the video of an MPEG-TS file.
 * H.264 or HEVC video whose NAL unit lengths take a size other than 4 bytes.
 * AAC in ADTS frames.
@@ -294,7 +295,7 @@ So a track that starts late or ends early adds less than the track's own measure
 A video copy's cost under ADR 0050 is the copied video's average segment bit rate plus the stream session's audio bitrate.
 The stream session's audio bitrate counts the largest audio rendition (link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043]).
 A copied audio rendition counts the rendition's average segment bit rate.
-An encoded audio rendition counts the encoded audio's bitrate plus the framing of the encoded audio's frames.
+An encoded audio rendition counts the encoded audio's bitrate plus the encoded audio's framing, which <<segment-framing>> counts as for a copied audio track.
 The number of encoded frames is the media playlist's duration × the sample rate, plus the encoder's priming samples, divided by the frame size and rounded up.
 The encoded audio's bitrate stays an estimate of the encoded audio's bytes.
 The viewer's maximum bitrate bounds that cost.
@@ -326,8 +327,8 @@ An adaptive player that knows the real peak picks an encoded variant when the pl
 RFC 8216 computes a segment's bit rate from the segment's whole size, so the average and the peak count the framing.
 RFC 8216 also computes the average over the segments' durations, and the source's probed duration can differ from their sum, for example 8.999999 s against 9 s.
 An AAC encoder writes a priming frame of 1,024 samples, which a multiplexed segment 0 delivers (ADR 0037), so a frame count from the duration alone falls one frame short.
-ADR 0037's snap of copied audio can move an audio frame across the edge of a segment's interval, so the audio bound widens by one frame on each side.
 In a synthetic source with irregular keyframes, one segment held 0.709 s of video and 94 E-AC-3 frames, which is 3.0 s of audio.
+ADR 0037's snap of copied audio can move an audio frame across the edge of a segment's interval, so the audio bound widens by one frame on each side.
 
 [[playback-moves-the-scan]]
 === A copy without a measurement moves the file's bitrate scan forward
@@ -350,9 +351,15 @@ Each `traf` holds a `tfhd`, a version 1 `tfdt` and a version 1 `trun` with four 
 The `mdat` has an 8-byte header.
 A worker test pins the layout, and a change to the layout is a change to the worker contract.
 
-A video copy runs the Annex B bitstream filter only when the source can keep its parameter sets in its samples.
-That holds when the source's sample entry is `avc3`, `hev1`, `dvav` or `dvhe`, or when the source's decoder configuration record holds no parameter sets.
+A video copy runs the Annex B bitstream filter only in three cases:
+
+* The source's sample entry is `avc3`, `hev1`, `dvav` or `dvhe`.
+* The source's decoder configuration record holds no parameter sets.
+* The record's header names a value of the codec string, such as the level, other than the value that the record's parameter sets name.
+
+In the first two cases the source can keep its parameter sets only in its samples.
 The copy's `avc1` or `hvc1` record must hold the parameter sets (link:0013-stream-decision-architecture.adoc[ADR 0013]), and the filter lets the mp4 muxer take them from the samples.
+In the third case the filter makes the mp4 muxer rebuild the record's header from the parameter sets.
 Every other copy of length-prefixed H.264 or HEVC runs neither filter and keeps the source's samples.
 
 The filter change ships only after a check finds no source that keeps HDR SEI messages only in its `hvcC` record.
@@ -367,6 +374,9 @@ The four copies were H.264 from MP4 and from Matroska, and HEVC with AAC and wit
 The worker's check of each copy's initialization segment still passed.
 The HEVC copy also stopped repeating its VPS, SPS, PPS and x265's information SEI message in front of every keyframe, about 2.4 kB each.
 Its record's claim to hold every parameter set then became true, as ISO/IEC 14496-15 requires.
+The copy's codec string comes from the record's parameter sets (link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036]), and the worker refuses an initialization segment whose codec string differs from the probed one.
+Without the filter, a copy keeps the source's record header.
+A synthetic H.264 file whose record header names level 5.1 while its SPS names level 1.0 would then fail that check, so such a file keeps the filter.
 
 === Explicitly deferred
 
@@ -401,7 +411,7 @@ At 4 bytes each, each stream takes about 29 kB.
 In the synthetic sources, framing added 3.3 to 14.1 kb/s.
 * H.264 and HEVC copies of sources whose record holds the parameter sets stop repeating those parameter sets in front of every keyframe.
 The synthetic x265 copy then delivered about 2.4 kB less per keyframe, about 9.9 kb/s at a keyframe every 2 s.
-* Copies of MPEG-TS files, of `avc3` and `hev1` sources, of sources whose record holds no parameter sets and of sources with ADTS AAC get no measurement and keep the unmeasured cost.
+* Copies of MPEG-TS files, of IVF AV1 files, of the sources that still run the Annex B filter and of sources with ADTS AAC get no measurement and keep the unmeasured cost.
 * A change to the delivered segment layout is a change to the worker contract, and it changes the server's framing count in the same release.
 
 == Rejected Alternatives

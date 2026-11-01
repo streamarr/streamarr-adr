@@ -407,7 +407,7 @@ A probe that finds keyframe positions by scanning every packet of the chosen vid
 _Avoid_: packet scan (unqualified), keyframe probe
 
 **Bitrate scan**:
-A durable background step that reads every packet of a media file's video streams and audio streams once, in chunks, and measures each stream's bytes in every keyframe interval. It uses the keyframe packet scan capacity, after any keyframe packet scan, and runs at the lowest CPU priority (ADR 0054).
+A durable background step that reads every packet of a media file's chosen video stream and audio streams once, in chunks, and measures each stream's bytes in every keyframe interval. It uses the keyframe packet scan capacity, after any keyframe packet scan, and runs at the lowest CPU priority (ADR 0054).
 _Avoid_: deep analysis, extensive analysis, packet scan (unqualified), bitrate probe
 
 **Measured bitrate**:

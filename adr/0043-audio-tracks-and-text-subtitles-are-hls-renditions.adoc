@@ -278,7 +278,8 @@ On a Mac, AVPlayer stopped the whole stream where a rendition's playlist ended e
 On an iPhone, hls.js stopped for good inside the `EXT-X-GAP` segments when the viewer switched to the ended track.
 Silence padding played to the end on the iPhone and in every headless engine.
 AVPlayer stopped at the end of multiplexed audio in 12 of 12 runs, so multiplexed audio needs the padding too.
-In a sample of 300 library files, the container header stated a duration for 349 of the 416 audio streams (84 %).
+An MP4 track header states each track's duration (ISO/IEC 14496-12), and mkvmerge writes a `DURATION` statistics tag for each Matroska track.
+A Matroska file without statistics tags and an MPEG-TS file state no track duration, so the server also learns the end time from a job attempt.
 In normal output, audio trails video by at most 0.16 s, so the 1 s margin never closes a segment while the segment's audio is still on the way.
 Evidence: <<evidence-audio-cases>>.
 
@@ -356,8 +357,8 @@ Probe version 4 of link:0032-media-file-probe-results-are-persisted.adoc[ADR 003
 The server, not the worker, decides which handler names are generic.
 The server treats a handler name as generic when the name contains "Handler" or " handler", starts with "Gestionnaire ", "Module ", "Gestor ", "Procedura ", "Core Media " or "ISO Media file produced by", or equals the track's four-character handler type, such as `soun`.
 The first three checks come from MediaInfo's rule for MP4 handler names.
-The server's rule keeps all 57 handler names in the library sample that name a track and leaves out all 97 generic ones.
-The 154 handler names of the library sample are the rule's test set.
+The rule's test set comes from public sources (<<evidence-handler-names>>).
+The rule leaves out every generic name in that set and keeps every track name written for the test, such as "English", "Commentary" and "Descriptive audio".
 Names that still collide get a trailing number in file order, such as "English" and "English 2".
 RFC 8216 section 4.3.4.1.1 says "All EXT-X-MEDIA tags in the same Group MUST have different NAME attributes."
 An audio rendition's `NAME` follows the same rules, applied among the file's audio tracks.
@@ -367,17 +368,18 @@ RFC 8216 section 4.2 forbids a carriage return, a line feed and a double quote i
 *Why:* AVPlayer appends " SDH" to the name of a rendition that carries the SDH characteristics.
 So a rendition named "English SDH" showed as "English SDH SDH".
 In a test where two renditions were both named "English", AVPlayer and WebKit's native HLS exposed only one of the two, in 3 of 3 plays.
-In a sample of 300 library files, the title told apart 165 of the 244 text tracks that share a language with another text track of the same file.
+A title such as "Commentary" tells apart two tracks in one language, where the language and the flags cannot.
 Many muxers write a fixed name for the track's type, such as `SoundHandler`, into every MP4 track.
 The list of generic handler names is open-ended.
 A rule in the worker would need a new probe version for each fix, and every file would then need a new probe.
 For example, a rule that treats a name as generic when the name ends with "Handler" would keep "ISO Media file produced by Google Inc." as a track name.
 The server can fix its own rule without a new probe.
 Of the open-source players and tools we read, only MediaInfo filters generic handler names, and its rule misses "Core Media Audio" and "ISO Media file produced by Google Inc.".
-VLC, mpv and MKVToolNix never use a handler name as a track title, but the library sample holds 57 real track names that only the handler name carries.
+VLC, mpv and MKVToolNix never use a handler name as a track title.
+But GPAC's MP4Box writes the track name that its `name` import option sets into the handler name, so a file from MP4Box carries that name nowhere else.
 No HLS writer we read escapes a title in `NAME`, because none of them writes text from the file there.
 VLC's and FFmpeg's HLS readers treat a backslash as an escape, so the server replaces the backslash too.
-Evidence: <<evidence-subtitle-cases>>, <<evidence-library>>.
+Evidence: <<evidence-subtitle-cases>>, <<evidence-handler-names>>.
 
 [[decision-cue-text]]
 === Extraction repairs SubRip that is not UTF-8 and judges each track on its own output
@@ -399,12 +401,12 @@ FFmpeg's SubRip decoder drops text between a `<` and a later `>`.
 *Why:* FFmpeg's text decoders reject every cue that is not valid UTF-8.
 When a track loses more than two thirds of its cues, FFmpeg exits with an error.
 In a job that extracts every track in one pass, that error would fail every track.
-In a sample of 300 library files, 1 of 682 SubRip tracks was not UTF-8, and FFmpeg rejected 594 of that track's 596 cues.
+On a synthetic German track in ISO-8859-1, FFmpeg kept only 45 of 100 cues.
 The per-cue conversion gave 100 of 100 correct cues on each of 8 synthetic tracks in six code pages.
 One of those tracks was a UTF-8 track with 5 windows-1252 cues, and a conversion of that whole track gave 35 of 100 correct cues.
-In the same library sample, 274 of 277 forced cues were also in the matching full track.
-In the same library sample, 0 of 910,377 SubRip lines hold text that the decoder would drop between a `<` and a later `>`.
-Evidence: <<evidence-subrip>>, <<evidence-library>>.
+Nothing in Matroska or MP4 ties a forced track's lines to the full track of the same language.
+SubRip defines no escape for `<`, so text between a `<` and a later `>` reads as a tag to any SubRip reader.
+Evidence: <<evidence-subrip>>.
 
 [[decision-captions]]
 === Captions carried in the video become WebVTT subtitle renditions
@@ -415,8 +417,8 @@ The extraction job extracts those captions from the source.
 The probe detects caption data by decoding the video's keyframes.
 The server lists a caption rendition only when the extraction finds at least one cue.
 
-*Why:* FFmpeg's header probe marked captions on 0 of 300 library files.
-Decoding the first 30 s of each file found caption data in 24 of the 254 files that decoded.
+*Why:* ffprobe reports captions only when its decoder meets caption data in the few frames that it decodes while it reads the header.
+A recording whose captions start later, or whose first frames carry only padding, shows no captions in that report.
 Decoding only keyframes found caption data in 0.11 to 0.14 s for the first 10 s of a 1080p H.264 file.
 A full decode of the same 10 s took 0.71 to 0.77 s.
 Caption data proves only that a caption channel exists, and a broadcast can send padding with no text.
@@ -484,10 +486,10 @@ An audio switch that changes which forced image track applies replaces the strea
 That replacement uses none of the format-attempt budget.
 
 *Why:* No code burns a subtitle into the video today, so no client can show an image subtitle.
-In the library sample, 66 of 300 files carry PGS or VobSub subtitles, about one file in five.
+Blu-ray discs carry subtitles only as PGS, and DVDs carry them only as VobSub.
+So a disc copy that keeps its subtitles holds image subtitles.
 A subtitle choice is the viewer's choice, not a format error, so the replacement spends none of the format-attempt budget.
 A forced track carries lines that a viewer needs even with subtitles off.
-Evidence: <<evidence-library>>.
 
 [[decision-seek-after-change]]
 === AVFoundation clients seek in two steps after an audio or subtitle change
@@ -532,8 +534,7 @@ The acceptance tests of https://github.com/streamarr/streamarr-server/issues/503
 === Explicitly deferred
 
 * Deliver image subtitles as renditions.
-* Deliver teletext subtitles.
-The library sample holds no teletext among its 1,162 subtitle streams.
+* Deliver teletext subtitles, which come from DVB broadcast recordings.
 * Deliver external subtitle files that sit beside the source, in a follow-on to https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60].
 * Copy Opus with more than two channels.
 Copies of multichannel Opus wait until typed declarations carry a channel limit for each codec (https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395]).
@@ -554,7 +555,7 @@ Issue https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamar
 Choosing an image subtitle track, or leaving one, replaces the stream session, because the job attempts burn that track into the video.
 Playback then resumes at the viewer's position.
 * Every stream session with a burned-in subtitle encodes its video, which uses worker capacity.
-In the library sample, 4 of 300 files hold 7 forced image tracks, so automatic burn-in can apply to about 1 % of files.
+Automatic burn-in applies only while subtitles are off, to a file with a forced image track in the selected audio's language.
 Each such file then plays over HLS with an encoded video, instead of a stream copy or direct play.
 * In some players, a switch holds the picture for a short time.
 During a hold, the same frame stays on screen.
@@ -669,7 +670,7 @@ The audio that arrives late comes only at the very end of the output, where no m
 * Subtitle extraction for each stream session reads a whole Matroska file every time a viewer starts playback.
 At 8 MB/s, a 20 GB file would take about 40 minutes, a figure derived from the read rate.
 An extraction of only a time window misses a line that is already on screen when the window starts.
-* Recording image subtitles as unsupported leaves about one file in five of the library sample without its PGS or VobSub subtitles.
+* Recording image subtitles as unsupported leaves every disc copy that keeps its PGS or VobSub subtitles without them.
 * Delivering image subtitles as timed-image renditions in this work would widen the work beyond audio and text tracks.
 * Burning in a forced image track only when the viewer selects the track leaves out lines that a viewer needs even with subtitles off.
 * Seeking in place after every change as the first fix lengthens the longest gap between shown frames at every change.
@@ -687,7 +688,7 @@ On Streamarr's zero-based fMP4 timeline, that offset put every cue 10 s late in 
 * `AUTOSELECT=YES` on every subtitle rendition lets Safari override the viewer's choice to turn subtitles off.
 * `AUTOSELECT=YES` on SDH renditions, as Apple's authoring guide says, let WebKit turn on subtitles by itself in 3 of 3 runs.
 * Leaving forced tracks to hls.js on the web never shows forced lines, because hls.js ignores `FORCED`.
-* Names from the language and the flags alone ignore the stream's title, which told apart 165 of 244 same-language text tracks in the library sample.
+* Names from the language and the flags alone ignore the stream's title, which can tell apart tracks in one language that the flags cannot, such as a commentary.
 * Names without the SDH token can duplicate the name of the regular track in the same language.
 * Numbered names as the naming scheme tell the viewer nothing about the track.
 The server numbers only names that still collide.
@@ -703,9 +704,9 @@ On a UTF-8 track with 5 windows-1252 cues, that conversion gave 35 of 100 correc
 The track's remaining lines still help the viewer, and the log line and the worker metric expose the loss.
 * Failing the whole extraction job for one damaged track loses every other track of the file.
 * Showing the loss to a ServerAdmin in the UI or the API adds UI or API work that the log line and the worker metric make unnecessary.
-* Merging forced cues into the full track changes the source's text to fix a gap that only 3 of 277 forced cues showed in the library sample.
-* A SubRip parser of the worker's own replaces FFmpeg's decoder to save text that 0 of 910,377 sample lines would lose.
-* Keeping captions deferred leaves the caption data in 24 of 254 decodable sample files unused.
+* Merging forced cues into the full track changes the source's text.
+* A SubRip parser of the worker's own replaces FFmpeg's decoder, and it would still have to guess, because SubRip defines no escape for `<`.
+* Keeping captions deferred leaves the captions of broadcast recordings unused.
 * Keeping CEA-608 captions in the video and signaling them with the `CLOSED-CAPTIONS` attribute shows no cues in WebKit's native HLS and AVPlayer.
 SVT-AV1 encodes also drop that caption data.
 * Delivering captions both as a rendition and in the video lists the captions twice in players.
@@ -1018,32 +1019,18 @@ The tracks used windows-1250, windows-1251, windows-1252, windows-1255, ISO-8859
 * Converting a whole track with FFmpeg's `-sub_charenc` gave 35 of 100 correct cues on a UTF-8 track with 5 windows-1252 cues.
 * U+FFFD alone kept every cue but replaced every letter of the Hebrew and Russian tracks.
 
-[[evidence-library]]
-=== Library sample
+[[evidence-handler-names]]
+=== Handler names
 
-The library sample holds 300 files: 109 movie files and 191 TV files.
-The sample gave Matroska files double weight, so the sample is not proportional to the library.
+The generic handler-name rule's test set comes from public sources only.
 
-* 53 of the 133 files with text subtitles have two or more text tracks in one language.
-In those groups, the title tells apart 165 of 244 tracks (68 %).
-Another 59 tracks need the flags, and 20 tracks in 10 groups need a trailing number.
-* The hearing-impaired flag marks only 25 of the 78 text tracks that are SDH by flag or by title.
-* 79 audio and 75 subtitle streams have a handler name.
-97 of those 154 names are generic, such as `SoundHandler` (43 audio streams), `SubtitleHandler` (28 subtitle streams) and `USP Sound Handler` (18 audio streams).
-Every one of the 97 ends with "Handler".
-The other 57 names are track names, such as a language, "English SDH" or "Surround".
-The tests of the server's generic-name rule use these 154 names.
-* Of the 305 titled text tracks, 67 store their title in MP4's `name` or `handler_name`, never in `title`.
-* 1 of 682 SubRip tracks is not UTF-8.
-* 274 of 277 forced cues, from 23 forced text tracks in 8 files, are also in the matching full track.
-* In 682 SubRip tracks, 0 of 910,377 lines hold text that FFmpeg's SubRip decoder would drop between a `<` and a later `>`.
-* The container header states a duration for 349 of 416 audio streams (84 %).
-* FFmpeg's header probe marks captions on 0 files.
-Decoding the first 30 s of each file finds caption data in 24 of the 254 files that decode.
-* The sample holds no teletext among its 1,162 subtitle streams.
-* 66 files carry PGS or VobSub subtitles, in 372 PGS streams and 23 VobSub streams.
-The sample holds no DVB subtitles.
-* 4 files hold 7 forced image tracks.
+* FFmpeg 8.1's MP4 muxer writes `SoundHandler`, `VideoHandler`, `SubtitleHandler`, `ClosedCaptionHandler`, `PictureHandler`, `DataHandler`, `HintHandler` and `TimeCodeHandler` when a stream has no handler name of its own.
+* MediaInfo treats a handler name as generic when the name contains "Handler" or " handler", or starts with "Gestionnaire ", "Module ", "Gestor " or "Procedura ".
+The test set holds one name for each of those localized prefixes.
+* Apple's capture and export write "Core Media Audio", and YouTube's MP4 files carry "ISO Media file produced by Google Inc.".
+MediaInfo's rule misses both names.
+* The test set also holds each four-character handler type, such as `soun`, `vide`, `sbtl` and `text`.
+* GPAC's MP4Box writes the name that its `name` import option sets into the handler name.
 
 == References
 
@@ -1060,3 +1047,6 @@ The sample holds no DVB subtitles.
 * https://developer.apple.com/documentation/http-live-streaming/hls-authoring-specification-for-apple-devices/[Apple HLS authoring specification: audio and subtitle renditions]
 * https://www.w3.org/TR/webvtt1/[W3C WebVTT: The Web Video Text Tracks Format]
 * https://github.com/video-dev/hls.js/blob/v1.7.0/src/utils/mp4-tools.ts#L1256-L1270[hls.js 1.7.0 `mp4-tools.ts`: a version 1 `tfdt` whose upper word is 2^32^ − 1 is kept as that upper word]
+* https://github.com/FFmpeg/FFmpeg/blob/n8.1/libavformat/movenc.c#L3537-L3573[FFmpeg n8.1 `movenc.c`: the handler names that the MP4 muxer writes]
+* https://github.com/MediaArea/MediaInfoLib/blob/v26.10/Source/MediaInfo/Multiple/File_Mpeg4_Elements.cpp#L4678[MediaInfoLib v26.10 `File_Mpeg4_Elements.cpp`: MediaInfo's rule for generic handler names]
+* https://github.com/gpac/gpac/blob/v2.4.0/applications/mp4box/fileimport.c#L919-L921[GPAC v2.4.0 `fileimport.c`: the `name` import option] and https://github.com/gpac/gpac/blob/v2.4.0/applications/mp4box/fileimport.c#L1731-L1733[its write into the handler name]

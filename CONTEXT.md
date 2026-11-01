@@ -134,11 +134,13 @@ The worker reads the placement before an encode that must reshape the pictures, 
 _Avoid_: RPU order, RPU position, RPU offset, RPU layout for the reported value (a layout is the arrangement in a file that the placement reports)
 
 **Output frame rate**:
-The frame rate at which every encode of a chosen video stream runs.
-The probe outcome, the transcode job and the worker's FFmpeg argument carry the output frame rate as an exact fraction, never as a decimal.
-The probe job chooses the output frame rate once per file.
-Every job attempt therefore encodes on one frame grid, which is the same sequence of output frame times.
-An encode that writes one frame per field of an interlaced source runs at twice the output frame rate, and the transcode job carries the doubled rate.
+The frame rate that the frame-rate rule chooses for a file's chosen video stream.
+The probe job chooses the output frame rate once per file, and the probe outcome stores the output frame rate.
+Every encode of a progressive source runs at the output frame rate.
+An encode that writes one frame per field of an interlaced source runs at twice the output frame rate.
+The transcode job carries the rate at which the encode runs, and the worker's FFmpeg argument, GOP size, forced keyframes and sample-duration check all use the job's rate.
+The probe outcome, the transcode job and the worker's FFmpeg argument carry each rate as an exact fraction, never as a decimal.
+Every job attempt of a stream session therefore encodes on one frame grid, which is the same sequence of output frame times.
 _Avoid_: target frame rate, frame rate (unqualified) for the encode's rate
 
 ### Playback records

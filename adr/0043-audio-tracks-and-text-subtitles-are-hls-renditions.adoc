@@ -142,12 +142,20 @@ AC-3 and E-AC-3 stop at 5.1, so a 6.1 or 7.1 track becomes 5.1.
 ALAC writes eight channels only as 7.1(wide), whose extra pair sits between the front center and the front left and right, so a 7.1 track encoded to ALAC also becomes 5.1.
 
 A FLAC or ALAC encode has no target bitrate.
-Under link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc[ADR 0054], such an encoded rendition counts the PCM bitrate of its output, sample rate × bit depth × channels, plus its framing.
-Its segments hold the audio of their intervals at that PCM bitrate plus their framing, and its peak follows ADR 0054's rule for an encoded audio rendition.
+Its output's PCM bitrate is sample rate × bit depth × channels.
+Under link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc[ADR 0054], such an encoded rendition's bitrate is 65 % of that PCM bitrate, and its cost adds its framing.
+Its segments hold the audio of their intervals, widened by one encoded frame, at the full PCM bitrate plus their framing, and its peak follows ADR 0054's rule for an encoded audio rendition.
+So a stereo FLAC encode at 16 bits counts about 1,000 kb/s in the cost and 1,536 kb/s in `BANDWIDTH`, and a 7.1 encode at 24 bits counts 5,990 and 9,216 kb/s.
 FFmpeg's ALAC encoder, and its FLAC encoder outside an experimental 32-bit mode, write 16 or 24 bits.
 A lossless encode of a lossy track or of a lossless track of at most 16 bits writes 16 bits.
 A lossless encode of a deeper lossless track writes 24 bits.
 The PCM bitrate counts the bit depth that the encode writes.
+
+The 65 % lies above every film soundtrack measured: FLAC of decoded AAC, AC-3 and lossless film audio averaged 26 to 53 % of the PCM bitrate, and ALAC wrote 2 to 5 % more than FLAC.
+The PCM bitrate bounds every frame, because FLAC and ALAC store a frame that does not compress as plain samples.
+A segment can hold one more frame than its interval: FFmpeg's FLAC encoder writes 4,608 samples per frame at 48 kHz, 96 ms, so a 3 s window of white-noise PCM held 2 % more than its PCM bitrate.
+A cap below it would understate some segments: the largest 3 s window of a decoded film track reached 85 % of the PCM bitrate, and of decoded white noise 94 %.
+Evidence: <<evidence-lossless-size>>.
 
 DTS and TrueHD follow the same declared-codec rule as every other codec.
 A DTS or TrueHD track is copied only when the client declares that codec in fMP4.
@@ -591,6 +599,7 @@ It adds AC-3, E-AC-3, Opus, FLAC and ALAC entries only when the browser's `decod
 It probes 6 and 2 channels for each codec, so no entry accepts more than 6 channels, and Opus stays at 2 channels in WebKit.
 Lifting the 6-channel cap waits for a test of 7.1 channel order on real speakers (https://github.com/streamarr/streamarr-web/issues/29[streamarr/streamarr-web#29]).
 Firefox plays 7.1 AAC in AAC's own channel order and plays 5.1 AAC in WAVE order.
+* Measure what a lossless encode of each audio track writes, in ADR 0054's bitrate scan, so that the cost and `BANDWIDTH` of a FLAC or ALAC rendition follow its bytes instead of a share of the PCM bitrate.
 * Allow more than one audio codec per stream session for Apple clients.
 Apple clients get that exception only if a check shows that their switches between codecs stay in sync.
 * Test audio and subtitle renditions on cast receivers.
@@ -642,12 +651,11 @@ An AC-3 or E-AC-3 rendition loses about 27 ms of real audio at the start of the 
 The one-codec rule encodes that track to the session's audio codec.
 * When the session copies a FLAC or ALAC default track, every other track that is not already in that codec is encoded to it.
 A lossless encode of a lossy track keeps every decoded sample, so its bitrate follows the decoded audio, not the source track's bitrate.
-Stereo PCM at 48 kHz and 16 bits runs 1,536 kb/s, and FLAC and ALAC remove only the redundancy in it.
-Even if FLAC halves that rate, a stereo rendition runs 768 kb/s, six times a 128 kb/s AAC source.
-The server counts the full 1,536 kb/s, twelve times that source, because a lossless encode has no target bitrate.
+In the measurements, FLAC of a 128 kb/s AAC film track ran 573 to 818 kb/s, and of a speech-like synthetic track 193 kb/s.
+The server counts such a stereo track at about 1,000 kb/s, eight times a 128 kb/s source, and its peak at 1,536 kb/s.
 The lossless encode adds no quality, because the lossy source already lost it.
 * Under link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc[ADR 0054], every variant's cost and `BANDWIDTH` count the largest audio rendition.
-A lossless rendition counts its output's PCM bitrate, so an encoded FLAC or ALAC track can be larger than the copied default track, and it then raises every variant's cost and `BANDWIDTH`.
+A lossless rendition counts 65 % of its output's PCM bitrate and peaks at the full rate, so an encoded FLAC or ALAC track can be larger than the copied default track, and it then raises every variant's cost and `BANDWIDTH`.
 The audio step still comes from the default track (ADR 0050), so when the session keeps its own audio, such a track can take the stream over the viewer's maximum bitrate.
 * A client that declares DTS or TrueHD loses the copy of a DTS or TrueHD default track when another track would need an encode to that codec.
 The default track is then encoded with the other tracks, so a switch stays in sync.
@@ -728,6 +736,8 @@ After a switch that changed the codec, hls.js left the audio 90 to 140 ms late u
 * Switching the whole stream session to AAC whenever another track needs an encode loses the copy of a lossless or passthrough default track, such as FLAC or E-AC-3.
 * Encoding DTS or TrueHD with FFmpeg's `dca` or `truehd` encoder relies on encoders that FFmpeg marks as experimental.
 * Encoding a default track that cannot be copied always to AAC gives up surround that the client declares in E-AC-3 or AC-3.
+* Counting a lossless encode at its full PCM bitrate counts a 128 kb/s commentary track at 1,536 kb/s, while FLAC of film audio averaged at most 53 % of that rate.
+* Capping a lossless encode's peak below its PCM bitrate understates a noisy segment, such as the 94 % that decoded white noise reached.
 * Encoding a lossless default track to E-AC-3 before FLAC, as AetherEngine does by default, keeps 5.1 behind a soundbar on legacy ARC.
 It also turns a 7.1 lossless track into 5.1 lossy audio for every client that declares eight-channel FLAC.
 The client's declaration can make that choice for its own audio path.
@@ -1145,6 +1155,38 @@ A small Swift program loaded the stream with `AVURLAsset` and played it with `AV
 
 The check did not test what an audio output then receives, and it did not cover tvOS.
 
+[[evidence-lossless-size]]
+=== The size of lossless encodes
+
+The measurements ran on 2026-11-01 with FFmpeg 8.1.3 from the pinned worker image.
+The sources were Creative Commons only: the Xiph.Org archive's lossless masters of Sintel (888 s, stereo and 5.1, 16 bits) and Tears of Steel (734 s, stereo, 24 bits), and Tears of Steel's official AC-3 5.1 track at 448 kb/s.
+The pinned encoders made the lossy sources from the masters.
+Two synthetic 300 s stereo signals bounded the range: pink noise band-limited to 100 to 4,000 Hz and gated in syllable-length bursts with pauses, as speech-like audio, and independent white noise in each channel.
+Each lossy source was decoded and encoded to FLAC at 16 bits with FFmpeg's default settings, as the worker would encode it.
+The rates count FLAC frames only, without fMP4 framing.
+The peak is the largest fixed window of 6 s or 3 s.
+Each percentage is of the PCM bitrate at 48 kHz and the written depth: 1,536 kb/s for stereo at 16 bits, 2,304 kb/s for stereo at 24 bits and 4,608 kb/s for 5.1 at 16 bits.
+
+[cols="4,1,2,2,2,2",options="header"]
+|===
+|Source |Channels |Average kb/s |Average % of PCM |Peak 6 s % |Peak 3 s %
+|Speech-like synthetic, AAC 128 kb/s |2 |193 |13 |15 |19
+|Sintel stereo, AAC 128 kb/s |2 |573 |37 |60 |62
+|Tears of Steel stereo, AAC 128 kb/s |2 |818 |53 |82 |85
+|White noise, AAC 128 kb/s |2 |1,414 |92 |93 |94
+|Sintel 5.1, AAC 384 kb/s |6 |1,183 |26 |46 |46
+|Sintel 5.1, AC-3 640 kb/s |6 |1,222 |27 |47 |48
+|Tears of Steel official AC-3 448 kb/s |6 |1,527 |33 |52 |54
+|Sintel stereo master, lossless |2 |644 |42 |63 |65
+|Sintel 5.1 master, lossless |6 |1,258 |27 |48 |49
+|Tears of Steel stereo master, 24 bits |2 |939 |41 |60 |62
+|White noise PCM |2 |1,531 |100 |100 |102
+|===
+
+* Per channel, the decoded film tracks ran 197 to 409 kb/s on average, and the speech-like track 97 kb/s.
+* FLAC of a decoded lossy track was about as large as FLAC of its lossless master: Sintel's stereo AAC track wrote 573 kb/s against the master's 644 kb/s.
+* ALAC of the same decoded audio was 2 to 5 % larger than FLAC: Tears of Steel's AAC track wrote 854 kb/s, 56 % of the PCM bitrate.
+
 == References
 
 * Issue https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60] (subtitle extraction and WebVTT, in the server and the worker).
@@ -1165,4 +1207,5 @@ The check did not test what an audio output then receives, and it did not cover 
 * https://github.com/gpac/gpac/blob/v2.4.0/applications/mp4box/fileimport.c#L919-L921[GPAC v2.4.0 `fileimport.c`: the `name` import option] and https://github.com/gpac/gpac/blob/v2.4.0/applications/mp4box/fileimport.c#L1731-L1733[its write into the handler name]
 * https://www.rfc-editor.org/rfc/rfc9639#section-9.1.3[RFC 9639 §9.1.3: FLAC channel assignment]
 * https://www.rfc-editor.org/rfc/rfc7845#section-5.1.1.2[RFC 7845 §5.1.1.2: Opus channel mapping family 1]
+* https://media.xiph.org/sintel/[Xiph.Org: Sintel soundtrack masters] and https://media.xiph.org/tearsofsteel/[Tears of Steel soundtrack masters and AC-3 track] (Creative Commons Attribution 3.0, Blender Foundation)
 * https://github.com/superuser404notfound/AetherEngine/blob/7.53.0/docs/formats.md#audio[AetherEngine 7.53.0 `docs/formats.md`, Audio]: on-device decoding of TrueHD and DTS-HD MA, the optional lossless FLAC mode up to 7.1, the lost objects, the optional object renderer, and the HDMI routes that tvOS cannot tell apart

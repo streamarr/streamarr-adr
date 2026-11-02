@@ -218,7 +218,7 @@ An alternate HLS track, such as one audio language or one text subtitle track. T
 _Avoid_: variant, audio variant, alternate stream, track (unqualified)
 
 **Audio frame grid**:
-The start times of an encoded audio rendition's frames, at its encoder's frame length and sample rate, counted from the default track's first sample: the copy's own first sample when the session copies the default track, and the track's probed start when the session encodes it. Every job attempt starts each audio encode's input on that rendition's grid, so consecutive job attempts meet without a gap or an overlap. A copied track keeps its own frames, and the producer never moves it (ADR 0043).
+The start times of an encoded audio rendition's frames, at its encoder's frame length and sample rate, counted from the default track's first sample: the copy's own first sample when the session copies the default track, and the track's probed start when the session encodes it. Every job attempt puts each audio encode's frames on that rendition's grid, allowing for the encoder's fixed delay, so consecutive job attempts meet without a gap or an overlap. A copied track keeps its own frames, and the producer never moves it (ADR 0043).
 _Avoid_: encoder frame grid, audio snap
 
 **Lossless encode**:

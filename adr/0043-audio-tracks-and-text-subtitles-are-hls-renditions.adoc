@@ -140,7 +140,8 @@ The FLAC encode has no audio steps of its own, so under ADR 0050 it steps like a
 A FLAC or ALAC rendition above 48 kHz, copied or encoded, adds one audio step before ADR 0050's multichannel steps.
 That step keeps the codec, the layout and the written depth, at 48 kHz, or at 44.1 kHz when the source's rate is a multiple of 44.1 kHz.
 Like every step, it counts only when it is smaller than the session's audio, and under it every rendition above that rate is resampled to it.
-So a maximum bitrate reaches a lossy step only when the 48 kHz or 44.1 kHz lossless step does not fit either.
+So a maximum bitrate reaches a lossy step only when the 48 kHz or 44.1 kHz FLAC or ALAC step does not fit either.
+That step resamples, so it is not lossless.
 A client can also bound the rate in its FLAC or ALAC capability entry with ADR 0049's optional maximum sample rate (https://github.com/streamarr/streamarr-server/issues/717[streamarr/streamarr-server#717]).
 
 Each other track keeps its own copy-or-encode decision.
@@ -332,10 +333,11 @@ When the session encodes the default track, it is the track's probed start.
 The frame length is the encoder's: 1,024 samples for AAC, 1,536 for AC-3 and E-AC-3, 960 for Opus, the sample rate ÷ 20 rounded down to a whole sample for FLAC, such as 2,400 at 48 kHz and 1,102 at 22.05 kHz, set with `-frame_size`, and 4,096 for ALAC, whose FFmpeg encoder writes no other length.
 A copied track keeps its own frames, whatever their length.
 
-Every audio encode starts its input on its grid.
+Every audio encode puts its output frames on its grid.
+FFmpeg's encoders start their first frame a fixed delay before their input: 256 samples for AC-3 and E-AC-3, 312 for Opus, one whole frame for AAC, and none for FLAC and ALAC.
 Each job attempt decodes each encoded track from one segment period before the start of its first segment.
-It trims the decoded audio to the first grid point at or after that start.
-The encoder's frames then fall at the same times in every attempt, whatever fixed delay the encoder adds, such as the 256 samples by which FFmpeg's AC-3 encoder starts each frame early.
+It trims the decoded audio to the first point at or after that start that lies the encoder's delay after a grid point, so the encoder's first frame starts on that grid point.
+An attempt that starts at the track's first sample instead adds silence before that sample, 1,280 samples for AC-3 and E-AC-3 and 648 for Opus, so its first frame starts on the grid point one frame earlier.
 So consecutive attempts meet without a gap or an overlap, and a FLAC or ALAC encode of a lossless track decodes to the same samples on both sides of a junction.
 When the source container rounds timestamps, as Matroska rounds them to 1 ms, a seeked attempt takes its decoded audio's start from the source track's own frame grid, counted from the track's probed start, and not from the rounded packet time.
 
@@ -348,7 +350,7 @@ A viewer's audio delay moves every audio rendition by the same amount (link:0055
 The merge gate of https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503] decodes across a junction for every pair of source codec and encoder, TrueHD, DTS-HD MA and AC-3 included, at 44.1, 48 and 96 kHz.
 It requires 0 samples of gap or overlap, and identical decoded samples for a FLAC or ALAC encode of a lossless track.
 
-*Why:* An encoder's frames start where its input starts.
+*Why:* An encoder's frames start a fixed delay before its input.
 After a plain seek to a segment boundary, consecutive attempts met with gaps or overlaps of −59.3 to +26.2 ms, depending on the encoder's frame length and the boundary.
 DTS-HD MA decoded from a plain seek differed from a continuous decode in 17,801 samples after the junction, so even its FLAC encode was not lossless there.
 Decoding from 3 s early and trimming to the grid gave 0 samples of gap or overlap at all 60 measured junctions, and the FLAC and ALAC encodes of FLAC, TrueHD and DTS-HD MA tracks decoded to the source's samples on both sides.
@@ -835,7 +837,7 @@ A step below the session's audio caps every rendition.
 The default track is then encoded with the other tracks, so a switch stays in sync.
 * No client gets a TrueHD copy, even a Media3 player that could pass TrueHD through to a receiver.
 A TrueHD track reaches every client as FLAC or as ADR 0050's lossy encode, so its Atmos objects reach no client unless the file also holds an E-AC-3 track with Atmos.
-* A FLAC or ALAC session above 48 kHz under a maximum bitrate stays lossless at 48 or 44.1 kHz before it goes lossy.
+* A FLAC or ALAC session above 48 kHz under a maximum bitrate keeps its codec at 48 or 44.1 kHz, resampled, before it goes lossy.
 * A client that declares FLAC with eight channels gets a TrueHD or DTS-HD MA default track as lossless 7.1, and every other track of the file as FLAC.
 The Atmos or DTS:X objects of such a track are lost.
 * A lossless `2.1`, `3.1`, `3.0(back)`, `4.0`, `4.1`, `6.0` or `7.0` track reaches the player as FLAC with silent channels, and the player shows the padded layout, such as 6.1 for a `4.0` track.
@@ -945,7 +947,7 @@ The client's declaration can make that choice for its own audio path.
 * Copying TrueHD under `-strict experimental` keeps a bit-identical track for a future client, but relies on muxing that FFmpeg marks experimental, and no tested player played TrueHD from fMP4.
 AetherEngine also treats TrueHD as a codec that cannot be copied into fMP4, and encodes it to FLAC in its lossless mode.
 * Encoding a TrueHD track with Atmos to FLAC when the file holds a copyable E-AC-3 track with Atmos keeps a lossless bed but loses the height objects that the E-AC-3 copy keeps.
-* Stepping a hi-res FLAC or ALAC session straight to a lossy codec gives up lossless audio that fits at 48 kHz.
+* Stepping a hi-res FLAC or ALAC session straight to a lossy codec gives up a FLAC or ALAC step at 48 kHz that adds no coding loss beyond the resampling.
 * Marking the segments after an audio track's end with `EXT-X-GAP` stopped hls.js for good on an iPhone after a switch into the ended track.
 * Padding a copied track with silence in the track's own codec, without encoding the track, needs a way to make silence in every codec that the worker copies.
 Encoding the track pads every codec in the same way.
@@ -1421,6 +1423,8 @@ With a plain seek, those of DTS-HD MA differed in 17,801 samples after the 6 s j
 * Every replacement encode of the AAC source in Matroska sat 8 samples early, with either method, because Matroska stores the seek packet's time rounded to 1 ms.
 * With `-frame_size 2400`, FLAC wrote 0.4 % more bytes for the 24-bit master and 0.8 % more for decoded AC-3 than with its default 4,608-sample frames.
 * FFmpeg's ALAC encoder wrote 4,096-sample frames with `-frame_size 2400`, and FLAC wrote 2,400-sample frames.
+* From a 48 kHz input that started at 0, the first packet started at −256 samples for AC-3 and E-AC-3, −312 for Opus, −1,024 for AAC and 0 for FLAC and ALAC.
+With the input trimmed to start at 1,792 samples, AC-3's first packet started at 1,536, and trimmed to 1,272, Opus's started at 960.
 
 [[evidence-sample-processing]]
 === Decoding, dither and resampling

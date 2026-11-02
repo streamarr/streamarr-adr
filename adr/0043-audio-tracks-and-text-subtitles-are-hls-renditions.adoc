@@ -393,8 +393,11 @@ A multiplexed variant's media segment carries video and audio together under lin
 Multiplexed variants remain in use until the server delivers audio renditions.
 A video-only variant's media segment carries no audio, so neither rule applies to that segment.
 Before the renditions ticket (https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503]) merges, the ticket's player check shows again that every tested player plays audio renditions without the priming frame (<<decision-device-checks>>).
+The drop stays until the Apple TV check of the end of the epic.
+If AVPlayer trims a kept priming frame at the start, by an edit list whose media time is 1,024 samples, every client gets the kept frame with that edit list instead.
+If AVPlayer plays the kept frame late, as Firefox does, the drop stays.
 
-*Why:* When segment 0 kept the priming frame, a language switch in the first 6 s stopped hls.js playback for good.
+*Why:* When segment 0 kept the priming frame at a negative decode time, hls.js playback stopped for good, at first after a language switch in the first 6 s.
 The stall happened in 10 of 10 runs in Chromium, Firefox and WebKit.
 The stall also happened in 3 of 3 runs of an independent re-check.
 The frame's decode time is the 64-bit two's complement of −1024.
@@ -404,7 +407,10 @@ At 48 kHz, that start is 89,478 s.
 When the worker dropped the frame, every run played.
 A later re-run with other fixtures kept the priming frame, switched at 2 s, and played to the end in 15 of 15 hls.js runs.
 So the stall depends on a condition that the later re-run lacked.
-The renditions ticket's player check identifies that condition.
+A third run stalled with no switch at all: WebKit with hls.js stopped for good at 6.02 s in 2 of 55 plays of a negative decode time, so the negative decode time alone can cause it.
+The drop costs the first frame's quality: the first 21.3 ms of an AAC tone decoded at 2.8 dB signal-to-noise ratio, against 37.2 dB with the frame kept.
+A kept frame with an edit list, or with a composition offset of −1,024 samples, stalled in none of 45 plays per player, and Chromium played it in sync.
+Firefox played it one AAC frame, 21.3 ms, late from a start at 0 until the first seek.
 hls.js places a multiplexed fragment by the fragment's video track.
 So the priming frame's decode time does not decide where hls.js places a multiplexed segment.
 An audio rendition's fragment has no video track, so hls.js places that fragment by its audio decode time.
@@ -709,21 +715,23 @@ hls.js did not freeze, so the web client needs neither fix where the web client 
 Evidence: <<evidence-subtitle-cases>>.
 
 [[decision-device-checks]]
-=== Device checks are merge gates on the tickets
+=== Mac browser checks gate the tickets, and the TV checks run once at the end of the epic
 
-Each device check is a merge gate on the ticket that delivers the behavior that the check covers.
-The checks run AVPlayer on the Apple TV 4K, a Media3 player on the SHIELD TV Pro, and hls.js in Mac browsers.
+The player checks in Mac browsers, hls.js in Chromium, Firefox and WebKit, are merge gates on the ticket that delivers the behavior that they cover.
+The checks on the Apple TV 4K with AVPlayer and on the SHIELD TV Pro with a Media3 player run once, after the epic https://github.com/streamarr/streamarr-server/issues/496[streamarr/streamarr-server#496] closes, and gate nothing.
 The rules of this ADR hold whatever a check shows.
-A failing check comes back to the ticket as a question before the ticket merges.
+A failing Mac browser check comes back to its ticket as a question before the ticket merges, and a failing TV check becomes a new issue.
+The TV pass plays multichannel FLAC, padded layouts, a copied E-AC-3 track with Atmos and multichannel Opus through the receiver, and compares a copy's level with an encode's.
+It also checks whether AVPlayer trims a kept priming frame by its edit list (<<decision-priming>>), and listens for junctions between attempts, FLAC copied from Matroska, 96 kHz FLAC, switches between renditions at different sample rates and the audio description choice under tvOS's accessibility settings.
 The player check of the audio renditions ticket, https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503], runs the real server and worker.
 That check shows again that hls.js plays audio renditions without the priming frame.
 That check also plays a Matroska source whose copied AAC starts off the AAC encoder's frame grid, beside encoded tracks on the copy's grid.
 The Apple client's ticket, https://github.com/streamarr/streamarr-apple/issues/4[streamarr/streamarr-apple#4], checks the cover of <<decision-seek-after-change>> on an iPhone.
 
-Three cases have no measurement.
-The cases are an ALAC source, AAC at 44.1 kHz, and an audio request for the segment just before a relocated attempt's first segment.
+Four cases have no measurement.
+The cases are an ALAC source, sources at 44.1 kHz and at 96 kHz with a switch between renditions at different sample rates, and an audio request for the segment just before a relocated attempt's first segment.
 A relocation starts a new job attempt at the requested segment when that segment lies before the running attempt's first segment, or too far beyond the running attempt's output (link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]).
-The acceptance tests of https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503] cover the three cases.
+The acceptance tests of https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503] cover the four cases.
 
 [[explicitly-deferred]]
 === Explicitly deferred
@@ -735,7 +743,8 @@ The acceptance tests of https://github.com/streamarr/streamarr-server/issues/503
 The web client's declaration (https://github.com/streamarr/streamarr-web/pull/130[streamarr/streamarr-web#130]) always carries an AAC capability entry for HLS.
 It adds AC-3, E-AC-3, Opus, FLAC and ALAC entries only when the browser's `decodingInfo()` confirms them.
 It probes 6 and 2 channels for each codec, so no entry accepts more than 6 channels, and Opus stays at 2 channels in WebKit.
-Lifting the 6-channel cap waits for a test of 7.1 channel order on real speakers (https://github.com/streamarr/streamarr-web/issues/29[streamarr/streamarr-web#29]).
+Lifting the 6-channel cap waits for the speaker-free test of https://github.com/streamarr/streamarr-web/issues/29[streamarr/streamarr-web#29], which splits the player's output into its channels with a `ChannelSplitterNode` and checks which channel carries each tone.
+Real speakers only confirm that test.
 Firefox plays 7.1 AAC in AAC's own channel order and plays 5.1 AAC in WAVE order.
 * Mix a dependent narration track into the main track, so that a viewer who needs audio description hears both.
 * Allow more than one audio codec per stream session for Apple clients.
@@ -785,7 +794,7 @@ After decoding, the junction adds at most 0.2 dB to that difference.
 Every encode meets the earlier attempt's output without a gap or an overlap, and a FLAC or ALAC encode of a lossless track decodes to the same samples across the junction.
 * Each encoded track's decode starts one segment period before its attempt's first segment, so every attempt decodes up to one period of audio that it discards.
 * Two copied tracks on different grids meet with a gap or an overlap of up to half a frame when the viewer switches between them.
-* The first 21 ms of an AAC rendition decode without the overlap that the priming frame would supply.
+* The first 21 ms of an AAC rendition decode without the overlap that the priming frame would supply, at about 3 dB signal-to-noise ratio for a tone.
 No player showed an error.
 An AC-3 or E-AC-3 rendition loses about 27 ms of real audio at the start of the stream, and an Opus rendition loses about 14 ms.
 * A file's dependent narration track gets no rendition.
@@ -876,7 +885,9 @@ Keeping the first delivery of each audio segment needs no designation and no suc
 * One separate job per stream session could write every audio rendition.
 That job reads the source region a second time and needs its own worker slot.
 A seek relocates that job as well as the variant's job attempt.
-* An audio rendition whose segment 0 keeps the AAC priming frame stops hls.js after a language switch in the first segment.
+* An audio rendition whose segment 0 keeps the AAC priming frame at a negative decode time can stop hls.js for good, with or without a language switch.
+* Keeping the priming frame with an edit list for every client before the Apple TV check plays the first 21.3 ms late in Firefox, and possibly in AVPlayer.
+* Packaging each rendition twice, with the frame for Chromium and AVPlayer and without it for Firefox, doubles the audio packaging.
 * Snapping a copied track to the encoder's grid moves its authored sync by up to half a frame, 16 ms for AC-3 at 48 kHz and 64 ms for AAC at 8 kHz.
 FFmpeg's AC-3 encoder starts each frame 256 samples before a 32 ms point, so the snap moved an authored +12 ms delay to +26.7 ms.
 * Starting each encode at a plain seek to the boundary leaves gaps or overlaps of up to 59 ms between attempts.
@@ -938,7 +949,8 @@ That seek also fetches the whole forward buffer again.
 The seek in place stays the fallback if the iOS cover fails.
 * Relying on 2 to 3 s segments to bound the freeze does not remove the freeze, because the freeze lasts until the next keyframe.
 A 2 s GOP still froze the picture for about 0.58 s, and a shorter GOP costs bitrate on every stream.
-* Holding the subtitle tickets until the device checks run delays the tickets, while each ticket's merge gate runs the checks anyway.
+* Holding the tickets until the TV checks run delays them, while the Mac browser checks already gate each ticket.
+* Gating each ticket on the Apple TV and SHIELD checks ties every merge to hardware sessions that the end-of-epic pass covers once.
 * Optical character recognition could convert image subtitles to text.
 That conversion adds a recognition engine to the worker.
 The engine's output can differ from the image.
@@ -1116,6 +1128,16 @@ The stall happened in 10 of 10 runs, and in 3 of 3 runs of the re-check.
 * A later re-run with other fixtures kept the priming frame in segment 0, with the same `tfdt` value, and switched at 2 s.
 That re-run played to the end in 15 of 15 hls.js runs.
 So the stall depends on a condition that the later re-run lacked.
+* A later measurement on 2026-11-02 built a 30 s source in the pinned image, with a one-frame white flash every second and two 48 kHz stereo tones that clicked at each flash, encoded to AAC at 128 kb/s with the worker's flags.
+It compared four packagings of segment 0: the drop, the kept frame with an edit list of media time 1,024 at decode time 0, the kept frame with a composition offset of −1,024, and the kept frame at a negative decode time.
+hls.js 1.7.3 ran in Chromium, Firefox and WebKit through Playwright, beside WebKit's native HLS, with switches at 2, 6 and 15 s and 15 plays per switch point, on a host whose load average was 30 to 45.
+* Neither kept packaging stalled in any player, in 45 of 45 plays each, and no hls.js error was fatal.
+The negative decode time stopped WebKit with hls.js for good at 6.02 s, before any switch, in 1 of 15 plays and in 1 of 40 plays of a re-run.
+* In Chromium, both kept packagings started within 0.2 ms of the drop, and a control placed 21.3 ms late measured 20.8 to 22.0 ms late.
+In Firefox, both kept packagings played 21.2 to 21.5 ms late from a start at 0, and returned to the drop's offset after a seek.
+WebKit passed only silence to the measuring audio tap, so its timing is unknown, but its buffered audio ended at the same time for every kept packaging.
+* Decoded by FFmpeg, the first 1,024 samples after media time zero reached 2.8 dB signal-to-noise ratio with the drop and 37.2 dB with the frame kept for a 440 Hz tone, 3.2 and 9.4 dB for pink noise, and 2.6 and 34.6 dB for a plucked multitone.
+The next 1,024 samples matched in both.
 * AAC copied from the excerpt's Matroska source started at media time zero and carried no priming frame.
 AAC copied from an FFmpeg-made Matroska file started at −1008 samples, which is a priming frame.
 

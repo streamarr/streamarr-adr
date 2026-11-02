@@ -258,7 +258,7 @@ Preroll is media that a job attempt's seek emits before the attempt's first medi
 _Avoid_: overlap, lead-in
 
 **Audio lead**:
-The audio of the 2 s of media time before a job attempt's first media segment, which the producer delivers apart from the segments while the playback session's audio delay is positive. An attempt that starts at segment 0 delivers 2 s of encoded silence instead. The server shifts a segment later from it when it holds no segment before the attempt's first (ADR 0055).
+The audio of the 2 s of media time before a job attempt's first media segment, which the producer delivers apart from the segments while the playback session's audio delay is positive. An attempt that starts at segment 0 always delivers 2 s of encoded silence as its audio lead, whatever the delay. The server shifts a segment later from it when it holds no segment before the attempt's first (ADR 0055).
 _Avoid_: lead-in, preroll (which the producer discards)
 
 **Stream copy**:

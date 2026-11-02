@@ -283,10 +283,7 @@ To keep that origin, every FFmpeg that reads the source cancels FFmpeg's start t
 That FFmpeg passes `-discard none` and `-start_at_zero`, and `-itsoffset` with the start time correction that the probe reports.
 The start time correction does not depend on which tracks a job attempt maps, so every job attempt and every rendition share one origin.
 On the path that moves RPUs, the FFmpeg that reads the source passes those flags, and the FFmpeg that reads its copy keeps the copy's timestamps without `-start_at_zero`, as link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] states.
-Copied audio with fixed-length frames, such as AAC and AC-3, is snapped to its codec's encoder frame grid, as link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] states.
-The encoder frame grid is the set of frame start times that FFmpeg's encoder for that codec would write.
-ADR 0037 owns the snapping rule.
-The snapping rule applies to every audio rendition.
+Every audio encode joins its job attempts on the stream session's audio frame grid, and the producer never moves a copied track (<<decision-audio-grid>>).
 
 Every running job attempt of every variant writes every selected audio track.
 The server keeps the first delivery of each audio segment that it receives.
@@ -308,10 +305,43 @@ On an MPEG-TS source, FFmpeg's `-start_at_zero` option measured media time zero 
 Mapping a different set of languages moved media time by 170.7 ms.
 With `-discard none` on the input, media time zero stayed at the container's earliest stream.
 A subtitle or data stream that starts 1 s or more before the other streams still moves media time zero under `-discard none`, so ADR 0037 also cancels the start time correction.
-Copied AAC from an FFmpeg-made Matroska file sat 16 samples off the AAC encoder's frame grid.
-Without the snap, switches between AAC renditions moved the audio's offset to the picture by −46 to +60 ms.
-With the snap, the same switches stayed within −12 to +9 ms, which is about the measurement's own ±10 ms jitter.
 Evidence: <<evidence-video-job>>, <<evidence-audio-cases>>.
+
+[[decision-audio-grid]]
+=== Every audio encode joins its job attempts on the stream session's audio frame grid, and the producer never moves a copied track
+
+The stream session's audio frame grid holds the frame start times of the session's audio codec, counted from the default track's first sample.
+When the session copies the default track, that first sample is the copy's own, so the grid is the copy's grid.
+When the session encodes the default track, it is the track's probed start.
+The frame length is the encoder's: 1,024 samples for AAC, 1,536 for AC-3 and E-AC-3, 960 for Opus, the sample rate ÷ 20 for FLAC, set with `-frame_size`, and 4,096 for ALAC, whose FFmpeg encoder writes no other length.
+
+Every audio encode starts its output on that grid.
+Each job attempt decodes each encoded track from one segment period before the start of its first segment.
+It trims the decoded audio to the first grid point at or after that start, so the encoder's first frame starts on the grid.
+So consecutive attempts meet without a gap or an overlap, and a FLAC or ALAC encode of a lossless track decodes to the same samples on both sides of a junction.
+When the source container rounds timestamps, as Matroska rounds them to 1 ms, a seeked attempt takes its decoded audio's start from the source track's own frame grid, counted from the track's probed start, and not from the rounded packet time.
+
+The producer never moves a copied track.
+link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-audio[ADR 0037] rebuilds each copied sample's duration from its sample count, and its decode time from the running sum.
+A session with two copied tracks on different grids keeps both, and its encodes start on the default copy's grid.
+A switch between those two copies accepts a gap or an overlap of up to half a frame, the frame's samples ÷ (2 × the sample rate): 10.7 ms for AAC and 16 ms for AC-3 at 48 kHz.
+A viewer's audio delay moves every audio rendition by the same amount (link:0055-a-viewers-audio-delay-is-a-playback-session-parameter-and-the-server-shifts-the-audio-renditions.adoc[ADR 0055], proposed in https://github.com/streamarr/streamarr-adr/pull/87[streamarr/streamarr-adr#87]).
+
+The merge gate of https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503] decodes across a junction for every pair of source codec and encoder, TrueHD, DTS-HD MA and AC-3 included.
+It requires 0 samples of gap or overlap, and identical decoded samples for a FLAC or ALAC encode of a lossless track.
+
+*Why:* An encoder's frames start where its input starts.
+After a plain seek to a segment boundary, consecutive attempts met with gaps or overlaps of −59.3 to +26.2 ms, depending on the encoder's frame length and the boundary.
+DTS-HD MA decoded from a plain seek differed from a continuous decode in 17,801 samples after the junction, so even its FLAC encode was not lossless there.
+Decoding from 3 s early and trimming to the grid gave 0 samples of gap or overlap at all 60 measured junctions, and the FLAC and ALAC encodes of FLAC, TrueHD and DTS-HD MA tracks decoded to the source's samples on both sides.
+FLAC's default frame of 4,608 samples does not divide most boundaries, and the sample rate ÷ 20 gives 50 ms frames for 0.4 to 0.8 % more bytes.
+FFmpeg's ALAC encoder ignored `-frame_size 2400` and wrote 4,096-sample frames.
+Copied AAC from an FFmpeg-made Matroska file sat 16 samples off the AAC encoder's frame grid.
+Without alignment, switches between AAC renditions moved the audio's offset to the picture by −46 to +60 ms, and with the copy and the encodes on one grid they stayed within −12 to +9 ms, about the measurement's own ±10 ms jitter.
+Moving the encodes onto the copy's grid aligns the renditions without moving the copy, which keeps the copy's authored sync.
+An encode of AAC copied in Matroska started 8 samples early after a seek, because Matroska had rounded the seek packet's timestamp.
+Jellyfin restarts FFmpeg at a plain seek and aligns no audio frame.
+Evidence: <<evidence-audio-junctions>>, <<evidence-audio-cases>>.
 
 [[decision-init]]
 === Each audio rendition has one initialization segment
@@ -687,7 +717,7 @@ The rules of this ADR hold whatever a check shows.
 A failing check comes back to the ticket as a question before the ticket merges.
 The player check of the audio renditions ticket, https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503], runs the real server and worker.
 That check shows again that hls.js plays audio renditions without the priming frame.
-That check also plays a Matroska source whose copied AAC starts off the AAC encoder's frame grid.
+That check also plays a Matroska source whose copied AAC starts off the AAC encoder's frame grid, beside encoded tracks on the copy's grid.
 The Apple client's ticket, https://github.com/streamarr/streamarr-apple/issues/4[streamarr/streamarr-apple#4], checks the cover of <<decision-seek-after-change>> on an iPhone.
 
 Three cases have no measurement.
@@ -752,6 +782,9 @@ A junction is the segment boundary where one job attempt's output ends and anoth
 Copied audio stays byte-identical across a junction.
 Encoded audio differs from the earlier attempt's encoded audio, because the decoders start on a different packet.
 After decoding, the junction adds at most 0.2 dB to that difference.
+Every encode meets the earlier attempt's output without a gap or an overlap, and a FLAC or ALAC encode of a lossless track decodes to the same samples across the junction.
+* Each encoded track's decode starts one segment period before its attempt's first segment, so every attempt decodes up to one period of audio that it discards.
+* Two copied tracks on different grids meet with a gap or an overlap of up to half a frame when the viewer switches between them.
 * The first 21 ms of an AAC rendition decode without the overlap that the priming frame would supply.
 No player showed an error.
 An AC-3 or E-AC-3 rendition loses about 27 ms of real audio at the start of the stream, and an Opus rendition loses about 14 ms.
@@ -844,6 +877,10 @@ Keeping the first delivery of each audio segment needs no designation and no suc
 That job reads the source region a second time and needs its own worker slot.
 A seek relocates that job as well as the variant's job attempt.
 * An audio rendition whose segment 0 keeps the AAC priming frame stops hls.js after a language switch in the first segment.
+* Snapping a copied track to the encoder's grid moves its authored sync by up to half a frame, 16 ms for AC-3 at 48 kHz and 64 ms for AAC at 8 kHz.
+FFmpeg's AC-3 encoder starts each frame 256 samples before a 32 ms point, so the snap moved an authored +12 ms delay to +26.7 ms.
+* Starting each encode at a plain seek to the boundary leaves gaps or overlaps of up to 59 ms between attempts.
+* Snapping only the non-default of two copies on different grids moves a bit-exact copy.
 * Dropping audio before media time zero from multiplexed variant segments as well changes segments that need no change.
 hls.js places a multiplexed fragment by the fragment's video track, and ADR 0037 keeps that audio in multiplexed segments.
 * An init that also writes the language in an `elng` box, or that keeps the source's language tag, stores the language in a second place.
@@ -998,6 +1035,7 @@ Holds, stalls and seek times differed by no more than the spread between runs.
 In these measurements, each junction joined an attempt that started at 0 and a replacement attempt.
 At 96 of 96 audio junctions, the step between attempts was 0 samples.
 At every audio junction, the replacement attempt's first audio frame sat on the frame grid of the attempt that started at 0.
+Those junctions covered only pairs of source and encoder whose frame lengths match, and a plain seek misses the grid for the other pairs (<<evidence-audio-junctions>>).
 At 24 of 24 video junctions, the replacement attempt's first segment started at the frame time that the attempt from 0 gave that segment.
 * Copied audio was byte-identical across junctions.
 Encoded audio differed, because AC-3 dither and AAC noise substitution depend on where the decoder starts.
@@ -1108,10 +1146,10 @@ A 5.1 Opus rendition failed in every Apple player, in 0 of 3 plays each.
 At each change of codec, the audio's offset to the picture moved and stayed until the next seek.
 In the re-run, each switch from FLAC to AAC added a median of 91 to 98 ms of audio lag in Chromium and Chrome.
 The largest offset in a run had a median of 121 ms in Chromium and 137 ms in Chrome.
-Switches between AAC renditions stayed in sync once copied audio was snapped to the frame grid.
+Switches between AAC renditions stayed in sync once copied and encoded audio shared one frame grid.
 * Copied AAC from an FFmpeg-made Matroska file started at −1008 samples, 16 samples off the AAC encoder's frame grid.
-Without the snap, switches between AAC renditions moved the offset by −46 to +60 ms, and runs ended 40 to 57 ms late.
-With the snap, the same switches stayed within −12 to +9 ms.
+With the renditions on different grids, switches between AAC renditions moved the offset by −46 to +60 ms, and runs ended 40 to 57 ms late.
+With the copy moved onto the encoder's grid, the same switches stayed within −12 to +9 ms.
 * In one test, an audio track ended at 40 s, and an attempt started at 48 s.
 The input ran at twice real time, and each case ran 3 times.
 With the ended track mapped, the attempt wrote its first byte after 12.0 s, when the input ended.
@@ -1319,6 +1357,25 @@ Each `NAME` appeared unchanged as the option's title metadata.
 Its `dec3` box held 6 bytes and no `flag_ec3_extension_type_a`, because FFmpeg writes that flag only when its parser finds a complexity index in the stream.
 Media3 1.11.1 reports E-AC-3 with Atmos only when that flag is set.
 
+[[evidence-audio-junctions]]
+=== Audio junctions on the frame grid
+
+The measurements ran on 2026-11-02 with FFmpeg 8.1.3 from the pinned worker image.
+The sources were 30 s of Tears of Steel's 24-bit 5.1 master (Creative Commons) as FLAC, as TrueHD from FFmpeg's experimental encoder, as AC-3 at 448 kb/s and as AAC at 384 kb/s, each in Matroska, and FATE's 12.5 s DTS-HD MA 7.1 sample remuxed to MP4.
+Each source was encoded to AAC, AC-3, E-AC-3, Opus, FLAC (`-frame_size 2400`) and ALAC in 5.1, once from 0 and once from each of two boundaries, 6.000 s and 10.010 s.
+Each replacement attempt started either with a plain seek to the boundary, or by decoding from 3 s early and trimming to the first grid point at or after the boundary.
+The gap is the first replacement packet at or after the boundary minus the end of the attempt from 0's last packet before it.
+
+* With a plain seek, the gap was 0 only where the boundary fell on the encoder's grid.
+Elsewhere it was −16.0 to −16.7 ms for AAC, +16.0 to +26.2 ms for AC-3 and E-AC-3, +10.0 to +16.0 ms for Opus, −34.0 to −40.0 ms for FLAC and −53.3 to −59.3 ms for ALAC.
+* With the grid method, the gap was 0 and the first replacement packet sat on the grid of the attempt from 0 at all 60 junctions.
+* Cross-correlated against the source's continuous decode over 0.5 s, starting 0.5 s after each junction, every replacement encode of the grid method sat at an offset of 0 samples, apart from Opus's one-sample resolution and the AAC source below.
+* The FLAC and ALAC encodes of the FLAC, TrueHD and DTS-HD MA sources decoded identically to the source's continuous decode on both sides of every grid junction.
+With a plain seek, those of DTS-HD MA differed in 17,801 samples after the 6 s junction and 4,956 after the 10.01 s junction.
+* Every replacement encode of the AAC source in Matroska sat 8 samples early, with either method, because Matroska stores the seek packet's time rounded to 1 ms.
+* With `-frame_size 2400`, FLAC wrote 0.4 % more bytes for the 24-bit master and 0.8 % more for decoded AC-3 than with its default 4,608-sample frames.
+* FFmpeg's ALAC encoder wrote 4,096-sample frames with `-frame_size 2400`, and FLAC wrote 2,400-sample frames.
+
 [[evidence-sample-processing]]
 === Decoding, dither and resampling
 
@@ -1422,6 +1479,7 @@ Each percentage is of the PCM bitrate at 48 kHz and the written depth: 1,536 kb/
 * https://github.com/gpac/gpac/blob/v2.4.0/applications/mp4box/fileimport.c#L919-L921[GPAC v2.4.0 `fileimport.c`: the `name` import option] and https://github.com/gpac/gpac/blob/v2.4.0/applications/mp4box/fileimport.c#L1731-L1733[its write into the handler name]
 * https://datatracker.ietf.org/doc/html/draft-pantos-hls-rfc8216bis-22#section-4.4.6.1[draft-pantos-hls-rfc8216bis-22 §4.4.6.1] and RFC 8216 §4.3.4.1: an audio rendition may carry `public.accessibility.describes-video`
 * https://developer.apple.com/documentation/http-live-streaming/hls-authoring-specification-for-apple-devices/[Apple HLS authoring specification], items 2.12 to 2.14: audio description renditions
+* https://github.com/jellyfin/jellyfin/blob/ed211765c2ebbb3f5093f67596c267058c6a4124/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs#L3096-L3121[Jellyfin `EncodingHelper.cs`: a seek restarts FFmpeg with a plain input seek]
 * https://github.com/jellyfin/jellyfin/blob/ed211765c2ebbb3f5093f67596c267058c6a4124/MediaBrowser.Model/Entities/MediaStream.cs#L271-L326[Jellyfin `MediaStream.cs`: an audio track's display title from its codec or profile, channel layout and flags]
 * https://github.com/l984-451/Rivulet/blob/4ab544bf1bc452f18807156a4a26698801bd07f4/RivuletCore/Playback/Tracks/MediaTrack.swift#L24-L47[Rivulet `MediaTrack.swift`: Plex's display title, and the commentary and audio description flags from the container]
 * https://www.rfc-editor.org/rfc/rfc9639#section-9.1.3[RFC 9639 §9.1.3: FLAC channel assignment]

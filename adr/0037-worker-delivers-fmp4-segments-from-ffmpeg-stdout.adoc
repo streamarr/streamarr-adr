@@ -31,7 +31,7 @@ NOTE: An amendment lets an encode of an interlaced source write one frame per fi
 The encode then runs at twice the output frame rate that the probe outcome stores, when twice that rate is at most 60 frames per second.
 Every other encode runs at the stored output frame rate, as before the amendment.
 
-NOTE: An amendment closes every media segment at its own interval's end, so the segment that holds the last video keyframe never takes in the audio after it (<<decision-early-ends>>).
+NOTE: An amendment closes every media segment's audio at its own interval's end, so the segment that holds the last video keyframe never takes in the audio after it (<<decision-early-ends>>).
 Every encode may now hold its last picture and pad its audio with digital silence up to the advertised end.
 That narrows the earlier rejection of padding every attempt's audio.
 A completed attempt reports where each stream ended and whether the source ended early, and the server stores each learned end time beside the probe facts.
@@ -357,6 +357,12 @@ When ADR 0054's measurements give a merged segment's size, the server adds the s
 When a merged segment would exceed the segment cap, the server encodes the source from the start instead of copying it.
 When no measurement exists, a merged segment that grows past the segment cap fails the copy attempt with the named reason `EXCEEDS_SEGMENT_CAP`, and ADR 0052's fallback moves playback to an encode.
 No duration bound limits a merged segment.
+A producer of a long merged segment is not taken for stalled: wherever ADR 0019 allows one target segment duration for a segment, a merged segment counts its own length.
+After a publication, the producer receives the stall threshold plus the length by which the next segment exceeds one slot.
+
+Slots after the video's end never merge when the server knows that end, because a video that ends at least one segment early is encoded and holds its last picture (<<decision-early-ends>>).
+When the server does not yet know the video's end time, the slots after the source's last keyframe merge into the last segment, which then takes in the audio after the video's end.
+<<explicitly-deferred>> lists that case.
 
 Until the server sends the segment list and the pinned worker image groups on it, an interim rule chooses each stream session's segments:
 
@@ -678,7 +684,8 @@ In a multiplexed variant, an attempt whose start sequence number is 0 therefore 
 link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043] states both rules in the same words.
 In every other attempt, an audio sample below the start sequence number is preroll, and the producer discards it.
 No segment takes in an audio sample that starts after its interval, not even when the output ends.
-The segment that holds the last video keyframe therefore closes at its own interval's end and never takes in the audio after it.
+The segment that holds the last video keyframe therefore takes no audio past its own interval's end, and never takes in the audio after it.
+A copied segment's video still runs to the keyframe that opens the next segment, as the <<decision-grouping,grouping rule>> states.
 The producer delivers no audio sample that starts after the last segment it closes, and the attempt's report names each stream that still had media there (<<decision-early-ends>>).
 A late audio sample is one that arrives after the producer has closed its segment.
 The producer drops a late audio sample, counts it and continues the attempt.
@@ -885,7 +892,7 @@ A lossy encoder can code its last frames before the real end differently, becaus
 That change to the last decoded frames is the one loss that padding can cause.
 A copied stream stays bit-identical to the source and is never padded.
 
-Every media segment closes at its own interval's end (<<decision-audio>>).
+No media segment takes in audio past its own interval's end (<<decision-audio>>).
 In an encode, the held picture's keyframes keep opening segments after the video's end, so each interval's audio goes into that interval's segment.
 Each segment's audio therefore stays within one interval, well inside the segment cap, however long the tail.
 No segment ever closes without a keyframe as an audio-only segment.
@@ -903,7 +910,7 @@ An attempt that starts after every source sample anyway completes with the repor
 Padding past a source's real end applies to encoded variants only.
 A stream copy cannot be padded in its own codec.
 An encoded tail cannot join a stream copy either, because the server refuses an attempt whose initialization segment differs.
-A copy's last segment closes at its interval's end, and the copy's report says whether a source stream still had media after that segment.
+A copy's last segment takes no audio past its interval's end, and the copy's report says whether a source stream still had media after that segment.
 That report settles the short-copy rule where the probe has no end time for the stream.
 A copied variant that runs short is a format error when some source stream still has media after the copy's last segment.
 When the whole source has ended by the copy's last segment, playback ends normally at the real end, with no encode and no format attempt (link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052]).
@@ -926,7 +933,7 @@ Answering 404 for those segments broke hls.js, AVPlayer and WebKit's native play
 With a padded source standing in for the worker, a held last frame played to 84 s in hls.js in four browsers, in WebKit's native player and in AVPlayer, with two runs each.
 With audio renditions, AVPlayer played to the end with silence padding and with `EXT-X-GAP`, in 3 runs each, but `EXT-X-GAP` left hls.js stuck on the iPhone.
 
-*Why every segment closes at its own interval's end:* When the segment that holds the last keyframe took in the audio after it, that segment held 24 s of audio in the 64 s case and the segments after it never arrived, although the attempt completed.
+*Why no segment takes in audio past its interval's end:* When the segment that holds the last keyframe took in the audio after it, that segment held 24 s of audio in the 64 s case and the segments after it never arrived, although the attempt completed.
 With 1,764 s of 6-channel audio, that one segment held 1,704 s of audio and arrived after 44.7 s, past the 22 s that the server waits for a replacement attempt's first segment.
 A longer or richer tail exceeds the segment cap instead: 768 kb/s for 1,400 s is about 134 MB.
 
@@ -1138,6 +1145,11 @@ Worker PR https://github.com/streamarr/streamarr-transcode-worker/pull/38[stream
 [[explicitly-deferred]]
 === Explicitly deferred
 
+* Keep a copy whose video's end the server does not yet know from taking in the audio tail.
+The slots after such a copy's last keyframe merge into its last segment, which then holds every audio sample after the video's end, up to the segment cap.
+The attempt reports the video's end, and the server stores it, so the next stream session for the file encodes the video and holds its last picture.
+How the first stream session avoids that segment, for example by reading the video's end from the measured packets or by ending the copy at the video's end, stays open.
+
 * Restrict ADR 0019 replacement attempts to the same encoder backend (issue https://github.com/streamarr/streamarr-server/issues/398[streamarr/streamarr-server#398]).
 Until workers advertise their encoders, the server rejects differing inits without requiring the same backend at dispatch time.
 * Add Low-Latency HLS parts and a contract for uploading parts.
@@ -1215,7 +1227,7 @@ With rebuilt segments, none of them lost a frame there.
 A stream session that copies such a source's video still encodes an early-ending audio track, and it encodes early-ending video.
 * A lossy encode that carries the padding can code its last frames before the source's real end differently, so its last decoded frame can differ from the encode without padding.
 A lossless encode decodes to the same samples, and a copy is never padded.
-* No segment holds more than its own interval's media, so the segment that holds the last keyframe arrives on time whatever the tail's length.
+* No segment holds audio past its own interval, so the segment that holds the last keyframe arrives on time whatever the audio tail's length, except in the case that <<explicitly-deferred>> lists.
 * The server stores a learned end time for each stream whose header states none, beside the probe facts and apart from the probe outcome.
 * An attempt that reports an early end costs no replacement attempt, and an attempt that starts after every source sample completes instead of failing.
 * An encoded variant delivers every advertised segment, even past a source's real end, and a copied variant that runs short becomes a format error, unless the whole source has ended, in which case playback ends normally at the real end (ADR 0052).

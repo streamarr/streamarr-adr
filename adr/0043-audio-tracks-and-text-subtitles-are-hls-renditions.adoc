@@ -153,6 +153,12 @@ A lossless track in another layout encodes to FLAC in the smallest FLAC layout t
 Every Opus encode of more than two channels uses `-mapping_family 1`.
 ALAC's `7.1(wide)` has front-of-centre channels, so ALAC does not carry 7.1.
 
+An Opus encode uses constrained VBR (`-vbr constrained`) at 96 kb/s for mono, 160 kb/s for stereo, 448 kb/s for 5.1, 576 kb/s for 6.1 and 640 kb/s for 7.1.
+A `3.0`, `quad` or 5.0 encode takes the 5.1 rate until a measurement gives it its own.
+These rates are provisional until an ABX listening check against the master, through a receiver, confirms them before production.
+An Opus encode counts its rate plus 2 %, because constrained VBR ran up to 1.5 % over it.
+Opus has no audio steps of its own, so under a maximum bitrate the session steps through ADR 0050's E-AC-3, AC-3 or AAC steps, and only the steps smaller than the Opus rate count.
+
 A FLAC or ALAC encode has no target bitrate.
 Its output's PCM bitrate is sample rate × bit depth × channels.
 ADR 0054's bitrate scan measures what a FLAC encode of each audio track of a file with a lossless track writes (link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc#lossless-audio-measurement[ADR 0054]).
@@ -217,6 +223,9 @@ A FLAC encode wrote 2.1, 3.0(back) and 4.0 under another layout, with only a war
 Such an encode moves channels: a `4.0` track's centre played from the back left, a `2.1` track's low-frequency channel from the centre, and a `6.0` or `7.0` track's back channel from the low-frequency channel.
 Padded with silent channels to the smallest FLAC layout that holds them, `2.1`, `3.1`, `3.0(back)`, `4.0`, `4.1`, `6.0` and `7.0` tracks kept every sample in place, for at most 0.06 % more bytes.
 A player then shows the padded layout, such as 6.1 for a `4.0` track.
+Each Opus rate is the lowest tested rate at which every real channel of Tears of Steel and Sintel scored within about 1.5 points of disturbed frames and 1 dB of stereo at 160 kb/s, on a per-channel noise-to-mask measure.
+Stereo at 160 kb/s sits above the 96 to 128 kb/s that Xiph's guidance calls about transparent for music, and 5.1 at 448 kb/s above Xiph's 128 to 256 kb/s, because film channels scored worse than the stereo yardstick below those rates.
+Unconstrained VBR at 448 kb/s spent 406 kb/s on Tears of Steel and left 26.5 % of the centre channel's frames disturbed, against 1.4 % with constrained VBR.
 Without `-mapping_family 1`, FFmpeg's `libopus` encoder played a 5.0 track's centre from the rear right and a 6.1 track's side left from the centre.
 With it, every channel of 5.0, 5.1, 6.1 and 7.1 landed in its RFC 7845 position.
 Jellyfin encodes Opus with `libopus` and no mapping family, so it has the same defect.
@@ -859,6 +868,8 @@ The client's declaration can make that choice for its own audio path.
 * Decoding without dialogue normalization makes a step from a copy to an encode louder by the track's normalization, up to 5 dB in the FATE samples.
 * Converting floating point to 16 bits without dither leaves distortion products that follow the signal, at −106 dBFS for a −90 dBFS tone.
 * FFmpeg's default resampler settings roll off the top octave by 2 dB and fold content above the new Nyquist frequency back at −14 dB.
+* Unconstrained Opus VBR takes bits from the dialogue channel and runs 10 % over its rate in its busiest fixed 6 s window.
+* Opus at Xiph's starting rates, 5.1 at 384 kb/s, left 11.5 to 21.4 % of frames disturbed in the worst channel, against 2.4 to 6.9 % at 448 kb/s.
 * Never copying Opus gives up copies that every tested player plays, because stereo Opus played in all six players.
 * Writing a lossless track that FLAC does not carry under its own layout name moves its channels, such as a `4.0` track's centre to the back left.
 * Encoding such a track to E-AC-3 or AC-3 keeps its layout but loses samples, and a stereo FLAC downmix changes the mix and can run ADR 0050's limiter.
@@ -1328,6 +1339,37 @@ A 21 kHz tone at 44.1 kHz resampled to 48 kHz came out 2.09 dB low with `aresamp
 A 24.5 kHz tone at 96 kHz resampled to 48 kHz folded to 23.5 kHz at −14.4 dB with the defaults and at −138.3 dB with the tuned settings.
 * The tuned resample of 120 s of 96 kHz 7.1 pink noise to 48 kHz took 2.68 s of wall time in one FFmpeg process, about 45 times real time, against 0.58 s with the defaults.
 
+[[evidence-opus-bitrates]]
+=== Opus bitrates
+
+The measurements ran on 2026-11-02 with FFmpeg 8.1.3 and libopus 1.5.2 from the pinned worker image.
+The sources were the first 734 s of Xiph's Creative Commons 5.1 masters of Tears of Steel (24 bits) and Sintel (16 bits).
+Stereo and mono were BS.775 downmixes, and 6.1 and 7.1 took the other film's surround pair as their extra channels, so those channels are synthetic.
+A noise-to-mask measure scored each channel of each encode against the master, as the share of frames with audible noise and the worst channel's noise-to-mask ratio.
+The measure compares waveforms, which penalizes Opus's band folding and favours AC-3 and E-AC-3, and it has no temporal masking, so it under-scores pre-echo and gives no credit for libopus's surround masking.
+ViSQOL could not be built on the host, so no standard measure checked these numbers.
+
+|===
+| Layout and rate | Worst channel, disturbed frames, Sintel / Tears of Steel
+
+| Stereo 160 kb/s (yardstick) | 1.3 % / 7.5 %
+| Mono 96 kb/s | 0.2 % / 4.0 %
+| 5.1 448 kb/s | 2.4 % / 6.9 %
+| 5.1 416 kb/s | – / 12.3 %
+| 5.1 384 kb/s | 11.5 % / 21.4 %
+| 6.1 576 kb/s, real channels | 1.8 % / 4.2 %
+| 7.1 640 kb/s | 1.6 % / 5.5 %
+| 7.1 576 kb/s, Tears of Steel's front left | – / 11.7 %
+|===
+
+* At 6.1 512 kb/s, Sintel's centre missed the yardstick by 4.3 points and 1.8 dB.
+* libopus 1.5.2 coded 5.1 as two coupled pairs plus centre and low-frequency channel, 6.1 as three coupled pairs, one of them centre and back centre, plus the low-frequency channel, and 7.1 as three coupled pairs plus centre and low-frequency channel.
+* On Tears of Steel, the worst channel's noise-to-mask ratio and disturbed frames were −3.0 dB and 80 % for AAC 5.1 at 384 kb/s, −8.8 dB and 34 % for E-AC-3 5.1 at 448 kb/s, −9.9 dB and 7 % for Opus 5.1 at 448 kb/s, −15.2 dB and 4 % for E-AC-3 5.1 at 640 kb/s and −15.4 dB and 2.5 % for AC-3 5.1 at 640 kb/s.
+* A re-run on 2026-11-02 encoded all 734 s of Tears of Steel 5.1 at a nominal 448 kb/s.
+Constrained VBR averaged 451.3 kb/s, and its largest fixed 6 s window ran 1.0 % over nominal.
+Unconstrained VBR averaged 405.9 kb/s, and its largest fixed 6 s window ran 10.6 % over nominal.
+Constrained stereo at 160 kb/s averaged 160.4 kb/s, with its largest window 0.6 % over.
+
 [[evidence-lossless-size]]
 === The size of lossless encodes
 
@@ -1386,6 +1428,7 @@ Each percentage is of the PCM bitrate at 48 kHz and the written depth: 1,536 kb/
 * https://github.com/mpv-player/mpv/blob/a687796d9d0efded1787d497167facd462b8f2ee/DOCS/man/options.rst#L2249-L2256[mpv `options.rst`: AC-3 compression is off by default], https://github.com/superuser404notfound/AetherEngine/blob/7.53.0/Sources/AetherEngine/Audio/AudioDecoder.swift#L82[AetherEngine 7.53.0 `AudioDecoder.swift`: the decoder opens with no options] and https://github.com/superuser404notfound/AetherEngine/blob/7.53.0/Sources/AetherEngine/Audio/AudioBridge.swift#L486-L496[`AudioBridge.swift`: the resampler opens with no dither]
 * https://github.com/FFmpeg/FFmpeg/blob/n8.1/libavformat/movenc.c#L648-L651[FFmpeg n8.1 `movenc.c`: `flag_eac3_extension_type_a` is written only with a complexity index] and https://github.com/androidx/media/blob/1.11.1/libraries/extractor/src/main/java/androidx/media3/extractor/Ac3Util.java#L255-L256[Media3 1.11.1 `Ac3Util.java`: E-AC-3 with Atmos only when the flag is set]
 * https://www.rfc-editor.org/rfc/rfc7845#section-5.1.1.2[RFC 7845 §5.1.1.2: Opus channel mapping family 1]
+* https://wiki.xiph.org/index.php?title=Opus_Recommended_Settings&oldid=16818[Xiph wiki: Opus Recommended Settings, revision 16818]
 * https://github.com/jellyfin/jellyfin/blob/ed211765c2ebbb3f5093f67596c267058c6a4124/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs#L804-L807[Jellyfin `EncodingHelper.cs`: Opus encodes with `libopus` and no mapping family]
 * https://media.xiph.org/sintel/[Xiph.Org: Sintel soundtrack masters] and https://media.xiph.org/tearsofsteel/[Tears of Steel soundtrack masters and AC-3 track] (Creative Commons Attribution 3.0, Blender Foundation)
 * https://github.com/superuser404notfound/AetherEngine/blob/7.53.0/Sources/AetherEngine/Player/PlayerState.swift#L599-L602[AetherEngine 7.53.0 `PlayerState.swift`: TrueHD is encoded, to FLAC in the lossless mode]

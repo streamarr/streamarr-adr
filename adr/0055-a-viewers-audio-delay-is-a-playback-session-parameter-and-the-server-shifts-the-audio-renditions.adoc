@@ -63,8 +63,8 @@ The delay runs from −2,000 ms to +2,000 ms in steps of 10 ms, and it is 0 by d
 The audio delay belongs to the playback session.
 Every stream session of the playback session uses it, including the stream session of each new format attempt (ADR 0052).
 The client sends the delay when it creates the playback session, as `audioDelayMilliseconds` in the streaming options of `createPlaybackSession`.
-The client changes the delay during playback with the mutation `setPlaybackSessionAudioDelay`, which takes the playback session's id and the new delay.
-The mutation returns the playback session, whose ready format attempt carries a `streamUrl` for the new delay.
+The client changes the delay during playback with the mutation `setPlaybackSessionAudioDelay`, which takes the playback session's id, the new delay and the player's position.
+The mutation returns the playback session, whose ready format attempt carries a `streamUrl` for the new delay (<<decision-change>>).
 The server rejects a delay outside the range, or one that is not a multiple of 10 ms, with the typed error `InvalidAudioDelayError` (link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026]).
 Each client clamps the value to the range before it sends it.
 
@@ -112,7 +112,13 @@ The shift applies to copied and encoded audio alike.
 This is how a delay applies to a copy: the copy's timestamps move, and its samples do not.
 A copy is never resampled, re-encoded or cut inside a frame for the delay, so its packets stay bit-identical.
 A sample whose shifted start falls before media time zero is dropped, as ADR 0043 drops audio before media time zero.
-The last segment takes every sample after its interval, as in ADR 0037.
+A sample whose shifted start falls at or after the presentation's end is dropped too.
+The presentation's end is the end of the last segment's interval, which the segment list fixes and the delay does not change.
+So the last segment never holds audio past its `EXTINF`, and the shifted audio never lengthens the title.
+Where the shift leaves the start or the end of the presentation without audio, encoded silence fills it (<<decision-edges>>).
+
+The server keeps the first shifted segment that it serves for each audio rendition, segment and delay.
+Every later request for the same URL gets the same bytes, as ADR 0019 requires of an advertised segment.
 
 The delay changes nothing else in the stream session:
 
@@ -125,9 +131,11 @@ The delay never changes which tracks the server copies, the session's audio code
 
 The multivariant playlist's `BANDWIDTH` counts each audio rendition's peak over the shifted intervals.
 For a copied audio rendition, the server bounds a shifted segment's audio by the keyframe intervals that overlap the segment's interval moved back by the delay, widened by one audio frame on each side as ADR 0054 does.
+The last segment's interval ends at the presentation's end, so that bound covers the last segment too.
+A segment that holds edge silence (<<decision-edges>>) counts that silence at the peak audio rate of the keyframe interval next to it, and no silence that the worker writes exceeds the track's own rate.
 
 A shifted segment uses audio from two stored segments.
-With a positive delay, segment `N` takes the end of stored segment `N − 1`, or the audio lead when the server holds no segment `N − 1` (<<decision-audio-lead>>).
+With a positive delay, segment `N` takes the end of stored segment `N − 1`, or the audio lead when the server held no segment `N − 1` when it first served segment `N` (<<decision-audio-lead>>).
 With a negative delay, segment `N` takes the start of stored segment `N + 1`.
 The server holds a request for a shifted segment until every stored segment it needs has arrived or the output has ended (link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]).
 
@@ -148,14 +156,21 @@ The multivariant playlist's URL, each audio rendition's media playlist URL and e
 The variants' media playlist URLs and video segment URLs do not, so a reload asks for the same video URLs.
 The server serves the delay that a URL names, after it checks the range and the step.
 
-To apply a change, the client loads the new `streamUrl` at the current position.
+The server answers `setPlaybackSessionAudioDelay` only once it can serve, for the new delay, the audio segment that holds the player's position and the segment after it.
+With a negative delay, that can wait for the next stored segment.
+With a positive delay, that can wait for an audio lead (<<decision-audio-lead>>).
+Until the answer arrives, the player keeps playing at the old delay.
+
+To apply a change, the client then loads the new `streamUrl` at the current position.
 The Apple client replaces the `AVPlayerItem` and seeks the new item to the position.
 A seek alone is not enough, because AVPlayer plays out the segments that it has already buffered.
 The web client loads the new URL in hls.js with the position as its start position.
 The position after the change stays within one video frame of the position before it.
-The picture holds for no more than 0.5 s, the bound that both client tickets set.
+From the moment the client loads the new URL, the picture holds for no more than 0.5 s, the bound that both client tickets set.
+The time the server takes to answer the mutation is not part of that bound, because the old stream keeps playing.
 
 *Why:* AetherEngine applies a change the same way and measured about 0.3 s of held picture.
+A reload that waited on the worker after the swap would hold the picture for as long as the worker took.
 A delay applied in the worker would need a new job attempt for every running variant at each change.
 The picture would then hold until a new attempt delivered its first segment, and an encoded variant would encode the same video again.
 
@@ -173,12 +188,10 @@ For an encode, the audio encode starts on the session's audio frame grid at or b
 The lead's last sample ends where the first segment's first sample starts.
 
 An attempt that starts at segment 0 has no audio before media time zero to deliver.
-Its audio lead is 2 s of encoded silence in the rendition's delivered codec, with the rendition's sample rate and channel layout.
-The silence ends where the track's first sample starts.
-So a positive delay never leaves the start of the title without audio.
+Its audio lead is 2 s of encoded silence (<<decision-edges>>).
 
 When the viewer sets a positive delay and the segment at the player's position needs an audio lead that no attempt delivered, the server starts a job attempt for the current variant at that segment.
-That attempt delivers the lead, and the request for the shifted segment waits for it.
+That attempt delivers the lead, and the server answers the mutation once the lead has arrived (<<decision-change>>).
 An attempt in a session whose delay is 0 or negative delivers no lead, so its seeks read no more of the source.
 Under ADR 0033, the server asks for an audio lead only from a worker that advertises support for it.
 
@@ -186,13 +199,39 @@ Under ADR 0033, the server asks for an audio lead only from a worker that advert
 Without the lead, a shifted segment after a seek would start with up to 2 s of picture and no sound.
 At media time zero, the source holds no audio before the start, so only encoded silence can fill that time.
 
+[[decision-edges]]
+=== Encoded silence fills the edges of the presentation, in the rendition's own decoder configuration
+
+A positive delay leaves the presentation without sound from media time zero until the delay.
+A negative delay leaves it without sound for the length of the delay before the presentation's end, and can leave a short last segment with no audio sample at all.
+A media segment with no sample of its track has no `traf` in ADR 0037's layout, which the ISO BMFF byte stream format of Media Source Extensions does not accept.
+ADR 0043 found that AVPlayer stops where an audio rendition's playlist ends early, so the server cannot drop that segment either.
+So encoded silence fills both edges:
+
+* The audio lead of an attempt that starts at segment 0 is 2 s of silence that ends where the track's first sample starts.
+* The attempt that delivers the track's last sample also delivers 2 s of silence that starts where that sample ends, when the playback session's delay is negative.
+* Under a delay of 0, neither edge needs silence.
+
+The silence matches the rendition's decoder configuration as its initialization segment states it: the codec, the profile, the sample rate, the channel layout and the bit depth.
+So a player decodes the silence with the same decoder and the same initialization segment as the track.
+FLAC, ALAC, PCM, Opus, AC-3 and AAC-LC silence comes from FFmpeg's encoder for the codec, with those parameters.
+HE-AAC silence is a constant silent frame for the channel count, as hls.js 1.7.3 inserts into AAC gaps.
+E-AC-3 above 5.1, or with Dolby Atmos, takes silence in its 5.1 independent substream, because FFmpeg's E-AC-3 encoder writes at most 5.1.
+A DTS or TrueHD copy has no silence that the worker can match, so a playback session whose session audio codec is DTS or TrueHD offers no delay.
+For such a session, the server rejects a delay other than 0 with `AudioDelayUnavailableError`, and the client shows that the audio delay is not available for this audio.
+The worker advertises the configurations that it can pad, and the server asks for silence only from a worker that advertises the rendition's configuration (ADR 0033).
+
+*Why:* Silence in the track's own configuration keeps the copy a copy.
+Encoding the whole track instead would trade a bit-identical copy for the delay.
+DTS and TrueHD copies reach only a client that declares them in fMP4 (ADR 0043), and no Streamarr client declares either today.
+
 [[decision-prerequisites]]
 === The delay requires contiguous audio that the producer never moves
 
 The delay depends on four rules:
 
 . Every audio track is its own audio rendition (ADR 0043, https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503]).
-The server offers no delay for a stream session with multiplexed variants.
+The server rejects a delay other than 0 with `AudioDelayUnavailableError` for a stream session with multiplexed variants.
 . Every audio encode starts its input on the session's audio frame grid, counted from the track's probed start.
 FLAC and ALAC write fixed blocks of the sample rate ÷ 20.
 Each attempt decodes from one period early and trims to the first grid point at or after its boundary.
@@ -270,11 +309,15 @@ Its tests compare every packet's bytes before and after a shift.
 * With a negative delay, a start or a seek waits for the next segment's audio as well.
 At 3 s segments and the speed floor of about 2.10× real time, an encode delivers that segment up to about 1.4 s later.
 A copy runs faster than the speed floor.
-* With a negative delay, the first part of the title's audio, up to 2 s, is never heard, and the audio ends up to 2 s before the picture.
+* With a negative delay, the first part of the title's audio, up to 2 s, is never heard, and silence plays for up to 2 s before the picture ends.
+* With a positive delay, silence plays for up to 2 s at the start, and the last part of the title's audio, up to 2 s, is never heard, because the presentation keeps its length.
+* A session whose audio codec is DTS or TrueHD offers no delay until the worker can write matching silence.
+* An E-AC-3 copy above 5.1 or with Dolby Atmos plays 5.1 silence at an edge, so a receiver can switch out of Atmos for that silence.
 * With a delay other than 0, Original on tvOS plays the HLS copy, which costs one worker remux job per stream session.
 * Each client's merge check runs a synthetic stream with a click every second and a flash on the same frame.
 At +200 ms and −200 ms, the decoded click moves by the set amount within ±10 ms against the flash.
-The check also covers a start at media time zero at +2,000 ms, a seek at +2,000 ms, the end of the title at −2,000 ms, and a rendition switch and a quality switch at a set delay.
+The check also covers a start at media time zero at +2,000 ms, a seek at +2,000 ms, the end of the title at −2,000 ms with a last segment shorter than 2 s, and a rendition switch and a quality switch at a set delay.
+It plays through both edges with FLAC, AAC-LC, HE-AAC and E-AC-3 7.1 copies, and compares every copied packet's bytes with the source.
 The web check runs in Chromium, Firefox and WebKit headless, and the Apple check runs on an iPhone.
 The Apple TV and SHIELD checks run once at the end of the epic and gate nothing.
 They include an E-AC-3 copy with Atmos through a receiver at +200 ms, to hear whether the silent lead switches the receiver out of Atmos at the start.

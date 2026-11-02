@@ -119,6 +119,7 @@ It applies to every playback session of the file, for every viewer, Profile and 
 It is not a probe result.
 A new probe version, or another probe of an unchanged source, keeps it.
 When the source snapshot changes (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]), the server removes the file's corrections, because they described the old mux.
+A correction that a ServerAdmin tuned against the old file never lands on the new one, even when its request arrives after the change (see the source revision below).
 A file at a new path, such as an upgrade that Sonarr or Radarr renames, is a new media file and starts without a correction.
 Removing the media file removes its corrections.
 
@@ -138,7 +139,10 @@ A correction of 0 removes the file's correction.
 * `removeAudioStreamSyncCorrection` takes the media file's id and the audio stream's index, and returns the stream to the file's correction.
 * A correction outside the range, or one that is not a multiple of 10 ms, returns `InvalidAudioSyncCorrectionError`.
 An index that names no audio stream of the file returns `AudioStreamNotFoundError`.
-* `MediaFile` shows the file's correction and each audio stream's own correction to every caller who can read the file.
+* Each of the three mutations also takes the media file's source revision, an opaque value that changes with the source snapshot.
+When the source snapshot has changed since the client read the revision, the server rejects the mutation with `MediaFileSourceChangedError` and changes nothing, in the same transaction that would write the correction.
+* `MediaFile` shows its source revision, the file's correction and each audio stream's own correction to every caller who can read the file.
+The stream session reports the source revision that it plays.
 
 A new correction applies to the playback sessions that start after it.
 A running playback session applies the media file's current corrections each time it receives `setPlaybackSessionAudioDelay`.
@@ -297,11 +301,12 @@ So encoded silence fills both edges:
 
 * Every attempt that starts at segment 0 delivers 2 s of silence that ends where the track's first sample starts.
 This silence is that attempt's audio lead.
-* Every attempt that delivers the track's last sample also delivers 2 s of silence that starts where that sample ends.
+* Every attempt that delivers the track's last sample also delivers silence that starts where that sample ends and lasts in whole frames until at least 2 s past the presentation's end.
+ADR 0043 lets a copied track end before the video, so silence of a fixed 2 s could leave the last segment empty under a negative delay.
 
 The worker delivers both whatever the current delay is, and the server stores them beside the rendition's segments.
 So a later change to any delay finds both edges ready, even after every job attempt has finished.
-2 s of encoded silence costs a few kilobytes and no source reading.
+A few seconds of encoded silence costs a few kilobytes and no source reading.
 Under a delay of 0, the server serves neither.
 
 The silence matches the rendition's decoder configuration as its initialization segment states it: the codec, the profile, the sample rate, the channel layout and the bit depth.

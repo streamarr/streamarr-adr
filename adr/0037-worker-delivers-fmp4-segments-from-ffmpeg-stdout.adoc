@@ -355,7 +355,7 @@ Streamarr has no production instances, so the change makes no provision for work
 
 The segment cap, 128 MiB, is a constant of the worker contract that the server and the worker each fix in code, and no worker configures it.
 A merged segment can be long, and every variant and rendition of the stream session cuts its segments on the same list, so the server decides up front whether every advertised output fits.
-When it creates a stream session with merged segments, the server bounds the largest segment of each advertised variant and audio rendition, adds that segment's framing (link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc#segment-framing[ADR 0054]), and compares the total with the segment cap:
+When it creates a stream session with merged segments, the server bounds each advertised variant's and audio rendition's segment for every merged interval, with that segment's framing (link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc#segment-framing[ADR 0054]):
 
 * A copied variant or rendition takes each segment's size from ADR 0054's measurements.
 * An encoded variant takes the longest merged segment's duration times the maximum rate that the encode's rate control enforces, plus the size of the encode's rate-control buffer, with the framing of its samples at its output frame rate.
@@ -365,20 +365,27 @@ An encode whose rate control enforces no maximum rate has no bound.
 A FLAC or ALAC encode takes its full PCM bitrate, widened by one frame, as ADR 0043 counts its peak.
 * A subtitle rendition's WebVTT segment carries only the cues that overlap its interval, so the server bounds no subtitle rendition.
 
-When any copied output exceeds the segment cap, or any encoded output's bound exceeds it or is missing, the stream session uses no merged list.
+One job attempt writes its variant's video and every selected audio track (link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043]), and its producer holds all of one interval's segments until the interval closes.
+For each variant, the server therefore adds the variant's segment for an interval to the segment of every audio rendition for the same interval, together with the fixed heap cost that the producer reserves for each of their samples (<<decision-memory>>), and compares the total with one segment cap.
+One segment cap, not the producer's budget of two, because that budget must hold one interval's segments in upload while the next interval's are open.
+The check covers the longest merged interval for encoded outputs and every merged interval for copied ones.
+
+When that total exceeds the segment cap for any variant and interval, or any encoded output's bound is missing, the stream session uses no merged list.
 It uses the plain 3 s grid, offers no copied video variant and encodes every variant's video.
 The server makes that choice when it creates the stream session, so no attempt of that session meets a merged segment.
-A copied output without a measurement is the one exception: it keeps the merged list, and the worker's cap is its only check.
+A copied output without a measurement is the one exception: it keeps the merged list, and the producer's budget is its only check.
 No duration bound limits a merged segment.
 
-A job attempt whose merged segment grows past the segment cap fails with the named reason `EXCEEDS_SEGMENT_CAP`, in a copied or an encoded output alike.
+A job attempt in a stream session with merged segments that fails with `SEGMENT_CAP_EXCEEDED` repeats that failure in every replacement attempt, whether one segment outgrew the segment cap or one interval's segments together outgrew the producer's budget (<<decision-memory>>), and in a copied or an encoded output alike.
 An encoded output can still exceed its bound, because a hardware encoder or a rate control that the worker doesn't verify can overshoot its buffer.
 Every replacement attempt would repeat the failure, so the server spends no replacement attempt on it.
 It starts a new format attempt under link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052] instead, whose stream session uses the plain 3 s grid and encodes every variant's video.
 That format attempt counts against the playback session's format-attempt budget, as every ADR 0052 fallback does, and in Original the playback choice changes to Auto.
 A producer of a long merged segment is not taken for stalled: wherever ADR 0019 allows one target segment duration for a segment, a merged segment counts its own length.
 After a publication, the producer receives the stall threshold plus the length by which the next segment exceeds one slot.
-A client scales its wait for a segment, and its stall limit, by that segment's advertised duration, so it does not abandon a long merged segment that a healthy producer is still encoding.
+A client scales its wait for a segment, and its stall limit, by the advertised duration of that segment and of every earlier segment of the same playlist that it has requested and not yet received.
+So a client neither abandons a long merged segment that a healthy producer is still encoding nor abandons the short segment after it, which waits for the same producer to finish both (see prefetch below).
+A player whose wait follows the target duration, such as AVPlayer, waits at least the longest merged segment's length, and ADR 0044's speed floor of about 2.10× real time delivers a long segment and a 3 s successor within that wait.
 hls.js abandons a segment request that has received no byte after 10 s by default, and the web client's stall limit (https://github.com/streamarr/streamarr-web/pull/139[streamarr/streamarr-web#139]) is fixed, so both must follow the advertised duration before merged segment lists ship.
 With merged segments, the relocation gap counts slots, not segments, and it counts only media that no held request waits for.
 The server measures the unproduced media between the running attempt's output and the requested segment, leaves out every segment that a held request for the same variant still waits for, and waits for the running attempt when the rest spans at most two slots.
@@ -388,7 +395,8 @@ It waits on the same producer, relocates nothing, and supersedes no request unde
 A request that lies more than two slots of unrequested media past the producer's output and past every held request is a seek: it relocates, and ADR 0019's newest-request rule then answers an earlier held request that the new attempt can't produce `503`, as before.
 A request therefore never waits behind an unfinished long merged segment that no player requested, and a prefetch never stops the producer of the long segment that it follows.
 The merge gate of https://github.com/streamarr/streamarr-server/issues/512[streamarr/streamarr-server#512] plays a seek and a variant switch into a merged segment whose encode outlasts those default limits, and a seek to a short segment just after an unfinished long one.
-It also sends concurrent requests for a long merged segment and its successor, which one attempt answers in order with no relocation and no `503`, and a request more than two slots of unrequested media past a held long segment, which relocates.
+It also has each client's own loader request a long merged segment and its successor concurrently, where the player allows it: one attempt answers both in order with no relocation, no `503` and no client timeout or retry.
+A request more than two slots of unrequested media past a held long segment relocates.
 
 Slots after the video's end never merge when the server knows that end, because a video that ends at least one segment early is encoded and holds its last picture (<<decision-early-ends>>).
 When the server does not yet know the video's end time, the slots after the source's last keyframe merge into the last segment, which then takes in the audio after the video's end.
@@ -1063,6 +1071,7 @@ A hung FFmpeg keeps printing its progress line and exits on neither `q` nor SIGT
 The watchdog stops when the reader finishes reading the output, so only the exit wait catches an FFmpeg process that hangs after its last byte.
 Evidence: <<evidence-svt-av1>>.
 
+[[decision-memory]]
 === A producer and a worker each admit memory within a budget
 
 Each producer holds at most two segment caps of FFmpeg's output plus one fixed scratch buffer.
@@ -1475,6 +1484,8 @@ Every worker would report the same constant.
 * Giving each variant or rendition its own segment list would stop a player from switching variants or renditions at every segment boundary.
 That holds for the narrower escape of letting only the encoded variants keep the plain grid when a merged segment of theirs would exceed the segment cap: their boundaries would no longer meet the copy's, and the audio and subtitle renditions could follow only one of the two lists.
 * Checking only the copy against the segment cap would leave every encoded variant and audio rendition on the same merged segment unchecked, although an encode can write more bytes than the copy for that interval.
+* Checking each output against the segment cap on its own would admit six audio renditions of 50 MiB each for one interval, although the one producer that holds them beside the video has a budget of 256 MiB.
+* Scaling a client's wait by the requested segment's duration alone would let it abandon a short segment that waits behind a held long one on the same producer.
 * Refusing a merged list whenever a copied output has no measurement would encode most Matroska sources until their background bitrate scan finishes.
 * Counting a held request's segment toward the relocation gap would relocate a prefetch past that segment, and ADR 0019's newest-request rule would answer the held request `503`, as the rejected one-segment gap did.
 * Never relocating while an earlier request of the same variant is held would make a player that seeks while an old request is held wait for the old producer to reach the new position.

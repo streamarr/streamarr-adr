@@ -159,10 +159,12 @@ Every other rendition's peak is 1.2 × its counted bitrate.
 The largest peak can belong to another rendition than the largest cost, and 1.2 × 65 % would cover only 78 % of the PCM bitrate.
 
 FFmpeg's ALAC encoder, and its FLAC encoder outside an experimental 32-bit mode, write 16 or 24 bits.
-The probe reports no audio bit depth, so the written depth follows the source's codec.
-A lossless encode of a lossy track, or of PCM whose codec name states 16 bits, such as `pcm_s16le`, writes 16 bits.
-A lossless encode of any other lossless track writes 24 bits: TrueHD, DTS-HD MA, other PCM, FLAC and ALAC.
-So a 16-bit FLAC or ALAC source is written at 24 bits, which keeps every bit and only overcounts its PCM bitrate.
+link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032's probe version 7] reports each audio stream's sample format and bit depth.
+A FLAC encode of an integer track of up to 24 bits writes the probed depth and keeps every sample.
+Float or 32-bit PCM is cut to 24 bits and is not lossless: FFmpeg's FLAC encoder drops the low 8 bits, and float samples above full scale clip.
+When the probe gives no depth, the written depth follows the source codec, as before: PCM whose codec name states 16 bits, such as `pcm_s16le`, writes 16 bits, and any other lossless track 24 bits.
+Decoded lossy audio writes 16 bits with TPDF dither (`aresample=osf=s16:dither_method=triangular`, <<decision-sample-processing>>), and a downmix of a 24-bit lossless track writes 24 bits.
+Only an encode that writes every decoded sample unchanged is called lossless.
 The PCM bitrate counts the bit depth that the encode writes.
 
 The 65 % lies above every film soundtrack measured: FLAC of decoded AAC, AC-3 and lossless film audio averaged 26 to 53 % of the PCM bitrate, and ALAC wrote 2 to 5 % more than FLAC.
@@ -207,6 +209,38 @@ Without `-mapping_family 1`, FFmpeg's `libopus` encoder played a 5.0 track's cen
 With it, every channel of 5.0, 5.1, 6.1 and 7.1 landed in its RFC 7845 position.
 Jellyfin encodes Opus with `libopus` and no mapping family, so it has the same defect.
 Evidence: <<evidence-audio-cases>>, <<evidence-encoders>>, <<evidence-lossless-surround>>.
+
+[[decision-sample-processing]]
+=== The worker decodes AC-3 and E-AC-3 without compression, dithers every conversion to 16 bits, and resamples with tuned settings
+
+The worker decodes every AC-3 and E-AC-3 track that it encodes with `-drc_scale 0 -target_level -31`.
+The decode applies none of the track's dynamic range compression, and applies the track's dialogue normalization as a hardware decoder does for the copy, so an encode plays at the copy's level through an AV receiver and a step from a copy to an encode keeps the level.
+ADR 0050's downmix mixes these decoded samples.
+
+Every conversion from floating point to 16 bits applies TPDF dither (`aresample=osf=s16:dither_method=triangular`).
+That covers every 16-bit FLAC or ALAC encode of decoded lossy audio and every downmix that writes 16 bits.
+Only an encode that writes every decoded sample unchanged is called lossless.
+
+A lossy encode keeps a source rate of 44.1 or 48 kHz and writes 48 kHz from any other rate.
+An Opus encode writes 48 kHz.
+A FLAC or ALAC encode keeps the source's rate, except under a capability entry's maximum sample rate (link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049]) and in its 48 kHz step (<<decision-audio-codec>>).
+Every rate change uses `aresample=filter_size=128:phase_shift=14:cutoff=0.95:kaiser_beta=14`.
+
+*Why:* FFmpeg's AC-3 and E-AC-3 decoders apply a track's dynamic range compression unless `drc_scale` is 0.
+On FATE's Miller's Crossing AC-3 sample, the compression lowered the peak from −6.41 to −14.03 dBFS, and on The Great Wall's E-AC-3 sample it changed the gain by −1.6 to +5.9 dB from one 10 ms window to the next.
+A FLAC encode that carries that compression is not the track's audio.
+mpv turns the compression off by default, while Jellyfin and AetherEngine open the decoder with its default.
+A Dolby decoder applies the track's dialogue normalization to a copy, so the copy's dialogue plays at −31 dBFS.
+With `-drc_scale 0`, `-target_level -31` lowered Miller's Crossing by 4.0 dB and CSI Miami's E-AC-3 by 5.0 dB, and left The Great Wall unchanged, so an encode matches the copy through a receiver.
+Without dither, FFmpeg's conversion of a −90 dBFS 1 kHz float tone to 16 bits put harmonics at −112 and −106 dBFS and read the tone 0.85 dB too loud.
+With TPDF dither, every harmonic fell to −136 dBFS or below, under the dither's own noise.
+On decoded AAC, the conversion also floored instead of rounding, which left a −0.5 LSB offset.
+Neither Jellyfin nor AetherEngine sets a dither method.
+The pinned image has no soxr resampler.
+With FFmpeg's default resampler settings, 44.1 to 48 kHz lowered a 21 kHz tone by 2.09 dB, and 96 to 48 kHz folded a 24.5 kHz tone back to 23.5 kHz at −14.4 dB.
+With the tuned settings, the 21 kHz tone lost 0.03 dB and the folded tone fell to −138.3 dB, and a 7.1 resample from 96 to 48 kHz ran at about 45 times real time.
+No HLS player was tested with AAC above 48 kHz, so a lossy encode writes at most 48 kHz.
+Evidence: <<evidence-sample-processing>>.
 
 [[decision-video-job]]
 === Every running variant's job attempt produces the audio renditions
@@ -728,6 +762,8 @@ A soundbar on legacy HDMI ARC takes stereo PCM or a Dolby bitstream, so there th
 AetherEngine reports that tvOS gives every HDMI route the same channel count, so the Apple TV cannot tell such a soundbar from a receiver.
 The server cannot tell either, so the client's declaration carries that choice, for example from a viewer setting for lossless audio.
 The Apple TV check stays an epic-end check and does not gate this decision.
+* An encode of an AC-3 or E-AC-3 track plays at the level that a receiver gives the copy, which is quieter than Jellyfin's or mpv's decode by 31 dB less the track's dialogue level, 4 to 5 dB for the FATE samples.
+* Every 16-bit encode of decoded audio carries TPDF dither noise, about 5 dB above plain 16-bit rounding noise, in place of distortion that follows the signal.
 * The worker encodes FLAC, Opus and ALAC as well as AAC, AC-3 and E-AC-3.
 Each new audio encode only adds to the worker contract, as link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033] requires.
 * An audio track that ends at least one media segment before the video is always encoded, even when the client could play a copy of the track.
@@ -803,6 +839,10 @@ After a switch that changed the codec, hls.js left the audio 90 to 140 ms late u
 * Encoding a lossless default track to E-AC-3 before FLAC, as AetherEngine does by default, keeps 5.1 behind a soundbar on legacy ARC.
 It also turns a 7.1 lossless track into 5.1 lossy audio for every client that declares eight-channel FLAC.
 The client's declaration can make that choice for its own audio path.
+* Decoding AC-3 and E-AC-3 with FFmpeg's default compression changes the dynamics of every encode, a FLAC encode included.
+* Decoding without dialogue normalization makes a step from a copy to an encode louder by the track's normalization, up to 5 dB in the FATE samples.
+* Converting floating point to 16 bits without dither leaves distortion products that follow the signal, at −106 dBFS for a −90 dBFS tone.
+* FFmpeg's default resampler settings roll off the top octave by 2 dB and fold content above the new Nyquist frequency back at −14 dB.
 * Never copying Opus gives up copies that every tested player plays, because stereo Opus played in all six players.
 * Writing a lossless track that FLAC does not carry under its own layout name moves its channels, such as a `4.0` track's centre to the back left.
 * Encoding such a track to E-AC-3 or AC-3 keeps its layout but loses samples, and a stereo FLAC downmix changes the mix and can run ADR 0050's limiter.
@@ -1247,6 +1287,26 @@ Each `NAME` appeared unchanged as the option's title metadata.
 Its `dec3` box held 6 bytes and no `flag_ec3_extension_type_a`, because FFmpeg writes that flag only when its parser finds a complexity index in the stream.
 Media3 1.11.1 reports E-AC-3 with Atmos only when that flag is set.
 
+[[evidence-sample-processing]]
+=== Decoding, dither and resampling
+
+The measurements ran on 2026-11-02 with FFmpeg 8.1.3 from the pinned worker image, on FATE samples and synthetic signals.
+
+* Decoded with FFmpeg's defaults and with `-drc_scale 0`, FATE's `ac3/millers_crossing_4.0.ac3` peaked at −14.03 and −6.41 dBFS.
+`eac3/the_great_wall_7.1.eac3` peaked at −10.91 and −10.05 dBFS, and the compression changed its RMS level by −1.6 to +5.9 dB from one 10 ms window to the next.
+* With `-drc_scale 0`, adding `-target_level -31` changed the level by −4.0 dB for Miller's Crossing, −5.0 dB for `eac3/csi_miami_5.1_256_spx_small.eac3` and 0.0 dB for The Great Wall.
+* A 10 s, −90 dBFS, 1 kHz tone in 32-bit float went to 16 bits in two ways, measured with a 393,216-point Blackman FFT.
+The plain conversion read the tone at −89.15 dBFS and put its third and fifth harmonics at −111.9 and −105.7 dBFS.
+`aresample=osf=s16:dither_method=triangular` read the tone at −90.00 dBFS, and its second to sixth harmonics lay at −136.0 to −145.4 dBFS.
+* Packed float rounded to 16 bits, with an error of ±0.48 LSB and no offset.
+Decoded stereo AAC, which is planar float, floored on its way to 16-bit FLAC: the error ran from −1.00 to 0.00 LSB, a mean of −0.50 LSB.
+* A float sine at +1 dBFS written as 24-bit FLAC clipped 143,820 of 480,000 samples, with an error of up to −18.3 dBFS.
+32-bit pink noise written as 24-bit FLAC changed 97.6 % of its samples by 0 to −255 32-bit steps, at most −138.5 dBFS, because the encoder drops the low 8 bits.
+* `ffmpeg -resamplers` lists only `swr`.
+A 21 kHz tone at 44.1 kHz resampled to 48 kHz came out 2.09 dB low with `aresample=48000` and 0.03 dB low with the tuned settings.
+A 24.5 kHz tone at 96 kHz resampled to 48 kHz folded to 23.5 kHz at −14.4 dB with the defaults and at −138.3 dB with the tuned settings.
+* The tuned resample of 120 s of 96 kHz 7.1 pink noise to 48 kHz took 2.68 s of wall time in one FFmpeg process, about 45 times real time, against 0.58 s with the defaults.
+
 [[evidence-lossless-size]]
 === The size of lossless encodes
 
@@ -1302,6 +1362,7 @@ Each percentage is of the PCM bitrate at 48 kHz and the written depth: 1,536 kb/
 * https://github.com/jellyfin/jellyfin/blob/ed211765c2ebbb3f5093f67596c267058c6a4124/MediaBrowser.Model/Entities/MediaStream.cs#L271-L326[Jellyfin `MediaStream.cs`: an audio track's display title from its codec or profile, channel layout and flags]
 * https://github.com/l984-451/Rivulet/blob/4ab544bf1bc452f18807156a4a26698801bd07f4/RivuletCore/Playback/Tracks/MediaTrack.swift#L24-L47[Rivulet `MediaTrack.swift`: Plex's display title, and the commentary and audio description flags from the container]
 * https://www.rfc-editor.org/rfc/rfc9639#section-9.1.3[RFC 9639 §9.1.3: FLAC channel assignment]
+* https://github.com/mpv-player/mpv/blob/a687796d9d0efded1787d497167facd462b8f2ee/DOCS/man/options.rst#L2249-L2256[mpv `options.rst`: AC-3 compression is off by default], https://github.com/superuser404notfound/AetherEngine/blob/7.53.0/Sources/AetherEngine/Audio/AudioDecoder.swift#L82[AetherEngine 7.53.0 `AudioDecoder.swift`: the decoder opens with no options] and https://github.com/superuser404notfound/AetherEngine/blob/7.53.0/Sources/AetherEngine/Audio/AudioBridge.swift#L486-L496[`AudioBridge.swift`: the resampler opens with no dither]
 * https://github.com/FFmpeg/FFmpeg/blob/n8.1/libavformat/movenc.c#L648-L651[FFmpeg n8.1 `movenc.c`: `flag_eac3_extension_type_a` is written only with a complexity index] and https://github.com/androidx/media/blob/1.11.1/libraries/extractor/src/main/java/androidx/media3/extractor/Ac3Util.java#L255-L256[Media3 1.11.1 `Ac3Util.java`: E-AC-3 with Atmos only when the flag is set]
 * https://www.rfc-editor.org/rfc/rfc7845#section-5.1.1.2[RFC 7845 §5.1.1.2: Opus channel mapping family 1]
 * https://github.com/jellyfin/jellyfin/blob/ed211765c2ebbb3f5093f67596c267058c6a4124/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs#L804-L807[Jellyfin `EncodingHelper.cs`: Opus encodes with `libopus` and no mapping family]

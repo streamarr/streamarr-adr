@@ -17,7 +17,14 @@ https://github.com/streamarr/streamarr-server/pull/711[streamarr/streamarr-serve
 The layout comes from probe version 7 (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032]).
 
 Another amendment replaces FFmpeg's default downmix with a named matrix and a limiter (<<decision-downmix>>).
-Dialogue keeps ITU-R BS.775's −3 dB in every codec, a `2.1` or `3.1` track keeps its low-frequency channel, and no downmix goes over full scale.
+Dialogue keeps ITU-R BS.775's −3 dB in every codec, or the level that an AC-3 or E-AC-3 track signals, a `2.1` or `3.1` track keeps its low-frequency channel, and no downmix goes over its ceiling before encoding.
+
+A later amendment follows an audiophile review of these rules.
+An encode that only renames a surround pair is not a downmix, so it writes every sample unchanged.
+A downmix that only drops channels has no limiter, and otherwise the limiter acts only on the channels that the matrix sums.
+A downmix that FLAC or ALAC writes uses an oversampled true-peak limiter.
+The stereo and mono matrix of an AC-3 or E-AC-3 track uses the mix levels that the track signals.
+An AAC encode has at most six channels, and the rule names each encoder's own layouts of 5 to 8 channels (<<decision-channel-layout>>).
 
 The same amendment takes the audio step from the largest audio rendition instead of the default track (<<decision-audio-steps>>).
 The stream session's audio bitrate already counts that rendition under link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc[ADR 0054], so no other track can take the stream over the viewer's maximum bitrate.
@@ -336,22 +343,21 @@ When several renditions tie as the largest, the default track is the step track 
 When the bitrate of a copied rendition is unknown, the server cannot rank it, so the default track is the step track, as before this amendment.
 . The multichannel steps.
 They keep the codec and the channel layout of the step track's encode: the encode that the session delivers for it, or, when the session copies it, the encode that the server would choose for it.
-When the session copies the step track in AAC, AC-3 or E-AC-3, which the server also encodes, the copy's codec adds its steps too.
-Those steps keep the copy's channel count, up to the 5.1 that the server encodes in AC-3 and E-AC-3.
+When that encode is FLAC, ALAC or Opus, which have no steps of their own, they keep the E-AC-3, AC-3 or AAC encode that the server would choose for the step track without it (ADR 0043).
+When the session copies the step track in AAC, AC-3 or E-AC-3, which have steps of their own, the copy's codec adds its steps too.
+Those steps keep the copy's channel count, up to the 5.1 that the server encodes in AAC, AC-3 and E-AC-3.
 A copy of 5 channels steps in the encoder's 5.0 layout: `5.0` for AAC and `5.0(side)` for AC-3 and E-AC-3.
-An AAC copy of 7 channels steps in AAC 5.1 only, because FFmpeg's 7-channel AAC layout writes channel configuration 0 (<<decision-channel-layout>>).
+An AAC copy of 7 or 8 channels therefore steps in AAC 5.1, because an AAC encode has at most six channels (<<decision-channel-layout>>).
 A copy of 3 or 4 channels keeps its channels only in a layout that its codec carries exactly (<<decision-channel-layout>>).
 Otherwise the copy's codec adds no step for it.
-AAC above 5.1, encoded or copied, also steps through AAC 5.1.
 The steps of both codecs then run from the highest bitrate to the lowest.
 At an equal bitrate, the copy's codec comes first.
-A copied codec that the server does not encode, such as FLAC, Opus or ALAC, steps through the server's encode only.
+A copied codec without steps of its own, such as FLAC, Opus or ALAC, steps through the server's encode only.
 A codec adds these steps only when its encode or copy has more than two channels:
 ** E-AC-3 5.1 at 640, 448 and 384 kb/s;
 ** AC-3 5.1 at 448 and 384 kb/s;
-** for a copied 3-, 4- or 5-channel AC-3 or E-AC-3 track that keeps its channels, the same bitrates in its layout;
-** multichannel AAC at 64 kb/s per full-band channel, which is 448 kb/s for 7.1, 320 kb/s for 5.1 and 5.0, 256 kb/s for 4.0 and 192 kb/s for 3.0.
-AAC 7.1 takes both steps.
+** for a copied AC-3 or E-AC-3 track of 3 to 5 channels that keeps a multichannel step, the same bitrates in the layout that the step names;
+** multichannel AAC at 64 kb/s per full-band channel, which is 320 kb/s for 5.1 and 5.0, 256 kb/s for 4.0 and 192 kb/s for 3.0.
 . The stereo steps: AAC stereo at 128, 96 and 64 kb/s.
 A mono track has one step instead: AAC mono at 64 kb/s.
 So does any track when no AAC capability entry for HLS accepts more than one channel.
@@ -363,9 +369,8 @@ E-AC-3's steps are not smaller than the copy.
 A copied AC-3 5.1 track at 640 kb/s steps to AC-3 5.1 at 448 and 384 kb/s.
 When the server would encode E-AC-3, none of E-AC-3's steps count.
 Its 640 kb/s step is not smaller than the copy, and its 448 and 384 kb/s steps tie with AC-3's.
-A copied AAC 7.1 track at 512 kb/s steps to AAC 7.1 at 448 kb/s, then AAC 5.1 at 320 kb/s, then stereo.
-When the server would encode E-AC-3, E-AC-3 5.1 at 384 kb/s comes between the two AAC steps.
-E-AC-3's 448 kb/s step ties with AAC 7.1's.
+A copied AAC 7.1 track at 512 kb/s steps to AAC 5.1 at 320 kb/s, then stereo.
+When the server would encode E-AC-3, E-AC-3 5.1 at 448 and 384 kb/s come before AAC 5.1.
 
 When the maximum bitrate minus the session's audio bitrate is below the 360p tier's video bitrate, the server takes the first audio step at which the 360p tier's video bitrate fits.
 That step's bitrate plus the 360p tier's video bitrate is at or below the maximum bitrate.
@@ -409,13 +414,13 @@ AC-3's encoder rounds any other bitrate to its table anyway.
 Surround at 384 kb/s with the 360p tier fits a maximum bitrate of 1,184 kb/s.
 The steps therefore drop to stereo only when surround cannot fit beside the smallest tier or beside a video copy.
 A copied AAC 5.1 track keeps surround one step longer, because AAC's 320 kb/s step is below the lowest E-AC-3 and AC-3 step of 384 kb/s.
-AAC 7.1 steps through AAC 5.1 for the same reason, and AAC 5.1 needs no capability entry beyond the one that accepts AAC 7.1.
+A copied AAC 7.1 track steps through AAC 5.1, because an AAC encode has at most six channels, and AAC 5.1 needs no capability entry beyond the one that accepts AAC 7.1.
 At an equal bitrate, the step keeps the session's codec.
 384 kb/s is the lowest E-AC-3 step because FFmpeg's E-AC-3 encoder lacks the tools behind Apple's 192 kb/s.
 64 kb/s is the lowest step because AAC-LC degrades quickly below it.
 `BANDWIDTH` counts the largest rendition, so only a cap on every rendition keeps every variant within the maximum.
 The step comes from the largest rendition for the same reason: a step from the default track alone would leave a larger track over the maximum.
-The session's own audio caps nothing, because it can be a copy in a codec that the server does not encode, such as FLAC.
+The session's own audio caps nothing, because it can be a lossless copy, such as FLAC, whose bitrate no encode can match.
 ADR 0043 keeps one audio codec per stream session, so all tracks follow one step.
 Audio renditions switch without restarting the video, and an unchanged step keeps that true.
 
@@ -552,7 +557,7 @@ A maximum bitrate of 5,500 kb/s gives the 1080p tier with 448 kb/s instead of th
 
 *Why:* 5.1 at 448 kb/s is DVD's usual AC-3 rate, and viewers hear little loss from 768 kb/s.
 A larger picture tier is plainly visible.
-Surround stays, so a home theater keeps surround, though AAC 7.1 can become AAC 5.1.
+Surround stays, so a home theater keeps surround.
 A step that gains no tier would lower the audio for nothing, so the server does not take it.
 
 [[decision-fixed-quality]]
@@ -638,10 +643,10 @@ A codec family that the server starts to encode needs its own bitrate for every 
 A copied audio track can become an encode, which costs worker time.
 * Below a maximum bitrate of 1,184 kb/s, a video encode whose 5.1 steps are E-AC-3 or AC-3 plays in stereo.
 Below 1,120 kb/s, one whose steps include 5.1 AAC does.
-An AAC 7.1 encode or copy has that step too.
+An AAC 7.1 copy has that step too.
 A copied AAC 5.1 or 7.1 track has that step even when the server would encode E-AC-3.
 A copied 5.1 or 7.1 track whose bitrate is below those steps keeps surround down to its own bitrate plus the 360p tier's 800 kb/s.
-* Under a maximum bitrate, an encode can play surround at a lower multichannel step, such as 5.1 at 448 kb/s or AAC 5.1 in place of AAC 7.1, in exchange for a higher top tier in Auto or a single variant's full bitrate.
+* Under a maximum bitrate, an encode can play surround at a lower multichannel step, such as 5.1 at 448 kb/s, in exchange for a higher top tier in Auto or a single variant's full bitrate.
 In Auto, every variant of the ladder, the lowest included, carries that lower audio.
 * Below a maximum bitrate of 864 kb/s, the video gets less than the 360p tier's bitrate.
 Below 209 kb/s, the stream exceeds the maximum bitrate rather than not playing at all.

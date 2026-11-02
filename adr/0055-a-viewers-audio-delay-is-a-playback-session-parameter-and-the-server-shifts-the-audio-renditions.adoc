@@ -169,24 +169,34 @@ link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018] addresses 
 A file replaced at the same path therefore keeps its `MediaSourceRef`, and a new job attempt would open the replacement's bytes.
 Each job attempt carries, beside its `MediaSourceRef`, the source snapshot that the session's source revision stands for: the file's size and modification time (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]).
 The snapshot is not a path, so the worker contract still carries no filesystem path, and `MediaSourceRef` stays the only address of the media.
-Before it reads any media, the worker reads the source's snapshot through its mount mapping and compares it with the carried snapshot.
-On a mismatch, it reads no media and fails the attempt with the typed reason `SOURCE_CHANGED`.
+Before it reads any media, the worker opens the source once through its mount mapping, reads the snapshot from the open file, and compares it with the carried snapshot.
+On a mismatch, it reads no media and fails the attempt with the typed reason `SOURCE_CHANGED`, and the failure reports the snapshot that it read.
+On a match, the worker hands that open file to the FFmpeg that reads the source, with FFmpeg's `fd` protocol, so FFmpeg reads the file that the worker checked.
+A file renamed over the path after the check never reaches the attempt, because FFmpeg never opens the path.
 Every new job attempt checks: a relocation after a seek, the attempt that a delay change starts for an audio lead (<<decision-audio-lead>>), a replacement under ADR 0019, and the first attempt of each new format attempt under ADR 0052.
 
 `SOURCE_CHANGED` is neither a format error nor a stall, so the server spends no replacement attempt and no format attempt on it.
+The worker can see a replacement before a scan or the watcher does, so the server treats the reported snapshot as the watcher's discovery (ADR 0032).
+In one transaction under the media file row lock, and only while the stored snapshot is still the one that the attempt carried, it saves the reported snapshot as the file's requested inputs, deletes the stored outcome and its stream rows, removes the file's corrections, and queues a probe.
+When another request already saved a newer snapshot, the transaction changes nothing.
 The server ends the stream session and the playback session, and the playback session reports the typed terminal error `SOURCE_CHANGED` to the client.
 When the server already holds a newer snapshot for the file, it ends the playback session the same way without dispatching an attempt.
 The client then starts a new playback session at the player's position with its own audio delay.
 That playback session reads the replacement's corrections, which start empty because the changed snapshot removed the old ones, and it waits for the replacement's probe outcome, as every playback does (ADR 0032).
+It never starts from the old outcome, so a restart can't meet `SOURCE_CHANGED` again for the same replacement.
 Segments that the old session stored before the change hold the old bytes, so they play with the old corrections until the session ends.
 No new attempt of the old session reads the new bytes, and no new playback session starts with an old correction.
 
-The server's tests replace a file at the same path during playback with a file correction of +1,000 ms.
+The server's tests replace a file at the same path during playback with a file correction of +1,000 ms, with scans and watcher events withheld.
 They then seek past the stored segments, change the delay so that the player's segment needs an audio lead, and report a format error.
-Each new attempt fails with `SOURCE_CHANGED` before it reads media, the playback session ends with that terminal error, and the client's new playback session plays the replacement with no correction.
+Each new attempt fails with `SOURCE_CHANGED` before it reads media, the playback session ends with that terminal error, the file's outcome and corrections are gone, and the client's new playback session waits for the replacement's probe and plays it with no correction.
+The worker's tests rename a replacement over the path between the snapshot check and FFmpeg's start, and check that the attempt reads only the checked file.
 
 *Why:* A correction is tuned by ear against one mux, and a replacement at the same path can be another mux whose audio sits elsewhere.
 Only the worker sees the bytes that an attempt reads, and the server's stored snapshot lags a replacement until a scan or the watcher sees it, so the check runs where the attempt opens the source.
+A check of the path followed by FFmpeg opening the path again would leave a window for a rename between the two, so the check and the read use one open file.
+With FFmpeg 8.0.1, an FFmpeg given an open file with the `fd` protocol read and seeked in a 4 s synthetic MP4 after a 9 s file had been renamed over its path.
+A playback restart that found the old outcome would fail again with `SOURCE_CHANGED` until a scan or the watcher caught up, so the failure itself records the new snapshot.
 The running session's playlists, segment list and keyframe positions come from the old probe outcome, so the replacement needs a new probe outcome and a new playback session in any case.
 
 [[decision-applied]]
@@ -502,6 +512,8 @@ They include an E-AC-3 copy with Atmos through a receiver at +200 ms, to hear wh
 * The correction stored with the probe result — a new probe version would discard a value that a person set and no probe measures.
 * A running playback session that keeps its corrections after its source changes — ADR 0018 addresses media by location, so a later seek, delay change or format recovery would open the replacement's bytes and play the old mux's correction on them.
 * Moving a running playback session to the replacement's corrections in place — its playlists, segment list and keyframe positions describe the old bytes.
+* Checking the snapshot by path and letting FFmpeg open the path — a rename between the check and the open would hand the replacement's bytes to an attempt that carries the old corrections.
+* Ending playback on `SOURCE_CHANGED` without recording the new snapshot — the restart would read the old outcome and fail again until a scan or the watcher saw the change.
 * The source snapshot inside `MediaSourceRef` — the reference is the media's address, which a worker resolves through its mount mapping, and the snapshot is a fact that the worker checks at that address.
 * Rejecting an audio delay or a correction whose sum leaves the range — a device's valid value would fail on one file, and the person who set either value cannot see the other.
 * Re-encoding the audio when a copy cannot carry matching silence, to apply a correction — it would trade a bit-identical copy for the correction.

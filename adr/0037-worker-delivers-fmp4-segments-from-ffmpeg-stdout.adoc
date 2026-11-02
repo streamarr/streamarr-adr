@@ -362,7 +362,9 @@ When it creates a stream session with merged segments, the server bounds each ad
 The server sets that maximum rate and buffer, so the bound holds whatever the source's picture holds.
 An encode whose rate control enforces no maximum rate has no bound.
 * An encoded audio rendition takes the longest merged segment's duration at the largest frame that its codec allows for its channel layout and sample rate.
-A FLAC or ALAC encode takes its full PCM bitrate, widened by one frame, as ADR 0043 counts its peak.
+A FLAC encode takes the largest frame that FLAC allows at the encode's frame size: a verbatim subframe for each channel at the sample depth, one bit more for each sample of one side channel, the frame and subframe headers and the frame's CRC.
+An ALAC encode takes its uncompressed escape frame at the encode's frame size with that frame's header.
+These bounds lie above the peak that ADR 0043 counts for `BANDWIDTH`, because a side channel can make a FLAC frame larger than its PCM.
 * A subtitle rendition's WebVTT segment carries only the cues that overlap its interval, so the server bounds no subtitle rendition.
 
 One job attempt writes its variant's video and every selected audio track (link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043]), and its producer holds all of one interval's segments until the interval closes.
@@ -385,7 +387,8 @@ A producer of a long merged segment is not taken for stalled: wherever ADR 0019 
 After a publication, the producer receives the stall threshold plus the length by which the next segment exceeds one slot.
 A client scales its wait for a segment, and its stall limit, by the advertised duration of that segment and of every earlier segment of the same playlist that it has requested and not yet received.
 So a client neither abandons a long merged segment that a healthy producer is still encoding nor abandons the short segment after it, which waits for the same producer to finish both (see prefetch below).
-A player whose wait follows the target duration, such as AVPlayer, waits at least the longest merged segment's length, and ADR 0044's speed floor of about 2.10× real time delivers a long segment and a 3 s successor within that wait.
+A player whose wait follows the target duration, such as AVPlayer, waits at least the longest merged segment's length for any segment.
+No derivation shows that this wait covers a queue of held long segments behind the relocation gap's two slots, so the merge gate measures it, and the prefetch rule below narrows before merged segment lists ship if AVPlayer abandons a request there.
 hls.js abandons a segment request that has received no byte after 10 s by default, and the web client's stall limit (https://github.com/streamarr/streamarr-web/pull/139[streamarr/streamarr-web#139]) is fixed, so both must follow the advertised duration before merged segment lists ship.
 With merged segments, the relocation gap counts slots, not segments, and it counts only media that no held request waits for.
 The server measures the unproduced media between the running attempt's output and the requested segment, leaves out every segment that a held request for the same variant still waits for, and waits for the running attempt when the rest spans at most two slots.
@@ -396,6 +399,7 @@ A request that lies more than two slots of unrequested media past the producer's
 A request therefore never waits behind an unfinished long merged segment that no player requested, and a prefetch never stops the producer of the long segment that it follows.
 The merge gate of https://github.com/streamarr/streamarr-server/issues/512[streamarr/streamarr-server#512] plays a seek and a variant switch into a merged segment whose encode outlasts those default limits, and a seek to a short segment just after an unfinished long one.
 It also has each client's own loader request a long merged segment and its successor concurrently, where the player allows it: one attempt answers both in order with no relocation, no `503` and no client timeout or retry.
+It plays two consecutive long merged segments that AVPlayer requests after two slots of unproduced media, the most that the relocation gap lets a request wait behind.
 A request more than two slots of unrequested media past a held long segment relocates.
 
 Slots after the video's end never merge when the server knows that end, because a video that ends at least one segment early is encoded and holds its last picture (<<decision-early-ends>>).
@@ -435,6 +439,9 @@ That file's final 6 s grid interval runs from 36 s to 36.023 s and holds no keyf
 Without the exemption, the server would encode that file although every full interval holds a keyframe.
 Streamarr adopts the exemption to learn how players handle the longer last segment, and will revisit it if players mishandle that segment.
 Evidence: https://github.com/streamarr/streamarr-server/issues/504[streamarr/streamarr-server#504], https://github.com/streamarr/streamarr-server/issues/512[streamarr/streamarr-server#512], https://github.com/streamarr/streamarr-server/pull/534[streamarr/streamarr-server#534].
+
+*Why FLAC takes its format's largest frame:* With FFmpeg 8.0.1, a FLAC encode of 60 s of independent white noise on two channels, at 48 kHz, 16 bits and 2,400-sample frames, wrote 11,704,135 bytes of packets, against 11,520,000 bytes of PCM.
+FFmpeg's encoder coded some frames with a side channel, which needs 17 bits a sample, so PCM widened by one frame undercounts a FLAC encode.
 
 *Why a prefetch doesn't relocate:* ADR 0019 rejected a relocation gap of one segment because the server would then relocate whenever a player requests the next segment while the running attempt still produces the current one.
 Counting slots alone brought that failure back for a merged segment: a request for the segment after a held 60 s segment lies 20 slots past the producer's output, so it relocated past the held segment, and the newest-request rule then answered the held request `503`.

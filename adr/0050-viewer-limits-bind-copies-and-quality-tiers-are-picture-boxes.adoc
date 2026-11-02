@@ -508,13 +508,19 @@ A downmix of a 5.1 track to AAC's 4-channel default, `4.0`, merges its surround 
 ADR 0032's evidence holds the measurements (link:0032-media-file-probe-results-are-persisted.adoc#evidence-channel-layout[ADR 0032]).
 
 [[decision-downmix]]
-=== Every downmix uses a named matrix, and a limiter keeps it below full scale
+=== Every downmix uses a named matrix, and a limiter keeps the channels that it sums below their ceiling
 
-A downmix is an audio encode whose output layout lacks a channel of the source track's layout, so that the encode mixes source channels together.
+A downmix is an audio encode whose output layout lacks a channel of the source track's layout, so that the encode mixes source channels together or leaves one out.
+A side pair and a back pair are one surround pair.
+An encode that only renames that pair, such as `5.1(side)` to `5.1` or `6.1` to `6.1(back)`, is not a downmix.
+It writes each channel unchanged, with no matrix and no limiter.
+An encode that writes every decoded sample unchanged runs no filter except sample-format packing.
+
 Every downmix uses the matrix below instead of FFmpeg's default.
 That includes the stereo and mono steps, the stereo encode of a 3- or 4-channel layout that the target codec cannot carry, and every encode that a channel maximum caps.
-It also includes an encode to 5.1 of a 7.1 track, such as AC-3 or E-AC-3 5.1 or the AAC 5.1 step, an encode to 5.0 under a channel maximum of 5, and an encode of the same channel count that changes the layout, such as `6.0` to 5.1.
-The worker converts the decoded audio to floating point (`aformat=sample_fmts=fltp`), applies the matrix with FFmpeg's `pan` filter, then FFmpeg's `alimiter`, before the encoder.
+It also includes an encode to 5.1 of a 7.1 or `6.1` track, such as AC-3 or E-AC-3 5.1 or the AAC 5.1 step, an encode to 5.0 under a channel maximum of 5, and an encode of the same channel count that changes the layout, such as `6.0` to 5.1.
+The worker converts the decoded audio to floating point (`aformat=sample_fmts=fltp`), applies the matrix with FFmpeg's `pan` filter, and then limits the channels that the matrix sums, before the encoder.
+A downmix of an AC-3 or E-AC-3 track mixes the samples of ADR 0043's decode, which applies no dynamic range compression and applies the track's dialogue normalization, as a hardware decoder does for the copy.
 
 The stereo matrix follows ITU-R BS.775's 2/0 equations at ATSC A/52's default levels:
 
@@ -526,6 +532,13 @@ A back centre mixes into LS and RS at 0.7071.
 * The low-frequency channel mixes into left and right at 0.7071 only when the source has no surround channel, as in `2.1` and `3.1`.
 A source with surrounds, such as 5.1 or 7.1, leaves it out.
 * Mono is 0.7071 × (left + right), which is BS.775's mono equation for a 3/2 source.
+
+For an AC-3 or E-AC-3 track, the levels that the track signals for a Lo/Ro downmix replace A/52's defaults in the stereo and mono matrix.
+The signalled centre level replaces 0.7071 on the centre, and the signalled surround level replaces 0.7071 on each surround channel.
+The levels are `lorocmixlev` and `lorosurmixlev` when the track carries them, and otherwise `cmixlev` and `surmixlev`.
+FFmpeg's decoder exports them as downmix side data on every decoded frame, so they need no probe fact.
+The worker reads them from the track's first frame, so every job attempt of a stream session uses the same matrix.
+The stereo is always Lo/Ro, never Lt/Rt, even when the track names Lt/Rt as its preferred downmix.
 
 A downmix to 5.1 or 5.0, such as 7.1 to 5.1, 5.1 to 5.0 or `6.0` to 5.1, keeps the front channels and the centre, and its surround pair is LS and RS as defined above, whichever pair the output layout names.
 A downmix to 5.1 keeps the low-frequency channel, and a downmix to 5.0 leaves it out.
@@ -540,8 +553,21 @@ FFmpeg reads a stream with an unknown layout, such as PCM in Matroska, as its de
 
 The matrix is not normalized.
 The sum stays in floating point until the limiter, so a 16-bit or 24-bit source cannot clip inside `pan`.
-The limiter holds a stereo or mono downmix at or below −3 dBFS, and a downmix to more than two channels at or below −1 dBFS.
-It looks ahead 5 ms, releases over 50 ms, adds no make-up gain (`level=0`) and removes its own delay (`latency=1`), so the audio keeps its timing.
+
+A downmix that only leaves channels out, such as 5.1 to 5.0, has no limiter.
+In every other downmix, the limiter acts only on the output channels that sum two or more source channels, and every other channel passes through unchanged.
+It links the two channels of a left-right pair, so the pair keeps its image, and it limits a centre or mono output on its own.
+A 7.1 to 5.1 downmix therefore limits only its surround pair, and a stereo downmix limits its pair.
+The worker splits the summed channels out with FFmpeg's `channelsplit`, limits them, and joins them back with `join`.
+
+The ceiling depends on the codec that writes the downmix:
+
+* FLAC or ALAC: −1 dBTP, a true-peak ceiling.
+The worker resamples the summed channels to four times their sample rate, applies `alimiter` at −1 dBFS, and resamples them back.
+* A lossy codec, in a stereo or mono downmix: −3 dBFS sample peak.
+* A lossy codec, in a downmix to more than two channels: −1 dBFS sample peak.
+
+Every limiter looks ahead 5 ms, releases over 50 ms, adds no make-up gain (`level=0`) and removes its own delay (`latency=1`), so the audio keeps its timing.
 Below the ceiling, it changes nothing.
 A worker that does not list probe version 7 downmixes with FFmpeg's default, as before.
 
@@ -554,8 +580,36 @@ FLAC and ALAC take integer samples, so their downmix was normalized, and the cen
 That is A/52's worst-case scaling of 1/2.414, which protects a sum that only a loud scene reaches by turning every scene down.
 Jellyfin's default adds `volume=2` to `-ac 2`, which lifts the centre to +3 dB but put 33 % of a loud scene's samples over full scale.
 An unnormalized matrix keeps dialogue at −3 dB in every codec, and the limiter acts only on the peaks that would go over.
-The −3 dBFS ceiling leaves room for AAC's coding overshoot at 128 kb/s and above.
-A downmix to more than two channels keeps the source's front channels, so its ceiling of −1 dBFS leaves their peaks up to −1 dBFS alone.
+
+FFmpeg's decoders name the surround pair of TrueHD, DTS-HD MA and AC-3 as a side pair, while the AAC and Opus encoders name a back pair.
+Counting that rename as a downmix ran `pan` and the limiter on every such encode, which a rename does not need.
+On 60 s of Tears of Steel 5.1, a 24-bit master with a back pair that peaks at 0 dBFS, FLAC's `5.1(side)` alone kept every sample, while the limited path changed 4.5 % of them, by up to −19.3 dBFS.
+Jellyfin adds a filter only when it reduces more than two channels to two.
+
+`alimiter` links every channel that it receives.
+With one channel at 0 dBFS and another at −20 dBFS, the second came out at −23 dBFS.
+On Tears of Steel, a 5.1 to 5.0 downmix that sums nothing still drew a linked limiter at −1 dBFS, which turned 239,307 centre samples between −30 and −6 dBFS down by more than 0.5 dB.
+Dialogue then ducked under peaks in other channels.
+Limiting only the summed channels leaves the centre alone in every downmix to more than two channels.
+
+`alimiter` detects sample peaks only, so its −3 dBFS stereo output of Tears of Steel still reached −0.1 dBTP.
+FLAC and ALAC add no coding overshoot, so a downmix that they write needs only a true-peak margin.
+On Tears of Steel's 734 s stereo downmix, the oversampled limiter at −1 dBTP turned the mix down by more than 1 dB for 4.8 % of the programme, against 8.7 % for the −3 dBFS sample-peak limiter, and its output peaked at −0.9 dBTP.
+A lossy codec overshoots after decoding, and the −3 dBFS margin absorbs that in stereo.
+From the −1 dBTP limiter, the decoded output went over full scale in 15 samples for AAC at 128 kb/s, 2 for AC-3 and 4 for E-AC-3 at 192 kb/s, and 303 for Opus at 128 kb/s; from −3 dBFS, none did.
+A downmix to more than two channels that a lossy codec writes keeps −1 dBFS on its summed pair.
+In a 7.1 to 5.1 downmix built from Tears of Steel, only the worst case, two identical surround pairs, went over full scale after encoding: 4 samples in AAC 5.1 at 320 kb/s.
+The untouched front channels of the same encodes went over by 91 to 746 samples, because the source itself peaks at 0 dBFS.
+A −3 dBFS ceiling would turn the surround pair down more often to remove a small part of the overshoot that the coding of the other channels already adds.
+The release stays at 50 ms, so the mix recovers within 50 ms of a peak instead of about half a second; its cost on a loud bass line is in the consequences.
+
+A/52 lets a mixer signal the centre and surround levels of a stereo downmix, and Dolby's hardware decoders apply them.
+FATE's Monsters, Inc. AC-3 sample signals its surrounds at 0.5 (−6 dB), and The Great Wall's E-AC-3 sample signals its centre at 0.595 (−4.5 dB) and its surrounds at 0.5.
+A/52's defaults would play those surrounds 3 dB and that centre 1.5 dB louder than the mixer chose.
+Lo/Ro is the stereo that plays correctly on two speakers and folds safely to mono.
+Lt/Rt encodes the surrounds in opposite phase for a matrix decoder such as Pro Logic, so their content cancels in mono.
+Jellyfin's fixed matrices and Plezy's downmix ignore the signalled levels.
+A hardware decoder that receives the copy turns it down by 31 dB less the track's dialogue level, so a downmix of the decoded track would otherwise play louder than the copy, and the level would jump when a step turns the copy into an encode.
 With a side pair and a back pair, FFmpeg's default keeps one pair at 0 dB and mixes the other in at −3 dB, so a sound that pans between them changes level.
 Mixing both at 0.7071 keeps the power of the four surrounds.
 BS.775 says that a two-channel downmix often leaves out the low-frequency channel and that the main channels must carry every essential part of the programme.
@@ -629,11 +683,9 @@ https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-ser
 * This ADR does not decide whether a client's playback details show that the server lowered the audio.
 The multivariant playlist already names the delivered audio codec and channel count.
 * This ADR does not add a night mode, a dialogue boost or other dynamic range compression for the viewer to turn on.
+The worker's decode of an AC-3 or E-AC-3 track applies none of the track's own compression (ADR 0043).
 Jellyfin's optional night-mode downmix and Plezy's centre boost setting do this.
 It is the viewer's choice, not a property of a correct downmix, so it needs a client setting and its own decision.
-* This ADR does not read the centre and surround mix levels that an AC-3 or E-AC-3 track signals.
-The matrix uses A/52's default code of −3 dB for both.
-Reading them would add a probe fact.
 
 == Consequences
 
@@ -686,13 +738,25 @@ Below 209 kb/s, the stream exceeds the maximum bitrate rather than not playing a
 A copied AAC `quad` or `2.1` track, and any 3- or 4-channel track whose layout the probe does not record, steps to stereo.
 * No AAC output carries channel configuration 0, so Chromium plays every AAC rendition that the server encodes.
 * A track with more channels than a capability entry's channel maximum of 3 or 4 plays in stereo, not in a 3- or 4-channel downmix.
-* A downmix keeps dialogue at −3 dB on each side in every codec, and a `2.1` or `3.1` track keeps its low-frequency channel in stereo.
+* A downmix keeps dialogue at −3 dB on each side in every codec, or at the level that an AC-3 or E-AC-3 track signals, and a `2.1` or `3.1` track keeps its low-frequency channel in stereo.
 A 5.1 or 7.1 track still leaves its low-frequency channel out of stereo.
-* When a loud scene's stereo sum passes −3 dBFS, the limiter lowers the whole mix, dialogue included.
+* An encode that only renames a surround pair keeps every sample, so a TrueHD, DTS-HD MA or AC-3 5.1 track reaches AAC's or Opus's `5.1` without a filter.
+* A downmix that only leaves channels out, such as 5.1 to 5.0, is never limited.
+In a 7.1 to 5.1 downmix, the limiter can briefly turn the surround pair down, which shifts the rear image while the front channels and the centre stay unchanged.
+* When a loud scene's stereo sum passes the ceiling, the limiter lowers both channels, dialogue included.
 In the synthetic loud scene of <<evidence-downmix>>, the centre fell from −3.0 dB to −7.3 dB while the limiter held the peaks.
-* A stereo downmix peaks 3 dB below full scale, so it plays up to 3 dB quieter than an unlimited mix in its loudest moments.
-* AAC at 64 kb/s can still go slightly over full scale after decoding: 12 of 1.92 million samples in the loud scene.
-* Every job that encodes audio names a layout, and a job that names a 3- or 4-channel layout needs a worker that lists probe version 7 (ADR 0032).
+* A lossy stereo downmix peaks 3 dB below full scale, so it plays up to 3 dB quieter than an unlimited mix in its loudest moments.
+* A stereo downmix that FLAC or ALAC writes plays about 1 dB louder than the AAC downmix of the same track: −14.5 against −15.4 LUFS on Tears of Steel.
+An audio step from a FLAC downmix to AAC therefore lowers the level by about 1 dB.
+* The oversampled limiter costs CPU.
+On Tears of Steel's 734 s, decoding, downmixing and limiting to stereo took 10.2 s of CPU with it, against 4.8 s with the sample-peak limiter, and finished in 6.2 s.
+* While the limiter acts on a loud bass line, its 50 ms release modulates the mix at the bass frequency.
+A 40 Hz line at −1 dBFS in a stereo downmix put sidebands at −39.6 dBc around 1 kHz dialogue; a 500 ms release would lower them to −58.4 dBc.
+* A lossy encode can still go slightly over full scale after decoding.
+AAC at 64 kb/s did so in 12 of 1.92 million samples of the synthetic loud scene, and AAC 5.1 at 320 kb/s in 4 samples of the folded surround pair of a worst-case 7.1 to 5.1 downmix.
+* An AAC encode of a track of 7 or more channels plays 5.1, so the track's second surround pair folds into the first.
+* An AC-3 or E-AC-3 step of a `3.0(back)` or `3.1` track plays in stereo until a check on hardware passes.
+* Every job that encodes audio names a layout, and a job that names a layout of 3, 4, 7 or 8 channels needs a worker that lists probe version 7 (ADR 0032).
 Until the server stores a file's probe version 7 outcome, that file's 3- and 4-channel tracks step to stereo.
 * A track larger than the default track decides the audio step for the whole stream session.
 A copied AAC stereo default track at 128 kb/s beside a copied AAC 5.1 track at 384 kb/s costs 384 kb/s.
@@ -773,7 +837,17 @@ In the loud scene, 33 % of the samples went over full scale, and the AAC output'
 That choice belongs to the deferred viewer setting.
 * FFmpeg's `loudnorm` changes the programme's loudness over time, and its linear mode needs a first pass over the whole file.
 * FFmpeg's default matrix for layouts with height channels gives the top-back channels no coefficient, so sound only in them goes silent in stereo.
-* One limiter ceiling for every downmix would either let AAC's overshoot go over full scale in stereo or limit the untouched front channels of a multichannel downmix by 3 dB.
+* One limiter ceiling for every downmix would either let a lossy codec's overshoot go over full scale in stereo or limit a FLAC or ALAC downmix more than it needs.
+* Counting a renamed surround pair as a downmix runs the matrix and the limiter on every TrueHD, DTS-HD MA and AC-3 5.1 encode, which changes samples that the rename alone keeps.
+* One limiter linked across every channel ducks dialogue for peaks in channels that the matrix never sums.
+* A −3 dBFS sample-peak ceiling for a FLAC or ALAC downmix limits about twice as often as a −1 dBTP true-peak ceiling and still lets true peaks reach −0.1 dBTP.
+* A −1 dBTP ceiling for a lossy stereo downmix lets decoded AAC, AC-3, E-AC-3 and Opus go over full scale.
+* A −3 dBFS ceiling for a lossy downmix to more than two channels turns the summed pair down more often to remove 4 overshooting samples in the worst case measured, while the untouched channels of the same encodes overshoot by 91 to 746.
+* A 500 ms release lowers the bass sidebands from −39.6 to −58.4 dBc, but holds the mix down for about half a second after each peak.
+* A/52's default levels for every AC-3 or E-AC-3 track override the centre and surround levels that the track's mixer chose.
+* An Lt/Rt stereo downmix encodes the surrounds in opposite phase, which cancels in mono and needs a matrix decoder to play as intended.
+* Encoding AAC 7.1 writes channel configuration 7, which AVFoundation plays as front-wide 7.1, with the side surrounds from the front speakers.
+* Carrying AC-3 and E-AC-3 `3.0(back)` and `3.1` now would misplace their channels on AVFoundation.
 
 [[evidence-downmix]]
 == Evidence: downmix
@@ -812,13 +886,74 @@ With `aformat=sample_fmts=fltp` first, the third harmonic stayed at −103 dBc a
 * A `2.1` source with a 50 Hz tone at −20 dBFS peak in its low-frequency channel gave silence with FFmpeg's default and with Jellyfin's default, and −23.0 dBFS (−3.0 dB) on each side with the named matrix.
 FFmpeg's default `lfe_mix_level` is 0.
 * The limiter's ceiling decided whether the decoded output went over full scale in the loud 5.1 scene:
-** At −1 dBFS: AAC went over by 1,095 samples at 64 kb/s, 25 at 128 kb/s and 10 at 192 kb/s; AC-3 and E-AC-3 at 192 kb/s did not.
+** At −1 dBFS: AAC went over by 1,095 samples at 64 kb/s, 25 at 128 kb/s and 10 at 192 kb/s; AC-3 and E-AC-3 at 192 kb/s did not in this synthetic scene, but did on film audio (<<evidence-downmix-film>>).
 ** At −2 dBFS: AAC went over by 66 samples at 64 kb/s and 16 at 128 kb/s.
 ** At −3 dBFS: AAC went over by 12 samples at 64 kb/s and by none at 128 or 192 kb/s; AC-3 and E-AC-3 did not.
 * A 7.1 source with a tone only in the left side channel, then only in the left back channel, gave −20 dBFS and −23 dBFS in the left surround of FFmpeg's default `5.1(side)`, and the reverse in its default `5.1`.
 The named fold gave −23 dBFS for both.
 * A 5.1 source with a tone only in its low-frequency channel gave silence in FFmpeg's default 5.0 and stereo.
 * The pinned image's `ffmpeg -filters` lists `pan` and `alimiter`.
+
+[[evidence-downmix-film]]
+== Evidence: downmix on film audio
+
+These measurements ran on 2026-11-01 against FFmpeg 8.1.3 in the pinned worker image.
+The sources were two Creative Commons masters from Xiph: Tears of Steel 5.1 (734 s, 24-bit, 48 kHz, layout `5.1`, every channel peaking at 0 dBFS) and the first 360 s of Sintel 5.1 (16-bit).
+Integrated loudness and true peaks come from FFmpeg's `ebur128` filter.
+Each limiter looked ahead 5 ms and released over 50 ms.
+
+* Renaming against downmixing, on the first 60 s of Tears of Steel as 24-bit PCM:
+** FLAC with `-ch_layout 5.1(side)` and no filter kept all 17,280,000 samples.
+** PCM with `-ch_layout 5.1`, decoded from that FLAC, kept every sample too.
+** `aformat`, `pan` to `5.1(side)` and a linked `alimiter` at −1 dBFS changed 777,385 samples (4.50 %), by up to −19.3 dBFS.
+* A linked limiter at −1 dBFS on Tears of Steel's 5.1 to 5.0 downmix, which sums nothing, turned the mix down by up to 1.0 dB and by more than 0.5 dB for 15.1 s.
+It turned 239,307 of 3,210,044 centre samples between −30 and −6 dBFS down by more than 0.5 dB.
+* `alimiter` at −3 dBFS, given a 1 kHz tone at 0 dBFS in one channel and a 300 Hz tone at −20 dBFS in the other, gave peaks of −3.0 and −23.0 dBFS.
+* Tears of Steel's stereo downmix, unlimited, measured −13.3 LUFS and a +6.3 dBFS sample peak.
+Limited:
+
+|===
+| Limiter | Turned down by more than 1 dB | Largest reduction | Integrated loudness | Sample peak | True peak | CPU
+
+| −3 dBFS, sample peak | 64.2 s (8.7 %) | 9.3 dB | −15.4 LUFS | −3.0 dBFS | −0.1 dBTP | 4.8 s
+| −1 dBTP, 4× oversampled | 35.6 s (4.8 %) | 7.3 dB | −14.5 LUFS | −1.0 dBFS | −0.9 dBTP | 10.2 s
+|===
+
+CPU is FFmpeg's user time to decode, downmix and limit the 734 s on the Docker host; without a limiter it was 4.2 s.
+
+* Those two stereo downmixes, encoded and decoded back to floating point, went over full scale in this many samples:
+
+|===
+| Limiter | AAC 128 kb/s | AC-3 192 kb/s | E-AC-3 192 kb/s | Opus 128 kb/s
+
+| −3 dBFS, sample peak | 0 | 0 | 0 | 0
+| −1 dBTP, 4× oversampled | 15 (+1.45 dBFS) | 2 (+0.09 dBFS) | 4 (+0.25 dBFS) | 303 (+1.02 dBFS)
+|===
+
+* A 7.1 to 5.1 downmix of 360 s took Tears of Steel's front channels, centre, low-frequency channel and surround pair, the last as the back pair.
+Its side pair was either the same surround pair, the worst case for the fold, or Sintel's surround pair.
+The matrix folded each side's two surrounds at 0.7071, and a limiter linked across the folded pair alone acted on it.
+The front channels, centre and low-frequency channel came out identical to the source.
+Encoded at each lossy codec's lowest multichannel step and decoded back, the folded pair went over full scale in this many samples, with its peak:
+
+|===
+| Side pair, ceiling | AAC 5.1 320 kb/s | AC-3 5.1 384 kb/s | E-AC-3 5.1 384 kb/s | Opus 5.1 256 kb/s
+
+| Same pair, −1 dBFS | 4 (+0.40 dBFS) | 0 (−0.34 dBFS) | 0 (−0.09 dBFS) | 0 (−0.08 dBFS)
+| Same pair, −3 dBFS | 0 | 0 | 0 | –
+| Sintel's pair, −1 dBFS | 0 | 0 | 0 | 0
+| Sintel's pair, −3 dBFS | 0 | 0 | 0 | –
+|===
+
+The untouched front three channels of the same encodes went over by 91 to 103 samples in AAC, 213 to 232 in AC-3, 402 to 422 in E-AC-3 and 678 to 746 in Opus, with peaks up to +2.19 dBFS.
+Opus ran with `-mapping_family 1`.
+* A `5.1(side)` test file with a 40 Hz tone at −1 dBFS in both front channels and a 1 kHz tone at −20 dBFS in the centre, downmixed to stereo and limited at −3 dBFS, put sidebands at 1 kHz ± 40 and 80 Hz at −39.6 dBc with a 50 ms release and −58.4 dBc with 500 ms.
+* FFmpeg's `ashowinfo` printed these downmix levels from the first decoded frame of FATE samples:
+** `ac3/monsters_inc_5.1_448_small.ac3`: centre 0.707, surround 0.500;
+** `eac3/the_great_wall_7.1.eac3`: centre 0.595, surround 0.500;
+** `eac3/csi_miami_5.1_256_spx_small.eac3`: centre 0.707, surround 0.707, preferred downmix Lt/Rt;
+** `ac3/millers_crossing_4.0.ac3`: centre 0.707, surround 0.707.
+* Decoded with `-drc_scale 0`, `-target_level -31` lowered the overall RMS level of Miller's Crossing's AC-3 by 4.0 dB and CSI Miami's E-AC-3 by 5.0 dB, and left The Great Wall's E-AC-3 unchanged.
 
 == References
 
@@ -841,4 +976,5 @@ The named fold gave −23 dBFS for both.
 * https://www.itu.int/rec/R-REC-BS.775-4-202212-I/en[ITU-R BS.775-4: Multichannel stereophonic sound system with and without accompanying picture], Annex 4 for the downmix equations and the section on the low-frequency channel
 * https://github.com/FFmpeg/FFmpeg/blob/n8.1.3/libswresample/rematrix.c[FFmpeg 8.1.3's `rematrix.c`] builds the default matrix and normalizes it only for integer sample formats.
 * https://ffmpeg.org/ffmpeg-filters.html#alimiter[FFmpeg's `alimiter` filter]
+* Xiph's Creative Commons masters: https://media.xiph.org/tearsofsteel/tearsofsteel-surround.flac[Tears of Steel 5.1] and https://media.xiph.org/sintel/sintel-master-51.flac[Sintel 5.1]
 * https://github.com/jellyfin/jellyfin/blob/ed211765c2ebbb3f5093f67596c267058c6a4124/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs[Jellyfin's `EncodingHelper`] adds a `volume` filter to a stereo downmix at the gain that https://github.com/jellyfin/jellyfin/blob/ed211765c2ebbb3f5093f67596c267058c6a4124/MediaBrowser.Model/Configuration/EncodingOptions.cs[`EncodingOptions`] sets to 2 by default, and https://github.com/jellyfin/jellyfin/blob/ed211765c2ebbb3f5093f67596c267058c6a4124/MediaBrowser.Controller/MediaEncoding/DownMixAlgorithmsHelper.cs[`DownMixAlgorithmsHelper`] holds its optional matrices.

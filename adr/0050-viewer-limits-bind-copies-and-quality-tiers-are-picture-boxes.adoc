@@ -131,9 +131,9 @@ When the probe knows the copied video's bitrate but not a copied audio track's, 
 
 When the probe does not know the copied video's bitrate, the container bitrate stands in for the video.
 The container bitrate is the bitrate that the probe reports for the whole source file.
-When the largest audio rendition is a copy of a source track, the video copy costs the container bitrate alone.
-The container already holds that track.
-When the largest audio rendition is an encode, the video copy costs the container bitrate plus that encode's bitrate.
+When every audio rendition is a copy of a source track, the video copy costs the container bitrate alone.
+The container already holds those tracks.
+When any audio rendition is an encode, the video copy costs the container bitrate plus the bitrate of the largest encoded rendition.
 
 When the copy's cost is over the maximum bitrate, the server lowers the audio first (<<decision-audio-steps>>).
 It takes the first audio step at which the copy's cost is at or below the maximum bitrate.
@@ -471,10 +471,10 @@ ADR 0032's evidence holds the measurements (link:0032-media-file-probe-results-a
 [[decision-downmix]]
 === Every downmix uses a named matrix, and a limiter keeps it below full scale
 
-A downmix is an audio encode whose output layout has fewer channels than the source track.
+A downmix is an audio encode whose output layout lacks a channel of the source track's layout, so that the encode mixes source channels together.
 Every downmix uses the matrix below instead of FFmpeg's default.
 That includes the stereo and mono steps, the stereo encode of a 3- or 4-channel layout that the target codec cannot carry, and every encode that a channel maximum caps.
-It also includes an encode to 5.1 of a 7.1 track, such as AC-3 or E-AC-3 5.1 or the AAC 5.1 step, and an encode to 5.0 under a channel maximum of 5.
+It also includes an encode to 5.1 of a 7.1 track, such as AC-3 or E-AC-3 5.1 or the AAC 5.1 step, an encode to 5.0 under a channel maximum of 5, and an encode of the same channel count that changes the layout, such as `6.0` to 5.1.
 The worker converts the decoded audio to floating point (`aformat=sample_fmts=fltp`), applies the matrix with FFmpeg's `pan` filter, then FFmpeg's `alimiter`, before the encoder.
 
 The stereo matrix follows ITU-R BS.775's 2/0 equations at ATSC A/52's default levels:
@@ -488,13 +488,15 @@ A back centre mixes into LS and RS at 0.7071.
 A source with surrounds, such as 5.1 or 7.1, leaves it out.
 * Mono is 0.7071 × (left + right), which is BS.775's mono equation for a 3/2 source.
 
-An encode to 5.1 of a 7.1 track keeps the front channels and the low-frequency channel, and mixes each side's two surrounds at 0.7071 each.
-An encode to 5.0 does the same and leaves out the low-frequency channel.
+An encode to 5.1 or 5.0 keeps the front channels and the centre, and its surround pair is LS and RS as defined above.
+An encode to 5.1 keeps the low-frequency channel, and an encode to 5.0 leaves it out.
 
-The matrix places every channel of a layout built from front, centre, low-frequency, side, back and back-centre channels, such as `2.1`, `3.0(back)`, `3.1`, `4.0`, `quad`, `5.0`, `5.1(side)`, `6.1` and `7.1`.
-Those layouts count as layouts that this ADR names (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032]).
-Any other layout that FFmpeg names, such as `7.1(wide)` or a layout with height channels, downmixes with FFmpeg's default matrix, which keeps each channel's position, then the same limiter.
-FFmpeg reads a stream with an unknown layout, such as PCM in Matroska, as its default layout for the channel count, which is how `-ac` treats it, and the matrix above applies to that layout.
+Every other channel that FFmpeg names folds at 0.7071 into the nearest channel of these rules on its own side.
+A wide, front-of-centre or top-front channel folds into the front channel, and a top-side, top-back or surround-direct channel folds into the surround.
+A channel on the centre line, such as top centre or top back centre, folds into that pair at 0.5 on each side.
+A second low-frequency channel follows the rule for the low-frequency channel.
+Every layout that FFmpeg names therefore counts as a layout that this ADR names for a downmix (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032]).
+FFmpeg reads a stream with an unknown layout, such as PCM in Matroska, as its default layout for the channel count, which is how `-ac` treats it, and the matrix applies to that layout.
 
 The matrix is not normalized.
 The sum stays in floating point until the limiter, so a 16-bit or 24-bit source cannot clip inside `pan`.
@@ -614,7 +616,7 @@ The container bitrate also holds the source's tracks that the session does not d
 When the session encodes its audio, the container bitrate also holds the source track that the encode replaces.
 The server can then lower the audio or encode the video for a source that would fit.
 The over-count lasts until the probe measures each stream's own bitrate.
-* When the probe does not know the copied video's bitrate and the largest audio rendition is a copy, no audio step lowers the copy's cost.
+* When the probe does not know the copied video's bitrate and every audio rendition is a copy, no audio step lowers the copy's cost.
 Every encoded step adds its bitrate to the container bitrate.
 In Auto and in a fixed quality, a copy whose container bitrate is over the maximum bitrate therefore encodes its video, unless the source cannot be encoded or the server has nothing to encode it to.
 * The server learns of a turned window or screen at the next stream session.
@@ -730,6 +732,7 @@ In the loud scene, 33 % of the samples went over full scale, and the AAC output'
 * A centre above −3 dB, or Jellyfin's Dave750 or night-mode matrix, by default changes the balance of the mix for every viewer.
 That choice belongs to the deferred viewer setting.
 * FFmpeg's `loudnorm` changes the programme's loudness over time, and its linear mode needs a first pass over the whole file.
+* FFmpeg's default matrix for layouts with height channels gives the top-back channels no coefficient, so sound only in them goes silent in stereo.
 * One limiter ceiling for every downmix would either let AAC's overshoot go over full scale in stereo or limit the untouched front channels of a 5.1 encode by 3 dB.
 
 [[evidence-downmix]]

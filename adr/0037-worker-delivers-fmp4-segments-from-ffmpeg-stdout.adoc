@@ -386,7 +386,8 @@ That format attempt counts against the playback session's format-attempt budget,
 A producer of a long merged segment is not taken for stalled while its output advances.
 Once a second, the worker reports the media time that a job attempt's output has reached, whenever that time has advanced since its previous report for the attempt.
 That time is the end of the latest video sample that the producer has read from FFmpeg's output, whether or not the segment that holds it has closed.
-Each report that advances the output restarts the server's stall clock, as a publication does (link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]).
+While a held encode searches for the video's last keyframe (<<decision-early-ends>>), the report carries the bytes of source that the search has read instead.
+Each report that advances the output or the search restarts the server's stall clock, as a publication does (link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]).
 Each chunk of a media segment upload that the server receives from the attempt restarts it too.
 While a large segment uploads, the producer's budget can hold back FFmpeg, so the output doesn't advance, but the upload's bytes do, and the worker's acknowledgment deadline still bounds the upload (<<decision-waits>>).
 So an encode that runs below real time keeps its producer through a merged segment of any length while FFmpeg's output advances.
@@ -970,9 +971,12 @@ So an attempt that starts past the video's end still decodes the last picture, e
 Until an index-less source's keyframe scan finishes, the server stores no keyframe for it and sends the fixed read-back instead (<<decision-seek>>).
 A read-back past the video's last keyframe decodes no picture, whether it lies past the video's last frame or between that frame and the last keyframe.
 The held encode then finds the last keyframe itself, inside the same attempt.
-It reads the video's packets, without decoding them, from points before the read-back at twice the distance each time, the read-back's own distance first, until it finds a keyframe before the read-back.
-It then narrows the interval by halves to the last such keyframe, and reads from there.
-Each step reads packets only up to the first keyframe after its point, so the search costs a few short reads, not a pass over the file.
+It reads the video's packets, without decoding them, over intervals that run back from the read-back, each twice as long as the one after it, the first one read-back distance long.
+Each step reads only its own interval, and the search stops at the first interval that holds a keyframe: the last keyframe in that interval is the video's last keyframe.
+The search then goes on the same way to the last keyframe at least 0.5 s before that one, or the video's first keyframe when none lies that far back, and the attempt reads from there.
+So the deinterlacer sees the same history before the held picture as in an attempt that read from a stored keyframe.
+The search reads at most about twice the source that lies between that keyframe and the read-back, which a long tail without video can make large on slow storage.
+The worker therefore reports the bytes that the search has read as progress, and each report that advances them restarts the server's stall clock, as advancing output does.
 The attempt then decodes the last picture and holds it, and it reports the video's end time like any attempt that read the video's last sample.
 Only a video with no keyframe before the read-back fails the attempt, as a transcode failure.
 
@@ -1435,6 +1439,8 @@ A 1080p seek's first segment then took about 5.0 s to complete instead of about 
 A keyframe scan does not run during playback (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]), so the replacement budget can run out first, and recovery exhausted is final for the held request.
 * Running the source's keyframe scan on demand and holding the request until it publishes reads the whole file, which can take tens of seconds, while the viewer waits, and breaks ADR 0032's rule that no scan runs beside a job attempt.
 * Stepping the read-back back by its own distance in each replacement attempt spends one failed attempt per step, so a resume far past the video's end exhausts the replacement budget.
+* Reading from the last keyframe that the search finds, without the 0.5 s of history, gave a deinterlacer no frame before a last picture that is itself a keyframe, so the held picture could differ from the one that an attempt from a stored keyframe holds.
+* Letting the search run without a progress report leaves it to the startup budget, which a long tail without video on slow storage can outlast, and every replacement would repeat the same search.
 * The held encode's search for the last keyframe does not reopen the rejected worker-computed read-back above, because it reads from keyframes that the worker finds in the source.
 The read-back therefore serves only until an index-less file's keyframe scan finishes.
 * Handling stream sessions whose attempts run on different worker versions, by adding the worker version to the affinity key or a recipe version to the worker's capabilities, handles a case that cannot occur while Streamarr has no production instances.

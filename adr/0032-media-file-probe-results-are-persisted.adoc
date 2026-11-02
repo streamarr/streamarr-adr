@@ -57,8 +57,8 @@ Probe version 6 also reports, for each H.264 and HEVC video stream, whether a co
 Playback keeps using each file's probe version 5 outcome until the server stores the file's probe version 6 outcome.
 
 Another amendment adds probe version 7 (<<probe-version-7>>).
-Probe version 7 reports each audio stream's channel layout, as ffprobe names it.
-It also reports seven dispositions of each audio stream, such as commentary and audio description, which name a track for the viewer.
+Probe version 7 reports each audio stream's channel layout, as ffprobe names it, and its sample format and bit depth.
+It also reports seven dispositions of each audio stream, such as commentary and audio description, which name a track for the viewer, and the commentary disposition of each subtitle stream.
 The server names an encode's output channel layout from that fact, as link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc#decision-channel-layout[ADR 0050] decides.
 The server sends a job that names a layout of 3, 4, 7 or 8 channels only to a worker that lists probe version 7.
 Playback keeps using each file's probe version 6 outcome until the server stores the file's probe version 7 outcome.
@@ -132,7 +132,7 @@ The row also stores the language and the default and forced flags.
 Probe version 4 adds the stream facts listed in <<probe-version-4,the probe version 4 section>>.
 Probe version 4 also reports the container's chapters.
 Probe version 5 adds the stream facts listed in <<probe-version-5,the probe version 5 section>>.
-Probe version 7 adds each audio stream's channel layout (<<probe-version-7>>).
+Probe version 7 adds each audio stream's channel layout, sample format, bit depth and seven dispositions, and each subtitle stream's commentary disposition (<<probe-version-7>>).
 The database stores no `MediaFileProbePropertyIssue`.
 The server derives each issue from the stored facts, as ADR 0036 decides.
 https://github.com/streamarr/streamarr-server/issues/546[streamarr/streamarr-server#546] decides how the server stores the chapters.
@@ -542,7 +542,7 @@ Unlike the start time correction (<<probe-version-8>>), the copy fact never chan
 While worker versions differ, the server accepts that a copy on an older worker can cost and peak above the measured values, by whatever the filter repeats before each keyframe for that source.
 
 [[probe-version-7]]
-=== Probe version 7 reports each audio stream's channel layout and the dispositions that name it
+=== Probe version 7 reports each audio stream's channel layout, bit depth and the dispositions that name it
 
 Probe version 7 reports every fact of probe version 6.
 https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] decides why the server needs the layout.
@@ -553,6 +553,13 @@ When ffprobe prints `unknown`, the stream reports no layout.
 ffprobe prints `unknown` when the stream gives a channel count but no channel order, such as PCM in Matroska.
 Video and subtitle streams report no layout.
 The channel count stays a separate fact, so a stream without a layout still reports its channels.
+
+Probe version 7 also reports each audio stream's sample format and bit depth.
+The sample format is the name that ffprobe prints in the stream's `sample_fmt` field, such as `s16`, `s32p` or `fltp`.
+The bit depth is ffprobe's `bits_per_raw_sample`, or else its `bits_per_sample`, or else unknown.
+A value of 0 or `N/A` counts as absent.
+The worker never maps either value.
+link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043] decides how an encode uses them.
 
 Probe version 7 also reports seven of ffprobe's dispositions on each audio stream, as true or false:
 
@@ -570,6 +577,7 @@ False means only that ffprobe reports no such disposition.
 The server stores each flag with the stream.
 link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043] decides how the server names a rendition from them.
 The probe reports no other audio disposition.
+It also reports the `comment` disposition of each subtitle stream, as true or false, in the same way.
 
 The server stores the layout with the stream.
 The server compares the stored name with the layouts that link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc#decision-channel-layout[ADR 0050] names, and parses nothing else from it.
@@ -590,6 +598,7 @@ On the upgrade, the server queues a re-scan itself, as <<upgrade-rescan,the sect
 Playback keeps using each file's probe version 6 outcome until the server stores the file's probe version 7 outcome.
 A probe version 6 outcome carries no layout, so each of its audio streams has an unknown layout.
 It carries none of the seven flags either, so each of them counts as false.
+It carries no sample format or bit depth, so each audio stream's depth is unknown, and no subtitle stream's commentary flag, which counts as false.
 
 *Why:* FFmpeg's `-ac` option names a channel count only.
 For 3 and 4 channels, the pinned FFmpeg then picks the encoder's default layout for that count, whatever the source's layout.
@@ -606,6 +615,12 @@ For 1, 2, 5 and 6 channels, the default layout is the layout that the job names,
 AAC writes its 5-channel default, `5.0`, as channel configuration 5, and AC-3 and E-AC-3 write theirs, `5.0(side)`, as mode 3/2.
 A job of 7 or 8 channels is a FLAC, Opus or ALAC encode under ADR 0043's rules, which an older worker does not follow.
 The dispositions come from the same `-show_streams` output, so they add no read either.
+So do the sample format and the bit depth.
+The depth tells a 16-bit lossless track from a 24-bit one.
+Without it, the server must count a 16-bit 7.1 track at 24 bits: 9,216 kb/s of PCM at 48 kHz instead of 6,144 kb/s.
+That can push a stream session under a maximum bitrate to a lossy audio step, although a FLAC encode of the track is no larger at 24 bits than at 16, because FLAC detects the unused low bits.
+Jellyfin and AetherEngine record the depth too.
+The subtitle commentary flag lets ADR 0043 name a commentary subtitle track, and adding it to a later probe version would need another re-scan of every file.
 The upgrade to probe version 7 already re-scans every file, so the flags arrive without a second re-scan.
 A commentary track or an audio description usually shares the main track's language, so only these flags or a title tell it apart.
 Rivulet reads both flags from the container and keeps such tracks out of its automatic choice; Plex exposes neither, and Jellyfin reads `original` but neither of these.
@@ -1618,7 +1633,7 @@ Probe version 5 reads such static metadata from the first frame, or from the SEI
 * The re-scan on the upgrade to probe version 5 probes every file again.
 Each of those probes reads the first frames of the chosen video stream.
 Each file keeps its probe version 4 decisions until the server stores the file's probe version 5 outcome.
-* The re-scan on the upgrade to probe version 7 probes every file again, although the layout and the audio dispositions add no read to a probe.
+* The re-scan on the upgrade to probe version 7 probes every file again, although the layout, the sample format, the bit depth and the dispositions add no read to a probe.
 * Until ADR 0043 reads the audio dispositions, the server stores them without changing any rendition's name.
 * An AC-3 or E-AC-3 track whose bitstream mode is not complete main reports only that mode's disposition.
 FFmpeg drops the container's flags for it, including `default`, `original` and `hearing_impaired`.
@@ -1662,8 +1677,10 @@ The server decides whether a lower audio step keeps a track's 3 or 4 channels an
 * Keep the start time correction as probe version 7 and give the channel layout probe version 8.
 Probe versions take numbers in the order in which they ship.
 The channel layout blocks streamarr/streamarr-server#711, and no change has yet implemented the start time correction.
-* Leave the commentary and visual-impaired dispositions to a later probe version.
+* Leave the commentary and visual-impaired dispositions, or the subtitle commentary flag, to a later probe version.
 Every library would then need a second re-scan before ADR 0043 could name a commentary or an audio description track.
+* Infer the bit depth from the codec.
+A 16-bit FLAC, ALAC or TrueHD track would count as 24-bit, and its cost under the maximum bitrate would come out 1.5 times too high.
 * Report one audio description flag that combines `visual_impaired` and `descriptions`.
 The worker would then decide what a disposition means, which the server decides for every other probe fact, and one more container rule would need a new probe version.
 * Report every disposition that ffprobe prints.
@@ -2263,6 +2280,29 @@ FFmpeg's own decoder placed every channel of all five correctly.
 ** ALAC: `5.0`, `5.1`, `6.1(back)` and `7.1(wide)`; it refused every other layout of 5 to 8 channels.
 ** FLAC: every layout, read back under the same name.
 
+[[evidence-bit-depth]]
+=== Sample format and bit depth
+
+These measurements ran on 2026-11-01 against ffprobe 8.1.3 in the pinned worker image.
+The sources were a 2 s stereo sine tone that the same FFmpeg wrote in each format, and FATE's `truehd/atmos.thd`.
+
+|===
+| Source | `sample_fmt` | `bits_per_raw_sample` | `bits_per_sample`
+
+| FLAC, 16-bit | `s16` | 16 | 0
+| FLAC, 24-bit | `s32` | 24 | 0
+| ALAC, 16-bit | `s16p` | 16 | 0
+| ALAC, 24-bit | `s32p` | 24 | 0
+| TrueHD (FATE, 7.1) | `s32` | 24 | 0
+| PCM `pcm_s16le` | `s16` | N/A | 16
+| PCM `pcm_s24le` | `s32` | 24 | 24
+| PCM `pcm_f32le` | `flt` | N/A | 32
+| AC-3 | `fltp` | N/A | 0
+|===
+
+* A 32-bit depth with the sample format `flt` or `fltp` marks floating-point samples.
+* 10 s of 16-bit 7.1 pink noise written as 24-bit FLAC took 742,959 bytes, against 742,854 bytes at 16 bits.
+
 [[evidence-audio-dispositions]]
 === Audio dispositions
 
@@ -2299,6 +2339,7 @@ FFmpeg's muxers write neither descriptor, so these cases come from the FFmpeg 8.
 With the visually impaired mode, ffprobe reported `visual_impaired` alone; with music and effects, `clean_effects` alone; with hearing impaired, `hearing_impaired` alone.
 FFmpeg's demuxer sets the stream's whole disposition from the decoder's audio service type (`libavformat/demux.c`), and the AC-3 decoder takes that type from the bitstream mode.
 FFmpeg's AC-3 encoder accepts the commentary mode only for mono, so the test did not cover it.
+* A file with two text subtitle streams, written as SubRip in Matroska and as `mov_text` in MP4 with `-disposition:s:1 comment`, read back `comment` 1 on the second stream and 0 on the first in both containers.
 
 == References
 

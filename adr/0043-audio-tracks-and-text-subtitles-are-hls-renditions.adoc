@@ -418,7 +418,22 @@ The rule's test set comes from public sources (<<evidence-handler-names>>).
 The rule leaves out every generic name in that set and keeps every track name written for the test, such as "English", "Commentary" and "Descriptive audio".
 Names that still collide get a trailing number in file order, such as "English" and "English 2".
 RFC 8216 section 4.3.4.1.1 says "All EXT-X-MEDIA tags in the same Group MUST have different NAME attributes."
-An audio rendition's `NAME` follows the same rules, applied among the file's audio tracks.
+An audio rendition's `NAME` follows the same rules, applied among the file's audio tracks, with these additions:
+
+* The flags of an audio name are "Commentary" when ffprobe's `comment` disposition is set and "Audio description" when its `visual_impaired` disposition is set, for example "English Commentary".
+Probe version 7 of link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032] reports both flags.
+* When names built from the language and the flags still collide, each colliding name adds the source track's format and channel layout after a middle dot, such as "English · TrueHD 7.1" and "English · AC-3 5.1".
+The format is the codec's common name: AAC, AC-3, E-AC-3, TrueHD, DTS, FLAC, ALAC, Opus, PCM or MP3.
+A DTS track whose profile name, which probe version 5 reports, starts with "DTS-HD MA" shows as "DTS-HD MA".
+The format leaves out Atmos and DTS:X, because an encode loses the objects.
+The layout is probe version 7's layout name without its parenthesized part, such as "5.1" for `5.1(side)`, with "Mono" for `mono` and "Stereo" for `stereo`.
+A track without a known layout shows its channel count instead, such as "6 channels".
+* A trailing number goes only on names that still collide, such as "English · AC-3 5.1" and "English · AC-3 5.1 2".
+* An audio description rendition carries `CHARACTERISTICS="public.accessibility.describes-video"` and `AUTOSELECT=YES`, and its name keeps "Audio description".
+
+A subtitle name also takes the "Commentary" flag from the same disposition.
+The format and the layout apply to audio names only, because every text subtitle becomes WebVTT, so a subtitle's source format tells the viewer nothing.
+The generic handler-name rule, the replacements below and the trailing number stay shared, so https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60] and https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503] use one name rule.
 Before the server writes a title or handler name into `NAME`, it replaces each carriage return or line feed with a space, each double quote with an apostrophe, and each backslash with a slash.
 RFC 8216 section 4.2 forbids a carriage return, a line feed and a double quote in a quoted string.
 
@@ -436,7 +451,16 @@ VLC, mpv and MKVToolNix never use a handler name as a track title.
 But GPAC's MP4Box writes the track name that its `name` import option sets into the handler name, so a file from MP4Box carries that name nowhere else.
 No HLS writer we read escapes a title in `NAME`, because none of them writes text from the file there.
 VLC's and FFmpeg's HLS readers treat a backslash as an escape, so the server replaces the backslash too.
-Evidence: <<evidence-subtitle-cases>>, <<evidence-handler-names>>.
+Jellyfin labels an audio track with its codec and channel layout, Plex with a title such as "English (AC3 5.1)", and Rivulet reads the commentary and audio description flags from the container.
+The source's format and layout tell apart two untitled tracks in one language.
+The delivered codec would tell apart nothing, because every audio rendition of a stream session has the same codec.
+RFC 8216 lets an audio rendition carry the describes-video characteristic.
+Apple's authoring specification requires that characteristic and `AUTOSELECT=YES` on an audio description rendition, and says that its name should show that it is audio description.
+On macOS 26.6.2, AVFoundation's `displayName` for an audio rendition was the language alone, such as "English", whatever the `NAME`, and "English AD" with the describes-video characteristic.
+The `NAME` reached the rendition's title metadata unchanged, middle dot included.
+For a subtitle rendition, `displayName` used the `NAME`.
+So an Apple client labels an audio rendition from its title metadata, and an audio description name that keeps its flag shows no doubled token in `displayName`.
+Evidence: <<evidence-subtitle-cases>>, <<evidence-handler-names>>, <<evidence-audio-names>>.
 
 [[decision-cue-text]]
 === Extraction repairs SubRip that is not UTF-8 and judges each track on its own output
@@ -518,6 +542,8 @@ These three issues leave the probe version unchanged.
 Issue https://github.com/streamarr/streamarr-server/issues/505[streamarr/streamarr-server#505] adds caption detection, which decodes the video's keyframes.
 That ticket increases the probe version when the ticket merges.
 The server then probes existing media files again by itself.
+Probe version 7 (ADR 0032) adds two flags that the names use: ffprobe's `comment` disposition on each audio and subtitle stream, and its `visual_impaired` disposition on each audio stream.
+Until the server stores a file's probe version 7 outcome, the file's names carry neither flag.
 
 [[decision-image-subtitles]]
 === An image subtitle that the viewer selects is burned into the video
@@ -780,6 +806,9 @@ On Streamarr's zero-based fMP4 timeline, that offset put every cue 10 s late in 
 * Numbered names as the naming scheme tell the viewer nothing about the track.
 The server numbers only names that still collide.
 * Always keeping the SDH token doubles the token in AVPlayer, which appends " SDH" itself.
+* Naming an audio rendition by its delivered codec tells apart nothing, because every audio rendition of a stream session has the same codec.
+* Leaving "Audio description" out of an audio description rendition's name, as the SDH rule does for SDH, leaves only the language in players that show the `NAME`, such as hls.js clients.
+AVFoundation's `displayName` for audio ignores the `NAME`, so keeping the flag doubles nothing there.
 * Leaving duplicate names violates RFC 8216.
 AVPlayer and WebKit's native HLS then exposed only one of two renditions named "English".
 * Telling colliding names apart by the stream index shows the viewer a number that means nothing outside the file.
@@ -1155,6 +1184,17 @@ A small Swift program loaded the stream with `AVURLAsset` and played it with `AV
 
 The check did not test what an audio output then receives, and it did not cover tvOS.
 
+[[evidence-audio-names]]
+=== Audio names in AVFoundation
+
+The same macOS 26.6.2 run read the media selection options of the stream in <<evidence-lossless-surround>>, with `NAME`, `LANGUAGE` and `CHARACTERISTICS` varied.
+
+* Audio renditions named "English · FLAC 7.1", "English FLAC 7.1" and "Main Mix", with `LANGUAGE="en"`, each had the `displayName` "English".
+Each `NAME` appeared unchanged as the option's title metadata.
+* A stereo rendition with the describes-video characteristic had the `displayName` "English AD", whether it was named "Described" or "Commentary".
+* A subtitle rendition named "English SDH" with the SDH characteristics had the `displayName` "English SDH SDH", and one named "Signs" had "Signs - English".
+* ffprobe in the pinned image read the `comment` and `visual_impaired` dispositions back from Matroska and from MP4 after FFmpeg wrote them.
+
 [[evidence-lossless-size]]
 === The size of lossless encodes
 
@@ -1205,6 +1245,10 @@ Each percentage is of the PCM bitrate at 48 kHz and the written depth: 1,536 kb/
 * https://github.com/FFmpeg/FFmpeg/blob/n8.1/libavformat/movenc.c#L3537-L3573[FFmpeg n8.1 `movenc.c`: the handler names that the MP4 muxer writes]
 * https://github.com/MediaArea/MediaInfoLib/blob/v26.10/Source/MediaInfo/Multiple/File_Mpeg4_Elements.cpp#L4678[MediaInfoLib v26.10 `File_Mpeg4_Elements.cpp`: MediaInfo's rule for generic handler names]
 * https://github.com/gpac/gpac/blob/v2.4.0/applications/mp4box/fileimport.c#L919-L921[GPAC v2.4.0 `fileimport.c`: the `name` import option] and https://github.com/gpac/gpac/blob/v2.4.0/applications/mp4box/fileimport.c#L1731-L1733[its write into the handler name]
+* https://datatracker.ietf.org/doc/html/draft-pantos-hls-rfc8216bis-22#section-4.4.6.1[draft-pantos-hls-rfc8216bis-22 §4.4.6.1] and RFC 8216 §4.3.4.1: an audio rendition may carry `public.accessibility.describes-video`
+* https://developer.apple.com/documentation/http-live-streaming/hls-authoring-specification-for-apple-devices/[Apple HLS authoring specification], items 2.12 to 2.14: audio description renditions
+* https://github.com/jellyfin/jellyfin/blob/ed211765c2ebbb3f5093f67596c267058c6a4124/MediaBrowser.Model/Entities/MediaStream.cs#L271-L326[Jellyfin `MediaStream.cs`: an audio track's display title from its codec or profile, channel layout and flags]
+* https://github.com/l984-451/Rivulet/blob/4ab544bf1bc452f18807156a4a26698801bd07f4/RivuletCore/Playback/Tracks/MediaTrack.swift#L24-L47[Rivulet `MediaTrack.swift`: Plex's display title, and the commentary and audio description flags from the container]
 * https://www.rfc-editor.org/rfc/rfc9639#section-9.1.3[RFC 9639 §9.1.3: FLAC channel assignment]
 * https://www.rfc-editor.org/rfc/rfc7845#section-5.1.1.2[RFC 7845 §5.1.1.2: Opus channel mapping family 1]
 * https://media.xiph.org/sintel/[Xiph.Org: Sintel soundtrack masters] and https://media.xiph.org/tearsofsteel/[Tears of Steel soundtrack masters and AC-3 track] (Creative Commons Attribution 3.0, Blender Foundation)

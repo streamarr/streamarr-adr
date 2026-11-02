@@ -10,6 +10,8 @@ This decision amends link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.
 A job attempt in a playback session with a positive applied audio delay delivers an audio lead, which the producer otherwise discards as preroll.
 This decision changes link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045] and link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052].
 With an applied audio delay other than 0, Original plays the HLS copy instead of direct play whenever one capability entry accepts an HLS copy that can apply the delay.
+This decision amends link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018]'s worker contract.
+Every job attempt carries the source snapshot that its playback session plays beside its `MediaSourceRef`, and the worker refuses to read a source whose snapshot differs.
 This decision depends on three audio rules that pending amendments to ADR 0037 and ADR 0043 add (https://github.com/streamarr/streamarr-adr/pull/84[streamarr/streamarr-adr#84], https://github.com/streamarr/streamarr-adr/pull/85[streamarr/streamarr-adr#85]).
 <<decision-prerequisites>> restates them, and this decision holds them as requirements whatever form those amendments take.
 
@@ -146,7 +148,7 @@ The stream session reports the source revision that it plays.
 
 A new correction applies to the playback sessions that start after it.
 A running playback session applies the media file's current corrections each time it receives `setPlaybackSessionAudioDelay`, as long as the file's source revision is still the one that the session plays.
-When the source revision has changed, the session keeps the corrections that it applies, because the new corrections describe another file.
+When the server holds a newer source revision than the one that the session plays, the mutation returns `MediaFileSourceChangedError` and the playback session ends (<<decision-source-revision>>).
 So the client that set a correction sends that mutation with its unchanged audio delay to apply the correction at once, as any change of delay applies (<<decision-change>>).
 Every other running playback session keeps the corrections that it applies until it receives that mutation or ends.
 
@@ -158,6 +160,34 @@ The file's offset is the same for every viewer, so one person's correction serve
 The correction describes one mux of one file, so it ends with that file's bytes.
 A metadata edit describes the media title instead, and survives a file upgrade.
 A correction changes what every viewer hears, as a metadata edit changes what every viewer reads, so it needs the same authority.
+
+[[decision-source-revision]]
+=== A playback session's corrections hold only for the source revision it plays
+
+The corrections that a playback session applies belong to the source revision that the session plays.
+link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018] addresses media by `MediaSourceRef(source_namespace_id, relative_key)`, a location rather than the bytes at it.
+A file replaced at the same path therefore keeps its `MediaSourceRef`, and a new job attempt would open the replacement's bytes.
+Each job attempt carries, beside its `MediaSourceRef`, the source snapshot that the session's source revision stands for: the file's size and modification time (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]).
+The snapshot is not a path, so the worker contract still carries no filesystem path, and `MediaSourceRef` stays the only address of the media.
+Before it reads any media, the worker reads the source's snapshot through its mount mapping and compares it with the carried snapshot.
+On a mismatch, it reads no media and fails the attempt with the typed reason `SOURCE_CHANGED`.
+Every new job attempt checks: a relocation after a seek, the attempt that a delay change starts for an audio lead (<<decision-audio-lead>>), a replacement under ADR 0019, and the first attempt of each new format attempt under ADR 0052.
+
+`SOURCE_CHANGED` is neither a format error nor a stall, so the server spends no replacement attempt and no format attempt on it.
+The server ends the stream session and the playback session, and the playback session reports the typed terminal error `SOURCE_CHANGED` to the client.
+When the server already holds a newer snapshot for the file, it ends the playback session the same way without dispatching an attempt.
+The client then starts a new playback session at the player's position with its own audio delay.
+That playback session reads the replacement's corrections, which start empty because the changed snapshot removed the old ones, and it waits for the replacement's probe outcome, as every playback does (ADR 0032).
+Segments that the old session stored before the change hold the old bytes, so they play with the old corrections until the session ends.
+No new attempt of the old session reads the new bytes, and no new playback session starts with an old correction.
+
+The server's tests replace a file at the same path during playback with a file correction of +1,000 ms.
+They then seek past the stored segments, change the delay so that the player's segment needs an audio lead, and report a format error.
+Each new attempt fails with `SOURCE_CHANGED` before it reads media, the playback session ends with that terminal error, and the client's new playback session plays the replacement with no correction.
+
+*Why:* A correction is tuned by ear against one mux, and a replacement at the same path can be another mux whose audio sits elsewhere.
+Only the worker sees the bytes that an attempt reads, and the server's stored snapshot lags a replacement until a scan or the watcher sees it, so the check runs where the attempt opens the source.
+The running session's playlists, segment list and keyframe positions come from the old probe outcome, so the replacement needs a new probe outcome and a new playback session in any case.
 
 [[decision-applied]]
 === Each audio rendition plays shifted by its applied audio delay, clamped to the range
@@ -398,6 +428,7 @@ An HLS copy that cannot apply the delay would cost a remux job and change nothin
 === Format recovery keeps the delay
 
 Each new format attempt of ADR 0052 starts its stream session with the playback session's audio delay and the corrections that the playback session applies.
+Its first job attempt checks the source snapshot as every attempt does, so a recovery never carries a correction onto a replaced source (<<decision-source-revision>>).
 A change of delay or of correction spends no format attempt and never resets the format-failure history.
 A viewer who picks Original again keeps the delay.
 A format error in a stream whose audio is shifted takes the same recovery path as any other format error.
@@ -420,6 +451,7 @@ Every channel, every codec and every bit-identical copy stays as it is.
 * A ServerAdmin fixes a badly muxed file once, for every viewer and device, and each viewer's own audio delay still adds to it.
 * A delay and a correction whose sum passes 2 s lose the part past 2 s, and the client shows it.
 * Any change to a file's size or modification time removes its corrections, even a tag edit that leaves the mux as it was, because the server cannot tell the two apart.
+The same change ends a running playback session at its next new job attempt, and the client starts a new playback session at the player's position.
 Removing a library and adding it back also starts its files without corrections.
 * A file whose HLS copy would encode one of its audio tracks, such as an AAC default beside an E-AC-3 track, keeps direct play in Original, and neither the audio delay nor the correction applies to it there.
 * With an applied audio delay other than 0, Original on tvOS plays the HLS copy, which costs one worker remux job per stream session.
@@ -468,6 +500,9 @@ They include an E-AC-3 copy with Atmos through a receiver at +200 ms, to hear wh
 * A stream's correction that adds to the file's correction — a later change to the file's value would move a stream that was already tuned by ear.
 * The correction as a metadata edit on the catalog entry — a metadata edit survives a file upgrade, but a new file carries its own mux, and a catalog entry can hold several files.
 * The correction stored with the probe result — a new probe version would discard a value that a person set and no probe measures.
+* A running playback session that keeps its corrections after its source changes — ADR 0018 addresses media by location, so a later seek, delay change or format recovery would open the replacement's bytes and play the old mux's correction on them.
+* Moving a running playback session to the replacement's corrections in place — its playlists, segment list and keyframe positions describe the old bytes.
+* The source snapshot inside `MediaSourceRef` — the reference is the media's address, which a worker resolves through its mount mapping, and the snapshot is a fact that the worker checks at that address.
 * Rejecting an audio delay or a correction whose sum leaves the range — a device's valid value would fail on one file, and the person who set either value cannot see the other.
 * Re-encoding the audio when a copy cannot carry matching silence, to apply a correction — it would trade a bit-identical copy for the correction.
 

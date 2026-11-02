@@ -387,6 +387,8 @@ A producer of a long merged segment is not taken for stalled while its output ad
 Once a second, the worker reports the media time that a job attempt's output has reached, whenever that time has advanced since its previous report for the attempt.
 That time is the end of the latest video sample that the producer has read from FFmpeg's output, whether or not the segment that holds it has closed.
 Each report that advances the output restarts the server's stall clock, as a publication does (link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]).
+Each chunk of a media segment upload that the server receives from the attempt restarts it too.
+While a large segment uploads, the producer's budget can hold back FFmpeg, so the output doesn't advance, but the upload's bytes do, and the worker's acknowledgment deadline still bounds the upload (<<decision-waits>>).
 So an encode that runs below real time keeps its producer through a merged segment of any length while FFmpeg's output advances.
 A producer whose output stops advancing is replaced after the stall threshold, whatever the segment's length.
 The progress report is a field of the worker contract (https://github.com/streamarr/streamarr-server/pull/723[streamarr/streamarr-server#723]).
@@ -929,15 +931,16 @@ An attempt that starts after a stream's unknown end reads no sample of that stre
 It reports instead that the stream delivered no sample from the position where it began reading, and names the stream and that position.
 The server stores that position as the stream's learned end bound, under the same snapshot fence as a learned end time.
 An audio stream whose learned end bound lies at least one segment before the video's end ends early under the rules below.
-An encode that pads the stream stands in for it.
+An encode that pads the audio stands in for it.
 Its audio carries generated silence from the attempt's first segment, with the same initialization segment as the variant's other attempts, so the attempt completes and carries the report.
+An encode that holds the last picture stands in for the video, because it finds the video's last keyframe, as described below, and reads the last sample after all.
 An attempt that can't stand in for the stream fails with a typed failure that carries the same report.
 A copy of the stream can't stand in for it, because generated silence or a held picture can't join a copy.
 That includes the AC-3 or E-AC-3 copy whose initialization segment comes out empty (<<evidence-padding>>).
-An encode of the stream without padding can't stand in for it either.
-After that failure, the server starts an attempt that pads the stream.
-When the stream session encodes the stream, the replacement attempt pads it.
-When the stream session copies the stream, the server moves playback to a stream session that encodes and pads it, by the format recovery that a copied variant that runs short takes (link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052]).
+An encode that neither pads the audio nor holds the video can't stand in for that stream either.
+After that failure, the server starts an attempt that pads or holds the stream.
+When the stream session encodes the stream, the replacement attempt pads or holds it.
+When the stream session copies the stream, the server moves playback to a stream session that encodes and pads or holds it, by the format recovery that a copied variant that runs short takes (link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052]).
 The tests of https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511] resume a source with an AC-3 track whose header states no end at a point past that track's end.
 In a stream session that encodes the track, playback continues with silence and no failed attempt.
 In one that copies the track, playback continues with silence after one failed attempt.
@@ -965,10 +968,13 @@ The encoder forces a keyframe at every segment start, so every segment after the
 An attempt that starts after segment 0 in a held encode seeks to the last stored source keyframe at or before 0.5 s ahead of the earlier of its first segment's start and the video's last keyframe, the shape that a copy's seek already has.
 So an attempt that starts past the video's end still decodes the last picture, even in a source with no index, such as MPEG-TS, or one that is cut short.
 Until an index-less source's keyframe scan finishes, the server stores no keyframe for it and sends the fixed read-back instead (<<decision-seek>>).
-A held encode whose read-back lies past the video's last frame reads no video sample, so it has no picture to hold and can't stand in for the video.
-It fails with the typed failure above, and the server stores the video's end bound.
-A read-back between the video's last keyframe and its last frame decodes no picture either, but the video still has samples after it, so that attempt fails as a transcode failure and stores no bound.
-A replacement attempt reads from the same read-back and fails the same way until the scan publishes keyframe positions.
+A read-back past the video's last keyframe decodes no picture, whether it lies past the video's last frame or between that frame and the last keyframe.
+The held encode then finds the last keyframe itself, inside the same attempt.
+It reads the video's packets, without decoding them, from points before the read-back at twice the distance each time, the read-back's own distance first, until it finds a keyframe before the read-back.
+It then narrows the interval by halves to the last such keyframe, and reads from there.
+Each step reads packets only up to the first keyframe after its point, so the search costs a few short reads, not a pass over the file.
+The attempt then decodes the last picture and holds it, and it reports the video's end time like any attempt that read the video's last sample.
+Only a video with no keyframe before the read-back fails the attempt, as a transcode failure.
 
 Every encode may carry the filters that hold the last picture and pad the audio, trimmed at the advertised end, whether or not the probe shows a stream ending early.
 A source that is shorter than its probe says, or whose header states no end time, is therefore padded inside the attempt that finds the early end, with no second attempt.
@@ -1425,6 +1431,11 @@ A 1 s margin still dropped frames on MPEG-TS sources whose keyframes are 2 s apa
 A 1080p seek's first segment then took about 5.0 s to complete instead of about 3.0 s.
 * Having the worker compute its own read-back for an encoded seek ignores where the source's keyframes are, and FFmpeg's MPEG-TS demuxer starts at the next keyframe after its target.
 * A fixed, generous read-back for every file decodes more media before the first segment than a known keyframe needs.
+* Failing a held encode whose read-back decodes no picture, and replacing it, repeats the same read in every replacement attempt.
+A keyframe scan does not run during playback (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]), so the replacement budget can run out first, and recovery exhausted is final for the held request.
+* Running the source's keyframe scan on demand and holding the request until it publishes reads the whole file, which can take tens of seconds, while the viewer waits, and breaks ADR 0032's rule that no scan runs beside a job attempt.
+* Stepping the read-back back by its own distance in each replacement attempt spends one failed attempt per step, so a resume far past the video's end exhausts the replacement budget.
+* The held encode's search for the last keyframe does not reopen the rejected worker-computed read-back above, because it reads from keyframes that the worker finds in the source.
 The read-back therefore serves only until an index-less file's keyframe scan finishes.
 * Handling stream sessions whose attempts run on different worker versions, by adding the worker version to the affinity key or a recipe version to the worker's capabilities, handles a case that cannot occur while Streamarr has no production instances.
 * Decoding every seek in software, or only the seeks of open-GOP sources, keeps the CPU cost of software decoding.
@@ -1528,6 +1539,7 @@ That holds for the narrower escape of letting only the encoded variants keep the
 With a 10 s stall threshold, a 60 s merged segment receives 67 s, and an encode at 0.4 times real time needs 150 s for it.
 Any wall-clock allowance assumes an encoding speed.
 * Taking progress from each segment's reported production time shows nothing until the segment closes, which is the wait that a long merged segment makes too long.
+* Counting only output progress and publications replaces an attempt whose large segment takes longer than the stall threshold to upload, because the producer reads no output while the upload holds its budget.
 * Leaving liveness inside a segment to the worker's encoder-stall watchdog alone would drop the server's own check under ADR 0019.
 That check also catches a worker that stays connected while its producer stops for a reason that the watchdog doesn't watch, such as a fault after the reader took FFmpeg's bytes.
 * Refusing a merged list whenever a copied output has no measurement would encode most Matroska sources until their background bitrate scan finishes.

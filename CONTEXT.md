@@ -218,11 +218,11 @@ An alternate HLS track, such as one audio language or one text subtitle track. T
 _Avoid_: variant, audio variant, alternate stream, track (unqualified)
 
 **Audio frame grid**:
-The frame start times of the stream session's audio codec, counted from the default track's first sample: the copy's own first sample when the session copies the default track, and the track's probed start when the session encodes it. Every audio encode starts its output on this grid, so consecutive job attempts meet without a gap or an overlap, and the producer never moves a copied track onto another grid (ADR 0043).
+The start times of an encoded audio rendition's frames, at its encoder's frame length and sample rate, counted from the default track's first sample: the copy's own first sample when the session copies the default track, and the track's probed start when the session encodes it. Every job attempt starts each audio encode's input on that rendition's grid, so consecutive job attempts meet without a gap or an overlap. A copied track keeps its own frames, and the producer never moves it (ADR 0043).
 _Avoid_: encoder frame grid, audio snap
 
 **Lossless encode**:
-An audio encode that writes every decoded sample unchanged, such as a FLAC encode of an integer TrueHD, DTS-HD MA, PCM, FLAC or ALAC track of up to 24 bits in a layout that FLAC carries, or pads with silent channels. A FLAC or ALAC encode of decoded lossy audio, of float or 32-bit PCM, or of a downmix is not lossless (ADR 0043).
+An audio encode that writes every decoded sample unchanged, such as a FLAC or ALAC encode of an integer TrueHD, DTS-HD MA, PCM, FLAC or ALAC track of up to 24 bits whose layout that codec carries or pads with silent channels. A FLAC or ALAC encode of decoded lossy audio, of float or 32-bit PCM, or of a downmix is not lossless (ADR 0043).
 _Avoid_: lossless for any FLAC or ALAC output
 
 **Media segment**:

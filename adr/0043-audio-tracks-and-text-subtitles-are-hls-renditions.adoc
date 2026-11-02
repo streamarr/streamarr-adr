@@ -22,7 +22,13 @@ An amendment after an audiophile review sets how the worker treats samples.
 Only an encode that writes every decoded sample unchanged is called lossless.
 Every audio encode joins its job attempts on its audio frame grid, and the producer never moves a copied track (<<decision-audio-grid>>).
 The worker decodes AC-3 and E-AC-3 without their dynamic range compression and with their dialogue normalization, dithers every conversion to 16 bits, and resamples with tuned settings (<<decision-sample-processing>>).
-A FLAC or ALAC encode pads a layout that its codec does not carry with silent channels, a FLAC or ALAC rendition above 48 kHz has a 48 kHz step, Opus encodes have measured rates, and TrueHD is never copied (<<decision-audio-codec>>).
+A FLAC or ALAC encode pads a layout that its codec does not carry with silent channels, a FLAC or ALAC rendition above 48 kHz has a 48 kHz step, and Opus encodes have measured rates (<<decision-audio-codec>>).
+A later amendment, after a comparison with Jellyfin, Plex and Rivulet, changes what the default track becomes (<<decision-audio-codec>>).
+A TrueHD or DTS default track keeps its copy wherever the client declares the codec, and a track that cannot reach that codec is offered by replacing the stream session.
+A default track that cannot be copied, lossy or lossless, is encoded to FLAC wherever the client declares FLAC.
+Among the tracks of the default track's language, a lossless copy comes first, then a FLAC encode of a lossless track, then a copy of a lossy track, then a lossy encode.
+A FLAC copy needs a block size that the client accepts, and a copied E-AC-3 track with Atmos is marked `CHANNELS="16/JOC"` (<<decision-audio-renditions>>).
+A title marks a commentary or an audio description track when no flag does (<<decision-names>>).
 ADR 0054's bitrate scan measures the FLAC encodes that a stream session can deliver.
 Mac browser checks gate the tickets, and the TV checks run once at the end of the epic (<<decision-device-checks>>).
 
@@ -89,13 +95,17 @@ The video keeps playing.
 The switch starts no job attempt.
 
 The stream decision (link:0013-stream-decision-architecture.adoc[ADR 0013]) also chooses which rendition is the default.
-The default track is never a commentary, an audio description or a music-and-effects track while another track remains (<<decision-names>>).
+The default track is never a commentary, an audio description or a music-and-effects track while another track remains, whether a disposition or the title marks it (<<decision-names>>).
 Among the remaining tracks, it is the first in stream order whose `default` disposition is set, or the first in stream order when none has it.
+The ranking of <<decision-audio-codec>> can then let another track of the same language play as the default.
 A dependent track, such as narration alone that a receiver mixes into the main track, stays out of the renditions for now, because played alone it carries only the narration.
 An audio rendition's `NAME` follows the naming rules of <<decision-names>>, applied among the file's audio tracks.
 Each `EXT-X-STREAM-INF` tag's `CODECS` attribute lists the stream session's one audio codec (<<decision-audio-codec>>).
 Each `EXT-X-STREAM-INF` tag's `BANDWIDTH` attribute counts the largest audio rendition.
 RFC 8216 requires both rules.
+Each audio rendition's `CHANNELS` attribute gives the channel count that the rendition delivers.
+A copied E-AC-3 track whose profile name contains "Dolby Atmos" gives `CHANNELS="16/JOC"` instead, and its `CODECS` value stays `ec-3`.
+An encode of such a track gives its channel count, because the encode loses the objects.
 
 *Why:* In all five players tested, a switch between audio renditions never restarted or rewound the video.
 The players were Chromium, Firefox and WebKit with hls.js 1.7.0, WebKit's native HLS, and AVPlayer.
@@ -103,6 +113,9 @@ Chromium played the new language after about 0.3 s.
 Firefox played the new language after about 1.0 s.
 Both delays came from the browsers' audio output queues.
 A rendition for every audio track lets the viewer switch to any language without a new stream session.
+Apple's HLS authoring specification marks E-AC-3 with Atmos by `JOC` in the rendition's `CHANNELS` attribute, for example `CHANNELS="16/JOC"`, and keeps `ec-3` in `CODECS`.
+It asks for the number to match the `complexity_index_type_a` field of the track's `dec3` box, but FFmpeg 8.1.3 wrote no such field for FATE's Atmos sample, so the server writes 16, the specification's example.
+AetherEngine writes the same value, and its source states that without it AVFoundation passed a copied Atmos track to an Atmos receiver as 5.1 PCM.
 Evidence: <<evidence-switching>>.
 
 [[decision-audio-codec]]
@@ -117,20 +130,42 @@ The server encodes audio to AAC, AC-3, E-AC-3, FLAC, Opus and ALAC.
 The default track decides the session's audio codec:
 
 * When the default track can be copied, the default track is copied, and the session's audio codec is the default track's codec.
+This holds for a TrueHD or DTS default track too, although the server has no encoder for either codec (below).
 * When the default track cannot be copied, the default track is encoded, and the session's audio codec is the codec of that encode.
-A lossless default track is encoded to FLAC when a FLAC capability entry for HLS accepts the channel count of the FLAC layout that the layout rules below give the track.
+The default track, lossless or lossy, is encoded to FLAC when a FLAC capability entry for HLS accepts the channel count of the FLAC layout that the layout rules below give the track.
 A lossless track is TrueHD, DTS-HD MA, PCM, FLAC or ALAC.
 Otherwise the encode follows link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc[ADR 0050]'s encode for the default track.
 It takes the first of E-AC-3, AC-3 and AAC whose capability entry for HLS keeps more than two of the track's channels.
 When none does, it takes AAC with at most two channels.
-* When the default track can be copied but its codec has no encoder that the server uses, and another track would have to be encoded to that codec, the default track is encoded too.
-DTS is that codec today, and TrueHD is never copied (below).
-The session's audio codec is then the codec of the default track's encode, as in the previous case.
-So a TrueHD or DTS-HD MA default track becomes FLAC wherever the client declares FLAC with enough channels.
-* When the default track is TrueHD with Dolby Atmos and the file holds an E-AC-3 track with Atmos (JOC) in the same language that can be copied, that E-AC-3 track becomes the default track and is copied.
+When the viewer's maximum bitrate leaves no room for the FLAC encode, ADR 0050's audio steps take that E-AC-3, AC-3 or AAC encode instead.
+
+[[decision-sibling-ranking]]
+Before these rules apply, the stream decision chooses which track of the default track's language plays as the default.
+The candidates are the default track and every other track in its language that is neither a commentary, an audio description, a music-and-effects track nor a dependent track.
+Each candidate ranks by what the rules above would deliver for it:
+
+. a copy of a lossless track;
+. a FLAC encode of a lossless track;
+. a copy of a lossy track;
+. a lossy encode.
+
+The best-ranked candidate plays as the default, and decides the session's audio codec.
+A copy of a lossy track ranks above a lossy encode only when it keeps at least as many channels as that encode.
+Among candidates of equal rank, the default track comes first, then the candidate with more channels, then the first in stream order.
+One exception keeps Atmos objects: when the best candidate is a FLAC encode of a TrueHD track with Dolby Atmos, and the language holds an E-AC-3 track with Atmos (JOC) that can be copied, that E-AC-3 track plays as the default and is copied.
 The copy keeps the objects, which a FLAC encode of the TrueHD track loses.
 
+[[decision-restart-tracks]]
+The server has no TrueHD or DTS encoder, so in a session whose audio codec is TrueHD or DTS, only a track already in that codec that a capability entry accepts gets a rendition, as a copy.
+Every other track cannot reach the session's codec.
+The stream decision still lists such a track, and the client offers it beside the renditions.
+Choosing it replaces the stream session inside the playback session at the viewer's position, and the new stream session takes its audio codec from the chosen track as if that track were the default.
+In that stream session, a TrueHD or DTS track whose copy a capability entry accepts is encoded to the session's codec, and is listed for a replacement too, which returns the viewer to the copy.
+Such a replacement uses none of the format-attempt budget, as for an image subtitle (<<decision-image-subtitles>>).
+Every switch between renditions still starts no job attempt.
+
 A FLAC encode of a lossless default track keeps every channel of the track, up to eight, except where the layout rules below downmix.
+A FLAC encode of a lossy default track is not lossless, but it adds no second lossy generation to the track.
 FFmpeg decodes the channel mix of a TrueHD track with Dolby Atmos and of a DTS-HD MA track with DTS:X, and ignores their objects, so the encode loses the objects.
 Only a player that decodes such a track itself can keep them.
 AetherEngine, the playback engine of the tvOS player Rivulet, renders TrueHD Atmos and DTS:X objects into a speaker mix on the device in an optional build.
@@ -148,6 +183,12 @@ Each other track keeps its own copy-or-encode decision.
 Another track is copied only when that track already has the session's audio codec and a capability entry accepts the track.
 Otherwise that track is encoded to the session's audio codec, with no more channels than that codec's capability entry accepts.
 So the worker can copy one track and encode another.
+
+A FLAC capability entry can give a minimum block size.
+Under such an entry, a FLAC track can be copied only when its STREAMINFO minimum block size, which link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032's probe version 7] reports, is at least that size.
+An unknown block size fits no entry that gives one.
+A FLAC track that fails this check is encoded to FLAC like any other track, and that encode keeps every sample, because its frames hold the sample rate ÷ 20 samples, at least 400 at 8 kHz.
+The Apple client gives 192, and so does the web client in WebKit, whose media stack is Apple's CoreMedia.
 A lower audio step under the viewer's maximum bitrate caps every track, as link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc[ADR 0050] decides.
 
 Every audio encode names its output channel layout under the channel layout rule of https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395].
@@ -205,17 +246,17 @@ A segment can hold one more frame than its interval: with FFmpeg's default FLAC 
 A cap below it would understate some segments: the largest 3 s window of a decoded film track reached 85 % of the PCM bitrate, and of decoded white noise 94 %.
 Evidence: <<evidence-lossless-size>>.
 
-DTS follows the same declared-codec rule as every other codec.
-A DTS track is copied only when the client declares DTS in fMP4, and is otherwise encoded.
-A file whose only audio track is DTS keeps that copy, because no other track needs the codec.
-A TrueHD track is never copied.
-FFmpeg's MP4 muxer writes TrueHD only under `-strict experimental`, and the worker passes `-strict unofficial`.
-So a file whose only audio track is TrueHD encodes it like any other lossless default track, to FLAC wherever a FLAC capability entry for HLS accepts its channels.
+DTS and TrueHD follow the same declared-codec rule as every other codec.
+A DTS or TrueHD track is copied only when the client declares that codec in fMP4, and is otherwise encoded.
+FFmpeg's MP4 muxer writes TrueHD only under `-strict experimental`, so a job that copies a TrueHD track passes `-strict experimental`, and every other job keeps `-strict unofficial`.
+A TrueHD copy writes an `mlpa` sample entry with a `dmlp` box, and its `CODECS` value is `mlpa`.
 No tested browser or Apple player decoded DTS or TrueHD from fMP4, in 0 of 36 plays across six players.
+AVFoundation reads a TrueHD copy's sample entry but has no TrueHD decoder, so a client that plays through AVPlayer never declares TrueHD.
+An Apple client that decodes TrueHD itself, as AetherEngine does, can declare it.
 Media3, the Android media library, can play DTS on the SHIELD TV Pro by passthrough to an HDMI receiver, or with Media3's FFmpeg decoder module.
 A reading of Media3 1.11.1's source found both Media3 paths, and no measurement covers them.
-The Android client declares DTS only after a check on the SHIELD TV Pro through an HDMI receiver (https://github.com/streamarr/streamarr-android/issues/1[streamarr/streamarr-android#1]).
-A TrueHD capability entry for HLS changes nothing, because the server never copies TrueHD.
+For TrueHD, Media3 1.11.1 reads the `mlpa` sample entry, but maps no `mlpa` codec string and regroups TrueHD for passthrough only in its MP4 and Matroska extractors, not in the fragmented MP4 extractor that its HLS player uses.
+The Android client declares DTS or TrueHD only after a check on the SHIELD TV Pro through an HDMI receiver (https://github.com/streamarr/streamarr-android/issues/1[streamarr/streamarr-android#1]).
 
 *Why:* In the audio measurements, hls.js 1.7.0 in Chromium, Chrome and Firefox played audio renditions of AAC, Opus and FLAC, and the page switched between those renditions.
 After a switch that changed the codec, the audio played 90 to 140 ms late until the next seek.
@@ -229,9 +270,15 @@ Before the FLAC, Opus and ALAC encodes, a copied default track in one of those c
 FFmpeg 8.1.3 in the pinned worker image lists its native `flac` and `alac` encoders and the `libopus` encoder as ready for use.
 So the server can keep a lossless or passthrough default track as a copy and still encode the other tracks to its codec.
 The same FFmpeg marks its `dca` (DTS) and `truehd` encoders as experimental, so the server encodes neither codec.
+Under `-strict experimental`, the same FFmpeg copied FATE's 7.1 TrueHD Atmos and 5.1 TrueHD samples into fragmented MP4 with every packet byte-identical, its major-sync flags kept, and the same decoded samples.
+Seeked copies wrote the same `dmlp` box, because FFmpeg's copy starts at a major sync, so a TrueHD copy keeps one init across job attempts.
+FFmpeg's experimental flag here guards the muxing, which the readback shows to be sound, not an encoder.
+Encoding a TrueHD default track because a commentary track needs its codec would lose the Atmos objects that a client decoding TrueHD keeps, so the server copies the default track and offers the commentary by a replacement.
 An encode of the default track keeps every track in one codec, so a switch stays in sync.
 ADR 0050's encode takes E-AC-3 before AC-3 and AAC, so the encoded default track keeps surround wherever the client declares E-AC-3 or AC-3 with more than two channels.
 A FLAC encode of a lossless track keeps every sample of up to eight channels, where the lossy E-AC-3 and AC-3 encodes stop at 5.1.
+A FLAC encode of a lossy track keeps the decoded audio, where an E-AC-3, AC-3 or AAC encode adds a second lossy generation; AetherEngine's lossless mode encodes every track that it cannot copy, lossy ones included, to FLAC.
+A disc's own lossy track was encoded once from the master, so its copy beats the server's lossy encode of the lossless track, and Jellyfin also copies a sibling track that the client can play, chosen by file order.
 On macOS 26.6.2, AVPlayer played a stream whose audio rendition was 7.1 FLAC at 24 bits in fMP4, and reported eight channels in WAVE 7.1 order.
 In the same FFmpeg, an Opus encode refused 2.1, 3.0(back), 4.0 and quad(side).
 An ALAC encode wrote 2.1 as stereo, and quad, quad(side) and 3.0(back) as five channels.
@@ -553,6 +600,12 @@ An audio rendition's `NAME` follows the same rules, applied among the file's aud
 
 * The flags of an audio name are "Commentary" when ffprobe's `comment` disposition is set, "Audio description" when its `visual_impaired` or `descriptions` disposition is set, and "Music and effects" when its `clean_effects` disposition is set, for example "English Commentary".
 link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032's probe version 7] reports these dispositions.
+* When none of those dispositions is set, the track's title, or its handler name when that name is not generic, marks it.
+A commentary word marks a commentary: "commentary", "commentaire", "kommentar", "comentario" or "commento".
+An audio description word marks an audio description: "audio description", "descriptive", "described", "DVS" or "visually impaired".
+The match ignores case and takes whole words only.
+A track that a word marks counts as flagged for every rule of this ADR, the default track and the describes-video characteristic included.
+The server owns both word lists, as it owns the generic handler names, so a fix needs no new probe.
 * A music-and-effects rendition carries `AUTOSELECT=NO`, because it has no dialogue.
 * When names built from the language and the flags still collide, each colliding name adds the source track's format and channel layout after a middle dot, such as "English · TrueHD 7.1" and "English · AC-3 5.1".
 The format is the codec's common name: AAC, AC-3, E-AC-3, TrueHD, DTS, FLAC, ALAC, Opus, PCM or MP3.
@@ -584,7 +637,8 @@ VLC, mpv and MKVToolNix never use a handler name as a track title.
 But GPAC's MP4Box writes the track name that its `name` import option sets into the handler name, so a file from MP4Box carries that name nowhere else.
 No HLS writer we read escapes a title in `NAME`, because none of them writes text from the file there.
 VLC's and FFmpeg's HLS readers treat a backslash as an escape, so the server replaces the backslash too.
-Jellyfin labels an audio track with its codec and channel layout, Plex with a title such as "English (AC3 5.1)", and Rivulet reads the commentary and audio description flags from the container.
+Jellyfin labels an audio track with its codec and channel layout, and Rivulet reads the commentary and audio description flags from the container and falls back to words in the title.
+FFmpeg's MOV and WebM muxers write none of these dispositions (ADR 0032), so a file that they wrote marks a commentary only in its title.
 The source's format and layout tell apart two untitled tracks in one language.
 The delivered codec would tell apart nothing, because every audio rendition of a stream session has the same codec.
 RFC 8216 lets an audio rendition carry the describes-video characteristic.
@@ -679,9 +733,9 @@ These three issues leave the probe version unchanged.
 Issue https://github.com/streamarr/streamarr-server/issues/505[streamarr/streamarr-server#505] adds caption detection, which decodes the video's keyframes.
 That ticket increases the probe version when the ticket merges.
 The server then probes existing media files again by itself.
-link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032's probe version 7] adds each audio stream's channel layout, sample format and bit depth, the dispositions that the names and the default track use, and the `comment` disposition of each subtitle stream.
+link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032's probe version 7] adds each audio stream's channel layout, sample format and bit depth, the dispositions that the names and the default track use, each FLAC stream's minimum block size, and the `comment` disposition of each subtitle stream.
 The audio dispositions are `comment`, `visual_impaired`, `descriptions`, `original`, `dub`, `clean_effects` and `dependent`.
-Until the server stores a file's probe version 7 outcome, the file's names carry no flag, its audio names show channel counts instead of layouts, and its encodes take their bit depth from the source's codec.
+Until the server stores a file's probe version 7 outcome, the file's names carry only the flags that titles mark, its audio names show channel counts instead of layouts, its encodes take their bit depth from the source's codec, and no Apple client gets a copy of its FLAC tracks.
 
 [[decision-image-subtitles]]
 === An image subtitle that the viewer selects is burned into the video
@@ -741,11 +795,12 @@ The player checks in Mac browsers, hls.js in Chromium, Firefox and WebKit, are m
 The checks on the Apple TV 4K with AVPlayer and on the SHIELD TV Pro with a Media3 player run once, after the epic https://github.com/streamarr/streamarr-server/issues/496[streamarr/streamarr-server#496] closes, and gate nothing.
 The rules of this ADR hold whatever a check shows.
 A failing Mac browser check comes back to its ticket as a question before the ticket merges, and a failing TV check becomes a new issue.
-The TV pass plays multichannel FLAC, padded layouts, a copied E-AC-3 track with Atmos and multichannel Opus through the receiver, and compares a copy's level with an encode's.
+The TV pass plays multichannel FLAC, padded layouts, a copied E-AC-3 track with Atmos under `CHANNELS="16/JOC"` and multichannel Opus through the receiver, and compares a copy's level with an encode's.
 It also checks whether AVPlayer trims a kept priming frame by its edit list (<<decision-priming>>), and listens for junctions between attempts, FLAC copied from Matroska, 96 kHz FLAC, switches between renditions at different sample rates and the audio description choice under tvOS's accessibility settings.
 The player check of the audio renditions ticket, https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503], runs the real server and worker.
 That check shows again that hls.js plays audio renditions without the priming frame.
 That check also plays a Matroska source whose copied AAC starts off the AAC encoder's frame grid, beside encoded tracks whose grids count from the copy's first sample.
+It also checks that WebKit drops a FLAC copy whose minimum block size is below 192 samples, as AVFoundation does, and plays the FLAC encode that replaces it.
 The Apple client's ticket, https://github.com/streamarr/streamarr-apple/issues/4[streamarr/streamarr-apple#4], checks the cover of <<decision-seek-after-change>> on an iPhone.
 
 Four cases have no measurement.
@@ -767,6 +822,9 @@ Lifting the 6-channel cap waits for the speaker-free test of https://github.com/
 Real speakers only confirm that test.
 Firefox plays 7.1 AAC in AAC's own channel order and plays 5.1 AAC in WAVE order.
 * Mix a dependent narration track into the main track, so that a viewer who needs audio description hears both.
+* Normalise loudness or boost dialogue at the viewer's request.
+A later background scan measures each track's integrated loudness, loudness range and true peak for that setting (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032]).
+* Measure the FLAC encodes of a file without a lossless track in ADR 0054's bitrate scan.
 * Allow more than one audio codec per stream session for Apple clients.
 Apple clients get that exception only if a check shows that their switches between codecs stay in sync.
 * Test audio and subtitle renditions on cast receivers.
@@ -833,12 +891,20 @@ Such an encode is not lossless and adds no quality, because the lossy source alr
 Until ADR 0054's bitrate scan measures it, a FLAC or ALAC rendition counts 65 % of its output's PCM bitrate and peaks at the full rate, so an encoded FLAC or ALAC track can count larger than the copied default track, and it then raises every variant's cost and `BANDWIDTH`.
 Such a track then becomes the step track (ADR 0050).
 A step below the session's audio caps every rendition.
-* A client that declares DTS loses the copy of a DTS default track when another track would need an encode to DTS.
-The default track is then encoded with the other tracks, so a switch stays in sync.
-* No client gets a TrueHD copy, even a Media3 player that could pass TrueHD through to a receiver.
-A TrueHD track reaches every client as FLAC or as ADR 0050's lossy encode, so its Atmos objects reach no client unless the file also holds an E-AC-3 track with Atmos.
+* A client that declares DTS or TrueHD keeps the copy of such a default track, and with it the Atmos or DTS:X objects.
+A track in another codec then reaches that client only through a replacement of the stream session, which restarts the video at the viewer's position.
+* No tested client declares TrueHD today: AVPlayer has no decoder, and Media3's HLS player does not regroup TrueHD for passthrough.
+Until a client declares it, a TrueHD track reaches every client as FLAC or as ADR 0050's lossy encode, and its Atmos objects reach a client only through an E-AC-3 track with Atmos.
+* A job that copies TrueHD runs FFmpeg's MP4 muxer under `-strict experimental`.
+* A client without FLAC, TrueHD or DTS gets a 7.1 lossless track as at most 5.1 E-AC-3, because FFmpeg's E-AC-3 encoder stops at 5.1.
+Plex's licensed Dolby encoder writes 7.1 E-AC-3.
+* A client that declares FLAC gets a lossy default track that it cannot copy, such as DTS, Opus or MP3, as FLAC of the decoded audio.
+That encode is much larger than the source, about 573 to 818 kb/s for 128 kb/s AAC in stereo, and ADR 0054's scan does not measure it, so it counts 65 % of its PCM bitrate and can push a session under a maximum bitrate to a lossy step sooner.
+* A FLAC track whose STREAMINFO minimum block size is below 192 samples reaches Apple clients as a FLAC encode with the same samples, and so does every FLAC track until the server stores the file's probe version 7 outcome.
+* The server writes `16/JOC` for every copied E-AC-3 track with Atmos, whatever the track's real complexity index.
+* A track marked by a word in its title can be wrong when a title uses a word in another sense; the default track then passes over it while another track remains.
 * A FLAC or ALAC session above 48 kHz under a maximum bitrate keeps its codec at 48 or 44.1 kHz, resampled, before it goes lossy.
-* A client that declares FLAC with eight channels gets a TrueHD or DTS-HD MA default track as lossless 7.1, and every other track of the file as FLAC.
+* A client that declares FLAC with eight channels, but neither TrueHD nor DTS, gets a TrueHD or DTS-HD MA default track as lossless 7.1, and every other track of the file as FLAC.
 The Atmos or DTS:X objects of such a track are lost.
 * A lossless `2.1`, `3.1`, `3.0(back)`, `4.0`, `4.1`, `6.0` or `7.0` track reaches the player as FLAC with silent channels, and the player shows the padded layout, such as 6.1 for a `4.0` track.
 A `7.1(wide)` or `7.1(wide-side)` track loses its lossless encode to ADR 0050's downmix.
@@ -929,7 +995,7 @@ After a switch that changed the codec, hls.js left the audio 90 to 140 ms late u
 * Keeping the 65 % count for good lets a lossy commentary's FLAC encode cap a lossless default track at a lossy step.
 * Taking the FLAC bytes from the segments that the worker delivers during playback measures only the segments that viewers watched, after the first stream session already chose its steps.
 * Capping a FLAC or ALAC encode's peak below its PCM bitrate understates a noisy segment, such as the 94 % that decoded white noise reached.
-* Encoding a lossless default track to E-AC-3 before FLAC, as AetherEngine does by default, keeps 5.1 behind a soundbar on legacy ARC.
+* Encoding a lossless default track to E-AC-3 before FLAC, as AetherEngine's default mode does, keeps 5.1 behind a soundbar on legacy ARC; Rivulet runs AetherEngine's lossless mode instead.
 It also turns a 7.1 lossless track into 5.1 lossy audio for every client that declares eight-channel FLAC.
 The client's declaration can make that choice for its own audio path.
 * Decoding AC-3 and E-AC-3 with FFmpeg's default compression changes the dynamics of every encode, a FLAC encode included.
@@ -944,8 +1010,16 @@ The client's declaration can make that choice for its own audio path.
 * FFmpeg's default Opus mapping plays a 5.0 track's dialogue from the rear right.
 * Renditions for the default track and the viewer's preferred languages only leave the file's other languages out of the menu.
 * Encoding DTS whatever the client declares refuses a copy to a client that can play the codec, such as Media3 with an HDMI receiver.
-* Copying TrueHD under `-strict experimental` keeps a bit-identical track for a future client, but relies on muxing that FFmpeg marks experimental, and no tested player played TrueHD from fMP4.
-AetherEngine also treats TrueHD as a codec that cannot be copied into fMP4, and encodes it to FLAC in its lossless mode.
+* Never copying TrueHD loses the Atmos objects for a client that decodes TrueHD or passes it to a receiver, although FFmpeg's experimental muxing kept every packet byte-identical.
+AetherEngine never copies TrueHD into fMP4, because AVPlayer cannot decode it, and decodes it on the device instead.
+* Encoding a TrueHD or DTS default track whenever another track needs its codec keeps every switch free of restarts, but a commentary track then costs the viewer the Atmos copy.
+* Leaving the tracks that cannot reach a TrueHD or DTS session's codec out of the menu hides a commentary or another language from the viewer.
+* Encoding a lossy default track that cannot be copied to E-AC-3, AC-3 or AAC when the client declares FLAC adds a second lossy generation.
+* Choosing among same-language tracks by file order, as Jellyfin does, can pick a stereo track over a surround one, and ignores whether a track is lossless.
+* Copying a disc's lossy track before a FLAC encode of its lossless track gives up lossless audio for the client that declares FLAC.
+* Refusing every FLAC copy whose block size is below 192 samples, for every client, gives up copies that other players accept.
+* Writing the bed's channel count for a copied E-AC-3 track with Atmos leaves AVFoundation nothing above the segments that marks object audio.
+* Matching Rivulet's wider word list, which adds "director", "description" and "narration", marks a main track titled "Director's Cut" as commentary and a dependent narration as a complete description.
 * Encoding a TrueHD track with Atmos to FLAC when the file holds a copyable E-AC-3 track with Atmos keeps a lossless bed but loses the height objects that the E-AC-3 copy keeps.
 * Stepping a hi-res FLAC or ALAC session straight to a lossy codec gives up a FLAC or ALAC step at 48 kHz that adds no coding loss beyond the resampling.
 * Marking the segments after an audio track's end with `EXT-X-GAP` stopped hls.js for good on an iPhone after a switch into the ended track.
@@ -1348,6 +1422,10 @@ The sources were synthetic 48 kHz tones.
 
 * `ffmpeg -encoders` listed `aac`, `ac3`, `eac3`, `flac`, `alac` and `libopus` as ready for use.
 * On 2026-11-02, a copy of a TrueHD track into fragmented MP4 under `-strict unofficial` failed with "truehd in MP4 support is experimental".
+* Under `-strict experimental`, in the pinned image `streamarr/streamarr-transcode-worker:0.1.0-SNAPSHOT@sha256:a11de4631250ce3bb120a734998ecb84bcd9d507a43a5aceb236e892908be481`, with the worker's movie flags (`cmaf`, `delay_moov`, `skip_trailer`, `frag_keyframe`, `frag_discont`), FATE's `truehd/atmos.thd` (7.1, "Dolby TrueHD + Dolby Atmos", 128 access units) and `lossless-audio/truehd_5.1.raw` (5.1, 3,410 access units) became `mlpa` tracks with a `dmlp` box and a 32-bit sample rate field, the form that Media3 reads for TrueHD.
+Every packet kept its size and MD5, the major-sync flags matched the source (214 of 3,410 in the 5.1 sample), and FFmpeg decoded the copies to the source's samples.
+* Copies seeked to 0.5, 1.003, 1.5 and 2.0117 s, with and without an H.264 track, each started at a major sync and wrote the same `dmlp` box.
+* On macOS 26.6.2, AVFoundation loaded each copy's track as `mlpa` with its channel count, and `AVAssetReader` refused to decode it with `fmt?`.
 It marked `dca` (DTS), `truehd`, `mlp` and FFmpeg's native `opus` encoder as experimental.
 * Each encode below wrote fragmented MP4, and ffprobe read back its channel layout.
 * FLAC wrote 3.0 and quad unchanged, and wrote quad(side) as quad.
@@ -1540,4 +1618,9 @@ Each percentage is of the PCM bitrate at 48 kHz and the written depth: 1,536 kb/
 * https://github.com/jellyfin/jellyfin/blob/ed211765c2ebbb3f5093f67596c267058c6a4124/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs#L804-L807[Jellyfin `EncodingHelper.cs`: Opus encodes with `libopus` and no mapping family]
 * https://media.xiph.org/sintel/[Xiph.Org: Sintel soundtrack masters] and https://media.xiph.org/tearsofsteel/[Tears of Steel soundtrack masters and AC-3 track] (Creative Commons Attribution 3.0, Blender Foundation)
 * https://github.com/superuser404notfound/AetherEngine/blob/7.53.0/Sources/AetherEngine/Player/PlayerState.swift#L599-L602[AetherEngine 7.53.0 `PlayerState.swift`: TrueHD is encoded, to FLAC in the lossless mode]
+* https://github.com/superuser404notfound/AetherEngine/blob/7.53.0/Sources/AetherEngine/Video/VideoSegmentProvider.swift#L3114-L3120[AetherEngine 7.53.0 `VideoSegmentProvider.swift`: `CHANNELS="16/JOC"` for a copied E-AC-3 track with Atmos], https://github.com/superuser404notfound/AetherEngine/blob/7.53.0/Sources/AetherEngine/Audio/FLACStreamInfo.swift#L5-L14[`FLACStreamInfo.swift`: CoreMedia's 192-sample floor on a FLAC block size] and https://github.com/superuser404notfound/AetherEngine/blob/7.53.0/Sources/AetherEngine/Audio/AudioBridge.swift#L30-L33[`AudioBridge.swift`: the surround compatibility and lossless modes]
+* https://github.com/l984-451/Rivulet/blob/4ab544bf1bc452f18807156a4a26698801bd07f4/RivuletCore/Playback/Tracks/TrackIntent.swift#L236-L271[Rivulet `TrackIntent.swift`: commentary and audio description by flag, then by words in the title]
+* https://github.com/FFmpeg/FFmpeg/blob/n8.1/libavformat/movenc.c#L8321-L8328[FFmpeg n8.1 `movenc.c`: TrueHD in MP4 needs `-strict experimental`] and https://github.com/FFmpeg/FFmpeg/blob/n8.1/libavformat/movenc.c#L908-L931[the `dmlp` box]
+* https://github.com/androidx/media/blob/1.11.1/libraries/extractor/src/main/java/androidx/media3/extractor/mp4/BoxParser.java#L2167-L2168[Media3 1.11.1 `BoxParser.java`: the `mlpa` sample entry] and https://github.com/androidx/media/blob/1.11.1/libraries/common/src/main/java/androidx/media3/common/MimeTypes.java[`MimeTypes.java`: no `mlpa` codec string]
+* https://developer.apple.com/documentation/http-live-streaming/hls-authoring-specification-for-apple-devices[Apple HLS authoring specification: `CHANNELS="16/JOC"` for Dolby Digital Plus with Atmos, and FLAC and Apple Lossless in fMP4]
 * https://github.com/superuser404notfound/AetherEngine/blob/7.53.0/docs/formats.md#audio[AetherEngine 7.53.0 `docs/formats.md`, Audio]: on-device decoding of TrueHD and DTS-HD MA, the optional lossless FLAC mode up to 7.1, the lost objects, the optional object renderer, and the HDMI routes that tvOS cannot tell apart

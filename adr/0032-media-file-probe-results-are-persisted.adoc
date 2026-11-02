@@ -31,6 +31,13 @@ The server's cancel command tells the worker that a probe reached the timeout.
 Where the host provides Linux pressure stall information, high IO pressure also halves the capacity.
 That brake acts before probes reach the timeout.
 
+A later amendment changes how the background probe capacity grows back after probes time out together (<<probe-capacity-growth>>).
+A probe that started before a brake for a timed-out probe, and then times out too, shows congestion: the host, not one file, is slow.
+From the capacity at that moment upward, the capacity then grows by 1 only once every probe that ran at its previous growth has ended.
+The capacity also does not grow while a probe has run for a quarter of the probe timeout.
+The congestion clears when the capacity grows back to its maximum.
+Below that capacity, and on a host that never shows congestion, the capacity grows as before.
+
 Another amendment stops retrying a probe whose worker replies keep breaking the worker contract (<<probe-contract-violations>>).
 After three consecutive contract violations for the same probe inputs, the server stores a terminal `probe_error`.
 Other temporary failures still retry without a limit.
@@ -1054,6 +1061,7 @@ The limit never falls below 1.
 The limit never rises above the processor count of the worker's JVM.
 In Kubernetes, the deployment example sets that processor count from the worker container's CPU request.
 When a probe ends that used a background unit, and at least half of the limit was in use, the limit grows by 1.
+After the host shows congestion, growth also waits for the conditions of <<probe-capacity-growth>>.
 The limit does not grow while a judged job attempt produces below the floor.
 A brake halves the limit.
 Three brakes exist: the brake for job attempts, the brake for timed-out probes and the brake from pressure stall information.
@@ -1067,6 +1075,7 @@ A fixed reserve of cores for playback would waste those cores while nothing play
 A fixed reserve also could not protect a software encode that needs more cores than the reserve holds.
 Netflix's PlayAPI gives work that users start the first share of its capacity, and prefetch runs only on capacity that remains.
 The 30 s pause after a brake keeps the limit from swinging up and down against a long encode.
+The pause is shorter than the probe timeout, so the pause alone cannot keep the limit from swinging against a busy disk (<<probe-capacity-growth>>).
 LinkedIn's Hodor waits in the same way before it raises a limit again.
 
 ==== The brake for job attempts
@@ -1130,6 +1139,7 @@ A cancel command with the server shutdown reason or another reason never applies
 A keyframe packet scan has a timeout of its own and applies no brake.
 Only a probe that started after the latest brake can apply the next brake for a timed-out probe.
 A probe that started before the latest brake applies no brake when the probe times out.
+When the latest brake was a brake for a timed-out probe, such a probe shows congestion instead (<<probe-capacity-growth>>).
 A brake for a timed-out probe also waits until 15 s have passed since the previous brake, whatever applied that brake.
 After that brake, the limit does not grow for 30 s, as after every brake.
 A probe that ended at the probe timeout never grows the limit.
@@ -1189,6 +1199,116 @@ A cancel command with the shutdown reason therefore never applies a brake.
 The brake for timed-out probes reacts only when a probe reaches the timeout.
 With the default setting, a probe reaches the timeout 60 s after the probe starts.
 Pressure stall information gives an earlier signal where the host provides it.
+
+[[probe-capacity-growth]]
+==== Growth after congestion
+
+A probe that times out and applies no brake shows congestion when two conditions hold:
+
+* The probe started before the latest brake.
+* The latest brake was a brake for a timed-out probe.
+
+Both a background probe and a playback probe can show congestion.
+A keyframe packet scan never shows congestion.
+A timeout after a brake for a job attempt or a brake from pressure shows no congestion.
+A probe that the 15 s wait between brakes kept from applying a brake started after the latest brake, so that probe shows no congestion either.
+
+When a probe shows congestion, the worker keeps two values: the limit at that moment, and the probe's age at its timeout.
+That age is the server's probe timeout, as the worker's clock measures it.
+A later probe that shows congestion replaces both values.
+
+While the limit is at or above the kept limit, the limit grows only when the rules of the background probe capacity allow growth and two more conditions hold:
+
+* Every background probe and playback probe that was running when the limit last grew has ended.
+* No running background probe or playback probe has run for a quarter of the kept probe timeout.
+With the default probe timeout of 60 s, a quarter is 15 s.
+
+Below the kept limit, the limit grows as the background probe capacity section describes.
+The congestion clears when the limit grows back to its maximum.
+The brakes are unchanged.
+A keyframe packet scan neither delays nor holds growth.
+A fixed background probe capacity never adapts, so these rules do not apply to it.
+The worker needs no setting of its own for these rules, because the age of the probe that showed congestion tells the worker the server's probe timeout.
+
+*Why:* Before this amendment, the limit grew by 1 for each probe that ended while at least half of the limit was in use.
+That is TCP's slow start.
+RFC 5681's congestion avoidance, which TCP uses after a loss, adds about one segment for each round trip.
+Most probes of a scan that probes a library again read cached headers and end within milliseconds.
+Those probes grew the limit from half back to its maximum within seconds of the 30 s pause.
+The 30 s pause is also shorter than the delay of the only signal that the brake for timed-out probes reads.
+A probe that starts at the regrown limit on a busy disk outlasts the probe timeout, but the server reports the timeout only when the timeout ends.
+By then the limit is back at its maximum.
+So the limit swung in cycles: overload, timeouts a minute later, a brake to half, the 30 s pause, regrowth within seconds, and overload again.
+
+Each probe that was running at the latest growth must end before the next growth.
+That wait lasts as long as the slowest of those probes, so fast probes cannot shorten it.
+The limit therefore grows by one step for each round trip, as in RFC 5681's congestion avoidance.
+A probe that has run a quarter of the probe timeout warns of the timeouts to come.
+The timeout itself arrives too late to stop the next burst.
+A quarter of the timeout settled every seed of the simulation below.
+A third of the timeout let the limit creep up to where the largest files time out, with 7 timeouts in 4 of 20 seeded hours on the network share model.
+
+Congestion separates a busy host from a slow file.
+A probe that times out beside the probe that applied the brake shows that the host is slow.
+The brake for timed-out probes already reads many timeouts together this way.
+One slow file that times out alone shows no congestion, so the limit grows back after that file as fast as before.
+Below the kept limit, and on every host that never shows congestion, growth for each probe that ends keeps the throughput of large files on fast storage.
+Growth for each round on every host lost about an eighth of the probes per minute on such storage.
+A limit that grows back to its maximum shows that the host serves the maximum again, so the congestion no longer applies.
+
+*Evidence:* A discrete-event simulation compared the rules.
+Every number in this section comes from that simulation, not from a real host.
+The limit's maximum is 32 or 64.
+The server fills every free unit from a backlog larger than the maximum and cancels each probe at 60 s.
+Fast probes take milliseconds.
+Slow probes share the storage: beyond the storage's knee, each slow probe progresses at the knee divided by the number of running probes, times its own speed.
+The work of each probe varies by ±50 %.
+Each figure is the mean of 5 seeds over the 60 simulated minutes after a 15-minute settling period.
+The timeout columns leave out probes that never finish, because no limit avoids those timeouts.
+The brake column counts every lowering of the limit.
+The rules compared are the rule before this amendment, growth for each window of completions (a), a pause as long as the probe timeout (b), a brake at half the probe timeout (c), Gradient2 and Vegas on probe durations (d), growth for each round (g), and combinations of them.
+
+[cols="3,4,1,1,1,1,1,1"]
+|===
+|Storage model (maximum) |Rule |Timeouts while settling |Timeouts per hour once settled |Probes per minute |Slow probes per minute |Limit once settled |Brakes per hour once settled
+
+|Network share, 10 % slow probes of 12 s, knee 4 (32) |Before this amendment: +1 for each probe, 30 s pause |302 |1,262 |257 |6.7 |16–32 |46
+| |(a) |134 |554 |210 |12.8 |9–32 |42
+| |(b) |235 |958 |233 |8.8 |16–32 |39
+| |(a) + (b) |79 |328 |204 |15.4 |7–32 |33
+| |(c) |379 |1,638 |287 |4.2 |16–32 |59
+| |(d) Gradient2 |386 |1,638 |287 |4.2 |14–32 |249
+| |(d) Vegas |241 |1,035 |236 |7.9 |1–32 |8,075
+| |(g) |2 |18 |197 |19.5 |7–17 |12
+| |(c) + (g) |1 |0 |196 |19.6 |3–10 |34
+| |(g) above the congestion, +1 for each probe below it |37 |16 |198 |19.6 |7–17 |12
+| |*This amendment* |33 |*0* |198 |*19.8* |*9–11* |*0*
+|Same network share (64) |Before this amendment |634 |2,642 |398 |1.2 |16–64 |42
+| |(g) |2 |18 |197 |19.5 |7–17 |12
+| |(c) + (g) |1 |0 |196 |19.6 |3–10 |34
+| |*This amendment* |97 |*0* |198 |*19.8* |*8–11* |*0*
+|Mixed library, 40 % slow probes of 8 s, knee 3 (32) |Before this amendment |271 |1,118 |53 |9.8 |16–32 |46
+| |(a) + (b) |9 |38 |55 |21.8 |8–20 |18
+| |(g) |2 |15 |56 |22.2 |8–17 |11
+| |(c) + (g) |1 |0 |56 |22.4 |4–11 |31
+| |*This amendment* |28 |*0* |56 |*22.4* |*9–12* |*0*
+|Local disk, 30 % slow probes of 3 s, knee 16 (32 and 64) |Every AIMD rule |0 |0 |1,049 (32), 1,056 (64) |316 (32), 318 (64) |At the maximum |0
+| |(d) Gradient2 / Vegas (32) |0 |0 |997 / 611 |300 / 184 |9–32 / 6–32 |12,411 / 22,161
+|Large files of 10–30 s on fast storage, 1 in 5,000 never finishes (32) |Before this amendment |0 |0 |312 |93.5 |16–32 |5
+| |(g) |0 |0 |273 |81.6 |9–32 |4
+| |(c) + (g) |0 |0 |274 |81.9 |10–32 |4
+| |*This amendment* |0 |0 |*312* |*93.5* |16–32 |5
+|Same large files (64) |Before this amendment |0 |0 |319 |95.6 |32–64 |5
+| |(c) + (g) |0 |0 |235 |70.4 |9–51 |9
+| |*This amendment* |0 |0 |*319* |*95.6* |32–64 |5
+|===
+
+"Probes per minute" counts every probe that finished.
+On the network share model, the rule before this amendment finished more probes, because fast probes filled units while the slow probes timed out.
+At a maximum of 32, it finished the slow probes at a third of the storage's rate of 20 per minute.
+On the congested models, this amendment is the only rule with no timeouts and no brakes once settled, and it holds a steady limit with the highest rate of slow probes.
+On the large-file models, it keeps the throughput of the rule before this amendment.
+The brakes that remain there come from files that never finish, which the timeout columns leave out.
 
 ==== The brake from pressure stall information
 
@@ -1256,6 +1376,8 @@ The brake for timed-out probes needs a change to the server and to the worker co
 The cancel command must say why the server ended the probe.
 https://github.com/streamarr/streamarr-server/issues/632[streamarr/streamarr-server#632] adds that reason to the server and to the worker contract.
 https://github.com/streamarr/streamarr-transcode-worker/issues/104[streamarr/streamarr-transcode-worker#104] adds the brake for timed-out probes and the brake from pressure stall information to the worker.
+Growth after congestion needs no change to the server or to the worker contract.
+https://github.com/streamarr/streamarr-transcode-worker/pull/128[streamarr/streamarr-transcode-worker#128] changes the worker.
 
 This amendment defers the following work:
 
@@ -1417,6 +1539,12 @@ The brake for timed-out probes lowers the background probe capacity once probes 
 Where the host provides pressure stall information, the brake from pressure lowers the capacity sooner.
 Until a brake applies, the probes can still slow the other service.
 An operator who runs such a service on the host can still hold the background probe capacity at a set value with the worker setting.
+* The first probes that time out together on a busy host still time out.
+On a host without pressure stall information, the server's probe timeout is the only sign of a busy disk.
+After that first burst, the background probe capacity settles below the overload instead of swinging back to it.
+* While the host stays congested, a file whose probe takes longer than a quarter of the probe timeout holds growth.
+The congestion clears only when the capacity grows back to its maximum.
+A slow file that times out alone shows no congestion, so the capacity grows back after it as fast as before.
 * A scan runs more slowly while the worker plays, because the brake for job attempts lowers the background probe capacity.
 Keyframe packet scans wait until playback ends.
 * The worker contract carries a production time with each media segment's upload.
@@ -1588,8 +1716,30 @@ Hill climbing needed noise handling and about ten interacting parameters in the 
 Probe latency depends on each file, and probe latency measures probes, not harm to playback.
 A probe that reaches the probe timeout is not a measure of latency.
 That probe failed, and the server retries the probe from the beginning.
+Growth after congestion (<<probe-capacity-growth>>) reads a probe's age and keeps this rejection.
+A probe's age never applies a brake and never lowers the limit.
+The age only withholds growth, and only after probes that timed out together showed congestion.
+On a host that never shows congestion, a probe's age changes nothing.
+* Grow the limit by 1 for each window of completions, that is, once as many probes have ended as the limit holds.
+A window of completions still fills in well under a second when most probes end within milliseconds.
+In the simulation of <<probe-capacity-growth>>, the network share model still had 554 timeouts per hour once settled.
+* Hold growth after a brake for as long as the probe timeout.
+The longer pause only stretches the cycle, because fast probes still grow the limit back to the overload within seconds after the pause.
+In the simulation, the network share model still had 958 timeouts per hour once settled, and 328 with growth for each window of completions.
+* Brake when a probe has run half of the probe timeout.
+With growth for each probe that ends, the network share model had 1,638 timeouts per hour once settled.
+With growth for each round, no probe timed out once settled, but the limit kept braking about 30 times per hour and stayed lower.
+On large files where 1 file in 5,000 never finishes, that brake with growth for each round finished 235 probes per minute at a maximum of 64, against 319 with this amendment.
+An early brake is also a brake on probe latency, which this list rejects.
+* Use Gradient2 or Vegas from Netflix's concurrency-limits library on probe durations as the limit.
+Probe durations differ by file, so neither limit settled in the simulation.
+On the network share model, Gradient2 had 1,638 and Vegas 1,035 timeouts per hour once settled.
+On local disk, where no AIMD limit braked, Gradient2 and Vegas lowered the limit about 12,400 and 22,200 times per hour and finished fewer probes.
+Both also read probe latency, which this list rejects.
 * Put the probe's deadline in the probe request, and let the worker end the probe at that deadline.
 Two clocks would then enforce one deadline.
+Growth after congestion reads the probe timeout from the age of a probe at its timeout.
+The probe request therefore still carries no deadline, and the worker still ends no probe at a deadline.
 * Treat every cancel of a probe as a timeout.
 The brake would then apply at every server shutdown or restart.
 * Let every probe that reaches the timeout apply a brake.

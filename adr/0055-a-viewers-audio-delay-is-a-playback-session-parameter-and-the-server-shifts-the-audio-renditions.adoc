@@ -1,0 +1,336 @@
+= ADR 0055: A Viewer's Audio Delay Is a Playback Session Parameter, and the Server Shifts the Audio Renditions by It
+
+== Status
+
+Proposed
+
+This decision extends link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043].
+Every audio rendition of a stream session plays shifted by the playback session's audio delay.
+This decision amends link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037].
+A job attempt in a playback session with a positive audio delay delivers an audio lead, which the producer otherwise discards as preroll.
+This decision changes link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045] and link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052].
+With an audio delay other than 0, Original plays the HLS copy instead of direct play whenever one capability entry accepts the HLS copy.
+This decision depends on three audio rules that pending amendments to ADR 0037 and ADR 0043 add (https://github.com/streamarr/streamarr-adr/pull/84[streamarr/streamarr-adr#84], https://github.com/streamarr/streamarr-adr/pull/85[streamarr/streamarr-adr#85]).
+<<decision-prerequisites>> restates them, and this decision holds them as requirements whatever form those amendments take.
+
+== Context
+
+Lip-sync error is the offset between the sound a viewer hears and the picture the viewer sees.
+Most of it comes from the viewer's playback chain, not from the file.
+A TV's picture processing delays the picture.
+A soundbar or a receiver delays the sound while it decodes and processes it.
+Bluetooth headphones and AirPlay delay the sound too.
+Apple's documentation of `AVAudioSession.outputLatency` says that an AirPlay device can add about 2 s.
+The viewer's chain differs from one device and audio output to the next, so one correct offset exists per device and per output.
+
+Streamarr's own contribution to the offset is small.
+With the pending amendments, Streamarr holds its own offset within ±5 ms after a start, a seek, a rendition switch and a quality switch.
+ITU-R BT.1359 puts the detectability threshold at 45 ms with the sound early and 125 ms with the sound late.
+EBU R37 asks a broadcast chain to stay within 40 ms early and 60 ms late.
+So a viewer whose chain adds more than about 45 ms of skew notices it, and Streamarr cannot remove that skew without the viewer's help.
+
+No platform player that Streamarr uses offers an audio delay for HLS:
+
+* `AVPlayerItem` has no audio offset, and `AVAudioSession.outputLatency` is read-only.
+* Apple's What's new in HLS 2026 (June 2026, page 5) lets an `MTAudioProcessingTap` process the mixed audio of an HLS item, except FairPlay-protected audio.
+A tap processes samples as they play, so it can delay the sound but cannot play it earlier.
+* `HTMLMediaElement` has no audio offset, and hls.js 1.7.3 has no setting for one.
+A Web Audio `DelayNode` can delay the sound only, and it mixes to the destination's channel count.
+
+Two Plex clients offer an audio delay: Rivulet and plezy.
+Rivulet's engine, AetherEngine, re-times the segments that it writes for AVPlayer and replaces the player item at the current position to apply a change.
+AetherEngine measured about 0.3 s of held picture per change, with the position kept to the sample.
+Swiftfin, a Jellyfin client, offers a delay only on its VLCKit player and resets it for every title.
+
+The client tickets https://github.com/streamarr/streamarr-web/issues/137[streamarr/streamarr-web#137] and https://github.com/streamarr/streamarr-apple/issues/127[streamarr/streamarr-apple#127] add an audio delay setting to the web and Apple players.
+Both offer ±2,000 ms in 10 ms steps.
+Both recommend that the server deliver the audio renditions shifted by the delay, and both wait for this decision.
+
+Under ADR 0043, every audio track is its own audio rendition, on the stream session's segment list.
+The server keeps the first delivery of each audio segment.
+Under ADR 0037, every delivered media segment is one `moof` and one `mdat`, and the `trun` gives each sample its own duration, size and flags.
+That layout is part of the worker contract (link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc#amends-0037[ADR 0054]).
+
+== Decision
+
+[[decision-parameter]]
+=== The audio delay is a parameter of the playback session
+
+The audio delay is a signed number of milliseconds.
+A positive delay plays the sound later than the picture, and a negative delay plays it earlier.
+The delay runs from −2,000 ms to +2,000 ms in steps of 10 ms, and it is 0 by default.
+
+The audio delay belongs to the playback session.
+Every stream session of the playback session uses it, including the stream session of each new format attempt (ADR 0052).
+The client sends the delay when it creates the playback session, as `audioDelayMilliseconds` in the streaming options of `createPlaybackSession`.
+The client changes the delay during playback with the mutation `setPlaybackSessionAudioDelay`, which takes the playback session's id and the new delay.
+The mutation returns the playback session, whose ready format attempt carries a `streamUrl` for the new delay.
+The server rejects a delay outside the range, or one that is not a multiple of 10 ms, with the typed error `InvalidAudioDelayError` (link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026]).
+Each client clamps the value to the range before it sends it.
+
+The server keeps the delay only while the playback session lasts.
+The server never stores the delay with the Account, the Profile, the device registration or the watch state.
+
+*Why:* The delay describes a device's playback chain, not a title and not a person.
+The same Profile can watch through a receiver on one evening and through AirPods on the next.
+2 s covers the worst case that Apple names for AirPlay, and AetherEngine clamps at the same value.
+10 ms is under a quarter of the smallest offset that BT.1359 says a viewer detects.
+A finer step would add presses on a remote without an audible benefit.
+A playback session already outlives its replacement stream sessions, so a delay stored there survives format recovery without new rules.
+
+[[decision-client-storage]]
+=== Each client keeps the delay per device and per audio output
+
+Each client stores the delay on the device and sends it with every playback session.
+The Apple client keys the value by the current output port's `uid` from `AVAudioSession.currentRoute`.
+A route without a stored value uses 0.
+When the route changes during playback, the Apple client sends the new route's value with `setPlaybackSessionAudioDelay`.
+The web client stores the value in `localStorage` for the browser profile, inside a `try`/`catch`, and uses 0 when storage is unavailable.
+Where the browser exposes `HTMLMediaElement.setSinkId()`, the web client keeps one value per audio output device id.
+A client added later, such as the Android TV client, keys the value by its platform's audio output in the same way.
+The delay never travels with the Account and never reaches another device.
+
+*Why:* HDMI to a receiver and AirPods on the same Apple TV need different values.
+A value synced to the Account would apply one chain's correction to another chain.
+
+[[decision-shift]]
+=== The server shifts every audio rendition by moving timestamps, never samples
+
+The server stores each audio rendition's segments as the worker delivers them, without the delay.
+To serve an audio segment for a delay, the server builds the segment from the stored segments.
+It adds the delay to the start of every stored sample.
+It places each sample in the segment whose interval holds the sample's shifted start, the same placement rule that ADR 0037 and ADR 0043 apply to every audio sample.
+It writes the segment as one `moof` and one `mdat` in ADR 0037's layout, with the shifted decode time in the `tfdt`.
+Each sample keeps its bytes, size, duration and flags.
+
+The shift is the whole number of the track's timescale ticks nearest to the delay.
+The timescale of an audio rendition is its sample rate.
+Every 10 ms step is then a whole number of ticks at any rate that is a multiple of 100 Hz, such as 44.1, 48, 96 and 192 kHz.
+At 11.025 and 22.05 kHz, the shift differs from the delay by at most half a tick, which is 45 µs.
+
+The shift applies to copied and encoded audio alike.
+This is how a delay applies to a copy: the copy's timestamps move, and its samples do not.
+A copy is never resampled, re-encoded or cut inside a frame for the delay, so its packets stay bit-identical.
+A sample whose shifted start falls before media time zero is dropped, as ADR 0043 drops audio before media time zero.
+The last segment takes every sample after its interval, as in ADR 0037.
+
+The delay changes nothing else in the stream session:
+
+* Each audio rendition's initialization segment stays the same for every delay.
+* The segment list, the `EXTINF` durations, the variants' video segments and the WebVTT subtitle segments stay the same.
+Subtitle cues stay on the picture's time.
+* Every audio rendition of the stream session uses the same delay, so a rendition switch keeps it.
+* The stream decision ignores the delay.
+The delay never changes which tracks the server copies, the session's audio codec, the audio step or the cost of a video copy (link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc[ADR 0050], ADR 0054).
+
+The multivariant playlist's `BANDWIDTH` counts each audio rendition's peak over the shifted intervals.
+For a copied audio rendition, the server bounds a shifted segment's audio by the keyframe intervals that overlap the segment's interval moved back by the delay, widened by one audio frame on each side as ADR 0054 does.
+
+A shifted segment uses audio from two stored segments.
+With a positive delay, segment `N` takes the end of stored segment `N − 1`, or the audio lead when the server holds no segment `N − 1` (<<decision-audio-lead>>).
+With a negative delay, segment `N` takes the start of stored segment `N + 1`.
+The server holds a request for a shifted segment until every stored segment it needs has arrived or the output has ended (link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]).
+
+*Why:* In the measurements, a copied AC-3, FLAC or AAC track shifted by moving its decode times kept every packet byte-identical.
+Every decode time moved by exactly the delay in ticks, and every decoded click moved by exactly the delay in samples.
+Each rebuilt segment's samples all started inside the segment's interval.
+A rebuilt segment keeps every sample inside its playlist interval, so players place the shifted audio where the playlist says it is.
+The server runs no FFmpeg (link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033]) and needs none: it rewrites the boxes of the worker's own segment layout.
+Evidence: <<evidence-shift>>.
+
+[[decision-change]]
+=== A change of delay reloads the player at its position and starts no job attempt
+
+Because the server stores the audio without the delay, a change of delay needs no new audio from the worker.
+The running job attempts continue, and the stored video segments serve the reloaded player.
+
+The multivariant playlist's URL, each audio rendition's media playlist URL and each audio segment's URL carry the delay.
+The variants' media playlist URLs and video segment URLs do not, so a reload asks for the same video URLs.
+The server serves the delay that a URL names, after it checks the range and the step.
+
+To apply a change, the client loads the new `streamUrl` at the current position.
+The Apple client replaces the `AVPlayerItem` and seeks the new item to the position.
+A seek alone is not enough, because AVPlayer plays out the segments that it has already buffered.
+The web client loads the new URL in hls.js with the position as its start position.
+The position after the change stays within one video frame of the position before it.
+The picture holds for no more than 0.5 s, the bound that both client tickets set.
+
+*Why:* AetherEngine applies a change the same way and measured about 0.3 s of held picture.
+A delay applied in the worker would need a new job attempt for every running variant at each change.
+The picture would then hold until a new attempt delivered its first segment, and an encoded variant would encode the same video again.
+
+[[decision-audio-lead]]
+=== Job attempts deliver an audio lead while the delay is positive
+
+The audio lead is every audio sample of the 2 s of media time before a job attempt's first media segment, for each audio rendition.
+The producer delivers the audio lead apart from the attempt's media segments.
+Without this decision, the producer discards that audio as preroll (ADR 0037).
+The audio lead's length equals the largest delay, so a lead covers any positive delay.
+
+The server asks for the audio lead in a job when the playback session's delay is positive and the server holds no audio segment before the attempt's first segment.
+For a stream copy, the attempt's input seek then starts 2 s earlier, and the video before the first segment stays preroll.
+For an encode, the audio encode starts on the session's audio frame grid at or before the lead's start, and decodes one period earlier, as every audio encode does (<<decision-prerequisites>>).
+The lead's last sample ends where the first segment's first sample starts.
+
+An attempt that starts at segment 0 has no audio before media time zero to deliver.
+Its audio lead is 2 s of encoded silence in the rendition's delivered codec, with the rendition's sample rate and channel layout.
+The silence ends where the track's first sample starts.
+So a positive delay never leaves the start of the title without audio.
+
+When the viewer sets a positive delay and the segment at the player's position needs an audio lead that no attempt delivered, the server starts a job attempt for the current variant at that segment.
+That attempt delivers the lead, and the request for the shifted segment waits for it.
+An attempt in a session whose delay is 0 or negative delivers no lead, so its seeks read no more of the source.
+Under ADR 0033, the server asks for an audio lead only from a worker that advertises support for it.
+
+*Why:* A positive delay moves the sound after a seek later by up to 2 s.
+Without the lead, a shifted segment after a seek would start with up to 2 s of picture and no sound.
+At media time zero, the source holds no audio before the start, so only encoded silence can fill that time.
+
+[[decision-prerequisites]]
+=== The delay requires contiguous audio that the producer never moves
+
+The delay depends on four rules:
+
+. Every audio track is its own audio rendition (ADR 0043, https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503]).
+The server offers no delay for a stream session with multiplexed variants.
+. Every audio encode starts its input on the session's audio frame grid, counted from the track's probed start.
+FLAC and ALAC write fixed blocks of the sample rate ÷ 20.
+Each attempt decodes from one period early and trims to the first grid point at or after its boundary.
+So the join between two attempts' audio is 0 samples (pending amendment to ADR 0043 in streamarr/streamarr-adr#84).
+. The producer never moves a copied track, and encodes start on the copy's grid (pending amendment to ADR 0037).
+. The producer rebuilds each copied sample's duration from its sample count, and its decode time from the running sum, for any block size (pending amendment to ADR 0037).
+
+A shifted segment spans the join between two stored segments, which can come from different job attempts.
+A `trun` gives each sample a duration, not a start time, so a gap or an overlap at that join cannot be kept inside one segment.
+Rules 2 and 4 make every join contiguous.
+Where a join still overlaps, the server drops the later delivery's overlapping samples.
+Where a join leaves a gap, the server lengthens the duration of the sample before the gap, so every later sample keeps its own start.
+The server counts each such join in a metric.
+
+Rule 3 makes the delay the only intended move of a copied track.
+With encodes on the copy's grid, every audio rendition of the session shares one timing, so one delay suits every rendition.
+Two copied tracks whose frames sit on different grids each keep their authored timing.
+A switch between them plays each track at its own authored time, and the delay adds the same amount to both.
+
+*Why:* ADR 0037's half-frame snap moved a copied track by up to 16 ms for AC-3 and E-AC-3.
+The snap moved a copied AC-3 track with an authored delay of +12 ms a further 14.7 ms later.
+A viewer would tune the delay against that move, and the move differs from track to track.
+In the measurements, AAC copied from Matroska carried 3 frames of 432 with durations of 1,014 to 1,022 samples, because Matroska stores times in whole milliseconds.
+After a cut by a −1,230 ms delay, its clicks decoded 9 samples (0.2 ms) early.
+With every duration at 1,024 samples, the same cut moved every click by exactly the delay.
+Evidence: <<evidence-shift>>.
+
+[[decision-direct-play]]
+=== In Original, a delay other than 0 plays the HLS copy instead of direct play
+
+Direct play sends the source file unchanged, so the server cannot shift its audio.
+When the playback session's delay is not 0, Original skips direct play whenever one capability entry accepts the HLS copy (link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049]).
+Original then starts with the HLS copy, which carries the same video and the same audio packets.
+This applies to the first format, to the fallback order of ADR 0052 and to a viewer who picks Original again.
+When no capability entry accepts the HLS copy, Original direct-plays the file without the delay.
+The client then shows that the delay does not apply to this title in Original.
+The server never encodes the video for the sake of the delay.
+
+When the viewer sets a delay other than 0 during direct play, the client starts the HLS copy at the current position.
+The change is the viewer's own choice, not format recovery.
+It spends no format attempt and keeps the playback session's format-failure history.
+A change back to 0 keeps the HLS copy playing.
+
+*Why:* tvOS starts in Original and direct-plays every file that its declaration covers (ADR 0045).
+The Apple TV is Streamarr's primary client, so a delay that did not apply in direct play would not apply on the primary client.
+The HLS copy changes no video or audio sample.
+An encode would trade picture quality for the delay, and a viewer who wants that can pick Auto.
+
+[[decision-recovery]]
+=== Format recovery keeps the delay
+
+Each new format attempt of ADR 0052 starts its stream session with the playback session's delay.
+A change of delay spends no format attempt and never resets the format-failure history.
+A viewer who picks Original again keeps the delay.
+A format error in a stream whose audio is shifted takes the same recovery path as any other format error.
+
+*Why:* The delay belongs to the viewer's chain, which a format attempt does not change.
+
+[[decision-deferred]]
+=== Explicitly deferred
+
+* A client-side delay during direct play for a file that no HLS copy fits.
+* A suggested starting delay from the latency that a platform reports, such as `AVAudioSession.outputLatency`.
+* A per-title correction for a file whose own audio is out of sync.
+* The setting in the Android TV client.
+
+== Consequences
+
+* A viewer on any client can move the sound up to 2 s earlier or later in 10 ms steps.
+Every channel, every codec and every bit-identical copy stays as it is.
+* The server gains a writer for the worker's audio segment layout, which reads the stored samples and writes shifted segments.
+Its tests compare every packet's bytes before and after a shift.
+* The worker gains the audio lead and the silent lead at media time zero, behind an advertised capability.
+* With a positive delay, a copy attempt's seek reads 2 s more of the source.
+* With a negative delay, a start or a seek waits for the next segment's audio as well.
+At 3 s segments and the speed floor of about 2.10× real time, an encode delivers that segment up to about 1.4 s later.
+A copy runs faster than the speed floor.
+* With a negative delay, the first part of the title's audio, up to 2 s, is never heard, and the audio ends up to 2 s before the picture.
+* With a delay other than 0, Original on tvOS plays the HLS copy, which costs one worker remux job per stream session.
+* Each client's merge check runs a synthetic stream with a click every second and a flash on the same frame.
+At +200 ms and −200 ms, the decoded click moves by the set amount within ±10 ms against the flash.
+The check also covers a start at media time zero at +2,000 ms, a seek at +2,000 ms, the end of the title at −2,000 ms, and a rendition switch and a quality switch at a set delay.
+The web check runs in Chromium, Firefox and WebKit headless, and the Apple check runs on an iPhone.
+The Apple TV and SHIELD checks run once at the end of the epic and gate nothing.
+They include an E-AC-3 copy with Atmos through a receiver at +200 ms, to hear whether the silent lead switches the receiver out of Atmos at the start.
+
+== Rejected Alternatives
+
+* A client-side delay with an `MTAudioProcessingTap` or a Web Audio `DelayNode` — it can only delay, so a negative delay is impossible, and a tap may make AVPlayer decode E-AC-3 that would otherwise pass through.
+* An AVPlayer audio offset — AVPlayer has none, and `outputLatency` is read-only.
+* Two synchronized AVPlayers, one for the video and one for the audio rendition — the video player still downloads its own audio, and the drift between two players is unmeasured.
+* An own renderer on `AVSampleBufferRenderSynchronizer` — it leaves the platform player, against ADR 0045.
+* The worker applies the delay in the job — each change needs new job attempts, and the picture holds until they deliver.
+* A new stream session for each change — the same cost as a delay in the worker, with a new segment store as well.
+* Moving the decode times without moving samples between segments — each segment's audio would lie up to 2 s outside its playlist interval, so a player that seeks by the playlist would fetch the wrong audio segment.
+* An edit list in the initialization segment for each delay — an audio rendition's initialization segment must be the same for every job attempt (ADR 0037), and edit lists are not yet verified in hls.js and on the Apple TV.
+* Shifting the video instead of the audio — each segment opens at a video keyframe inside its interval (ADR 0037), and the subtitles would have to move with the picture.
+* Resampling or re-encoding a copy to apply the delay — it would destroy the bit-identical copy.
+* Storing the delay with the Account or the Profile — it describes one device's chain.
+* Storing the delay with the device registration on the server — the server does not see which audio output the device uses.
+* A range beyond ±2 s — it would need a longer audio lead, and Apple names about 2 s as the AirPlay worst case.
+
+== Evidence
+
+[[evidence-shift]]
+=== Moving decode times keeps every packet and moves the sound exactly
+
+*Setup:* FFmpeg 8.1.3 at `/layers/com.streamarr.ffmpeg/ffmpeg/bin/ffmpeg` in `streamarr/streamarr-transcode-worker@sha256:f2011e95de3323e4b31de2fd3e22c0bee980ee2d2993ac404aa1bc5ac7d78691`.
+The sources were synthetic 10 s click trains with a 1 ms click every second:
+
+* AC-3 at 448 kb/s, stereo, 48 kHz, in Matroska;
+* FLAC, mono, 48 kHz, in Matroska;
+* AAC at 192 kb/s, mono, 44.1 kHz, in Matroska, and the same AAC written straight to fragmented MP4.
+
+FFmpeg copied each track into fragmented MP4 with 3 s fragments.
+A script then did what the server does: it added the delay to every sample's start and rebuilt one `moof` and one `mdat` per 3 s interval.
+The delays were +730 ms and −1,230 ms.
+`-f framemd5` with `-copyts` compared the packets, and a decode with timestamps honoured located each click.
+
+*Results:*
+
+* Every packet kept its bytes and its size, in all 1,503 packets compared across the five shifted files.
+* Every decode time moved by exactly the delay: 35,040 and −59,040 ticks at 48 kHz, and 32,193 and −54,243 ticks at 44.1 kHz.
+* In all 18 rebuilt segments, every sample started inside the segment's interval.
+* Every decoded AC-3 and FLAC click moved by exactly the delay in samples.
+For AAC written straight to MP4, every click moved by exactly the delay at both delays.
+* The −1,230 ms delay dropped the audio before media time zero: 39 AC-3 frames and 53 AAC frames.
+* AAC copied from Matroska moved by exactly the delay at +730 ms.
+At −1,230 ms, its clicks decoded 9 samples early, because 3 of its 432 frames carried durations of 1,014 to 1,022 samples.
+
+== References
+
+* https://github.com/streamarr/streamarr-web/issues/137[streamarr/streamarr-web#137]: the web player's audio delay setting
+* https://github.com/streamarr/streamarr-apple/issues/127[streamarr/streamarr-apple#127]: the Apple player's audio delay setting
+* https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503]: each audio track as its own rendition
+* https://github.com/streamarr/streamarr-adr/pull/84[streamarr/streamarr-adr#84] and https://github.com/streamarr/streamarr-adr/pull/85[streamarr/streamarr-adr#85]: the pending audio amendments to ADRs 0037 and 0043
+* https://www.itu.int/rec/R-REC-BT.1359[ITU-R BT.1359]: relative timing of sound and vision for broadcasting
+* https://tech.ebu.ch/publications/r037[EBU R37]: the relative timing of the sound and vision components of a television signal
+* https://developer.apple.com/documentation/avfoundation/avplayeritem[AVPlayerItem], https://developer.apple.com/documentation/avfoundation/avplayeritem/audiomix[`audioMix`] and https://developer.apple.com/documentation/avfaudio/avaudiosession/outputlatency[`outputLatency`]
+* https://developer.apple.com/streaming/Whats-new-HLS.pdf[What's new in HLS 2026]: an `MTAudioProcessingTap` on HLS items
+* https://bugs.webkit.org/show_bug.cgi?id=266922[WebKit bug 266922]: Media Source Extensions media feeds zeros into a `MediaElementAudioSourceNode`

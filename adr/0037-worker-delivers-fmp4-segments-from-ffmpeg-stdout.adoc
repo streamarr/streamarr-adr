@@ -383,8 +383,13 @@ An encoded output can still exceed its bound, because a hardware encoder or a ra
 Every replacement attempt would repeat the failure, so the server spends no replacement attempt on it.
 It starts a new format attempt under link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052] instead, whose stream session uses the plain 3 s grid and encodes every variant's video.
 That format attempt counts against the playback session's format-attempt budget, as every ADR 0052 fallback does, and in Original the playback choice changes to Auto.
-A producer of a long merged segment is not taken for stalled: wherever ADR 0019 allows one target segment duration for a segment, a merged segment counts its own length.
-After a publication, the producer receives the stall threshold plus the length by which the next segment exceeds one slot, so a short segment after a long one gets the stall threshold alone, and a long segment after a short one gets its whole excess.
+A producer of a long merged segment is not taken for stalled while its output advances.
+Once a second, the worker reports the media time that a job attempt's output has reached, whenever that time has advanced since its previous report for the attempt.
+That time is the end of the latest video sample that the producer has read from FFmpeg's output, whether or not the segment that holds it has closed.
+Each report that advances the output restarts the server's stall clock, as a publication does (link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]).
+So an encode that runs below real time keeps its producer through a merged segment of any length while FFmpeg's output advances.
+A producer whose output stops advancing is replaced after the stall threshold, whatever the segment's length.
+The progress report is a field of the worker contract (https://github.com/streamarr/streamarr-server/pull/723[streamarr/streamarr-server#723]).
 A client scales its wait for a segment, and its stall limit, by the advertised duration of that segment and of every earlier segment of the same playlist that it has requested and not yet received.
 So a client neither abandons a long merged segment that a healthy producer is still encoding nor abandons the short segment after it, which waits for the same producer to finish both (see prefetch below).
 A player whose wait follows the target duration, such as AVPlayer, waits at least the longest merged segment's length for any segment.
@@ -1344,7 +1349,7 @@ Once merged segment lists arrive, every stream session uses 3 s slots, and a str
 A stream session that offers a copy beside encoded variants therefore needs encodes whose rate control enforces a maximum rate, and the rate-control choices that ADR 0044 defers must provide one.
 Without a measurement, a copy whose merged segment exceeds the segment cap fails at that segment, and a new format attempt encodes on the plain grid under ADR 0052.
 * An encoded variant that shares a merged segment list encodes a whole merged segment before it publishes that segment, so a seek or a switch into a long merged segment waits longer for its first picture.
-The server's stall allowance and each client's segment wait grow with the segment's length instead of failing a healthy producer.
+The server keeps a producer while its reported output advances, and each client's segment wait grows with the segment's length, so neither fails a healthy producer.
 * In a stream session with a copied variant, every variant's last segment can last up to twice the period when the grid's final interval holds no source keyframe.
 * The server encodes a source until it knows the source's keyframe positions, so a file without a usable container index is encoded until its keyframe scan finishes.
 * A keyframe-verified encoder's segments hold one keyframe instead of the two that most segments hold under the floored GOP.
@@ -1518,6 +1523,12 @@ That holds for the narrower escape of letting only the encoded variants keep the
 * Checking only the copy against the segment cap would leave every encoded variant and audio rendition on the same merged segment unchecked, although an encode can write more bytes than the copy for that interval.
 * Checking each output against the segment cap on its own would admit six audio renditions of 50 MiB each for one interval, although the one producer that holds them beside the video has a budget of 256 MiB.
 * Scaling a client's wait by the requested segment's duration alone would let it abandon a short segment that waits behind a held long one on the same producer.
+* Giving a long merged segment's producer a wall-clock allowance, the stall threshold plus the length by which the segment exceeds one slot, replaces an encode that runs below real time although its output keeps advancing.
+With a 10 s stall threshold, a 60 s merged segment receives 67 s, and an encode at 0.4 times real time needs 150 s for it.
+Any wall-clock allowance assumes an encoding speed.
+* Taking progress from each segment's reported production time shows nothing until the segment closes, which is the wait that a long merged segment makes too long.
+* Leaving liveness inside a segment to the worker's encoder-stall watchdog alone would drop the server's own check under ADR 0019.
+That check also catches a worker that stays connected while its producer stops for a reason that the watchdog doesn't watch, such as a fault after the reader took FFmpeg's bytes.
 * Refusing a merged list whenever a copied output has no measurement would encode most Matroska sources until their background bitrate scan finishes.
 * Counting a held request's segment toward the relocation gap would relocate a prefetch past that segment, and ADR 0019's newest-request rule would answer the held request `503`, as the rejected one-segment gap did.
 * Never relocating while an earlier request of the same variant is held would make a player that seeks while an old request is held wait for the old producer to reach the new position.

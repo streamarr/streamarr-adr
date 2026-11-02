@@ -58,6 +58,7 @@ Playback keeps using each file's probe version 5 outcome until the server stores
 
 Another amendment adds probe version 7 (<<probe-version-7>>).
 Probe version 7 reports each audio stream's channel layout, as ffprobe names it, and its sample format and bit depth.
+It also reports each FLAC stream's minimum block size from its STREAMINFO block, which tells the server whether Apple's players accept a copy.
 It also reports seven dispositions of each audio stream, such as commentary and audio description, which name a track for the viewer, and the commentary disposition of each subtitle stream.
 The server names an encode's output channel layout from that fact, as link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc#decision-channel-layout[ADR 0050] decides.
 The server sends a job that names a layout of 3, 4, 7 or 8 channels only to a worker that lists probe version 7.
@@ -132,7 +133,7 @@ The row also stores the language and the default and forced flags.
 Probe version 4 adds the stream facts listed in <<probe-version-4,the probe version 4 section>>.
 Probe version 4 also reports the container's chapters.
 Probe version 5 adds the stream facts listed in <<probe-version-5,the probe version 5 section>>.
-Probe version 7 adds each audio stream's channel layout, sample format, bit depth and seven dispositions, and each subtitle stream's commentary disposition (<<probe-version-7>>).
+Probe version 7 adds each audio stream's channel layout, sample format, bit depth and seven dispositions, each FLAC stream's minimum block size, and each subtitle stream's commentary disposition (<<probe-version-7>>).
 The database stores no `MediaFileProbePropertyIssue`.
 The server derives each issue from the stored facts, as ADR 0036 decides.
 https://github.com/streamarr/streamarr-server/issues/546[streamarr/streamarr-server#546] decides how the server stores the chapters.
@@ -546,7 +547,7 @@ While worker versions differ, the server accepts that a copy on an older worker 
 
 Probe version 7 reports every fact of probe version 6.
 https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] decides why the server needs the layout.
-Probe version 7 adds two kinds of stream fact to a successful outcome: the channel layout of each audio stream, and seven of its dispositions.
+Probe version 7 adds audio stream facts to a successful outcome: each audio stream's channel layout, its sample format and bit depth, seven of its dispositions, and a FLAC stream's minimum block size.
 The worker reports the layout name that ffprobe prints in the stream's `channel_layout` field, such as `stereo`, `3.0`, `quad` or `5.1(side)`.
 The worker never maps or shortens the name.
 When ffprobe prints `unknown`, the stream reports no layout.
@@ -560,6 +561,13 @@ The bit depth is ffprobe's `bits_per_raw_sample`, or else its `bits_per_sample`,
 A value of 0 or `N/A` counts as absent.
 The worker never maps either value.
 link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043] decides how an encode uses them.
+
+Probe version 7 also reports each FLAC audio stream's minimum block size: the first field of the stream's STREAMINFO block, in samples.
+The field states the smallest block of the stream, its last block excluded.
+ffprobe prints the STREAMINFO block as the stream's extradata, so the field comes from the same ffprobe run.
+When the stream has no STREAMINFO block of 34 bytes, it reports no block size.
+Other audio streams report no block size.
+link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc#decision-audio-codec[ADR 0043] decides when a FLAC copy needs it.
 
 Probe version 7 also reports seven of ffprobe's dispositions on each audio stream, as true or false:
 
@@ -598,7 +606,12 @@ On the upgrade, the server queues a re-scan itself, as <<upgrade-rescan,the sect
 Playback keeps using each file's probe version 6 outcome until the server stores the file's probe version 7 outcome.
 A probe version 6 outcome carries no layout, so each of its audio streams has an unknown layout.
 It carries none of the seven flags either, so each of them counts as false.
-It carries no sample format or bit depth, so each audio stream's depth is unknown, and no subtitle stream's commentary flag, which counts as false.
+It carries no sample format or bit depth, so each audio stream's depth is unknown, no FLAC block size, which stays unknown, and no subtitle stream's commentary flag, which counts as false.
+
+Probe version 7 reports no loudness fact.
+A later background scan, like the bitrate scan of link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc[ADR 0054], will measure each audio track's integrated loudness, loudness range and true peak.
+Those facts serve a later loudness normalisation or dialogue boost that the viewer turns on.
+That decision is deferred, and it adds no probe version and no re-scan.
 
 *Why:* FFmpeg's `-ac` option names a channel count only.
 For 3 and 4 channels, the pinned FFmpeg then picks the encoder's default layout for that count, whatever the source's layout.
@@ -622,13 +635,21 @@ That can push a stream session under a maximum bitrate to a lossy audio step, al
 Jellyfin and AetherEngine record the depth too.
 The subtitle commentary flag lets ADR 0043 name a commentary subtitle track, and adding it to a later probe version would need another re-scan of every file.
 The upgrade to probe version 7 already re-scans every file, so the flags arrive without a second re-scan.
-A commentary track or an audio description usually shares the main track's language, so only these flags or a title tell it apart.
-Rivulet reads both flags from the container and keeps such tracks out of its automatic choice; Plex exposes neither, and Jellyfin reads `original` but neither of these.
+A commentary track or an audio description usually shares the main track's language, so only these flags or a title tell it apart, and ADR 0043 reads the title when neither flag is set.
+Rivulet reads both flags from the container, falls back to words in the title, and keeps such tracks out of its automatic choice.
+Plex stores the visually impaired flag and no commentary flag, and Jellyfin reads `original` but neither of these.
 An audio description maps to HLS's `public.accessibility.describes-video` characteristic, which players use to pick it for a viewer who asks for described video.
 MPEG-TS marks an audio description in two ways: FFmpeg reads the ISO 639 descriptor's audio type 3 as both `visual_impaired` and `descriptions`, but the AC-3 and E-AC-3 descriptors' visually impaired service type as `descriptions` alone.
 The original and dub flags mark the original-language track, and the clean-effects flag marks a track without dialogue, which a viewer would otherwise pick by mistake.
 A dependent track does not play on its own, so a viewer who picks it hears only the narration.
 The measurements are in <<evidence-audio-dispositions>>.
+Apple's CoreMedia drops a FLAC track whose STREAMINFO minimum block size is below 192 samples: AVFoundation listed no audio track for such a copy in fragmented MP4, whatever the size of its frames.
+A copy of that track would play without sound on every Apple client, so the server must know the field before it chooses a copy.
+The field comes from the same ffprobe run as every other stream fact, so it adds no read.
+AetherEngine reads the same field before it copies FLAC.
+The measurements are in <<evidence-flac-block-size>>.
+A loudness measurement decodes every audio track of a file, which the probe's one ffprobe run does not do, and a background scan can measure it without holding playback behind it.
+Plex stores loudness, loudness range and peak for each stream.
 
 [[probe-version-8]]
 === Probe version 8 reports the start time correction that a job attempt's FFmpeg makes
@@ -931,7 +952,7 @@ Probe version 4 also reports the keyframe positions of version 3.
 https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] adds those facts.
 * Probe version 6 adds the bitrates from Matroska statistics tags, and whether a copy keeps every packet's bytes, that <<probe-version-6,the probe version 6 section>> describes.
 streamarr/streamarr-transcode-worker#117 adds those facts.
-* Probe version 7 adds each audio stream's channel layout and seven audio dispositions, as <<probe-version-7,the probe version 7 section>> describes.
+* Probe version 7 adds each audio stream's channel layout, sample format, bit depth and seven audio dispositions, and each FLAC stream's minimum block size, as <<probe-version-7,the probe version 7 section>> describes.
 https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] decides the rule that reads the layout.
 * Probe version 8 adds the start time correction that <<probe-version-8,the probe version 8 section>> describes.
 https://github.com/streamarr/streamarr-server/issues/664[streamarr/streamarr-server#664] adds that fact.
@@ -1633,7 +1654,8 @@ Probe version 5 reads such static metadata from the first frame, or from the SEI
 * The re-scan on the upgrade to probe version 5 probes every file again.
 Each of those probes reads the first frames of the chosen video stream.
 Each file keeps its probe version 4 decisions until the server stores the file's probe version 5 outcome.
-* The re-scan on the upgrade to probe version 7 probes every file again, although the layout, the sample format, the bit depth and the dispositions add no read to a probe.
+* The re-scan on the upgrade to probe version 7 probes every file again, although the layout, the sample format, the bit depth, the dispositions and the FLAC block size add no read to a probe.
+* Until the server stores a file's probe version 7 outcome, its FLAC tracks have an unknown block size, so no Apple client gets a copy of them (ADR 0043).
 * Until ADR 0043 reads the audio dispositions, the server stores them without changing any rendition's name.
 * An AC-3 or E-AC-3 track whose bitstream mode is not complete main reports only that mode's disposition.
 FFmpeg drops the container's flags for it, including `default`, `original` and `hearing_impaired`.
@@ -1679,6 +1701,10 @@ Probe versions take numbers in the order in which they ship.
 The channel layout blocks streamarr/streamarr-server#711, and no change has yet implemented the start time correction.
 * Leave the commentary and visual-impaired dispositions, or the subtitle commentary flag, to a later probe version.
 Every library would then need a second re-scan before ADR 0043 could name a commentary or an audio description track.
+* Check a FLAC track's block size in the worker when a job copies the track.
+The server chooses the copy before the job starts, so a refused copy would cost a format attempt, and the server would still not know which clients can take the track.
+* Add loudness facts to probe version 7.
+A loudness measurement decodes every audio track of the file, which a probe does not do, and a background scan measures it without delaying playback of an unprobed file.
 * Infer the bit depth from the codec.
 A 16-bit FLAC, ALAC or TrueHD track would count as 24-bit, and its cost under the maximum bitrate would come out 1.5 times too high.
 * Report one audio description flag that combines `visual_impaired` and `descriptions`.
@@ -2303,6 +2329,18 @@ The sources were a 2 s stereo sine tone that the same FFmpeg wrote in each forma
 * A 32-bit depth with the sample format `flt` or `fltp` marks floating-point samples.
 * 10 s of 16-bit 7.1 pink noise written as 24-bit FLAC took 742,959 bytes, against 742,854 bytes at 16 bits.
 
+[[evidence-flac-block-size]]
+=== FLAC block size
+
+These measurements ran on 2026-11-02 against FFmpeg and ffprobe 8.1.3 in the pinned worker image and AVFoundation on macOS 26.6.2.
+FFmpeg encoded 5 s of a 1 kHz stereo tone at 48 kHz to FLAC in Matroska with `-frame_size` 144, 191, 192 and 4,608, then copied each track into fragmented MP4 with the worker's flags.
+
+* ffprobe with `-show_data` printed each stream's STREAMINFO block as its extradata, and its first two bytes gave the minimum block size: `0090` for 144 and `1200` for 4,608.
+A raw FLAC file printed the same block.
+* AVFoundation's `loadTracks(withMediaType: .audio)` returned no track for the copies with blocks of 144 and 191 samples.
+For 192 and 4,608 samples it returned one `flac` track, and `AVAssetReader` decoded all 240,000 frames.
+* AetherEngine 7.53.0 measured the same floor on macOS 26: a field below 192 drops the audio track even when every frame holds 4,608 samples, and a field of 192 over real 144-sample frames hangs Apple's decoder.
+
 [[evidence-audio-dispositions]]
 === Audio dispositions
 
@@ -2358,6 +2396,8 @@ FFmpeg's AC-3 encoder accepts the commentary mode only for mono, so the test did
 * https://www.rfc-editor.org/rfc/rfc5681[RFC 5681: TCP Congestion Control]
 * https://github.com/FFmpeg/FFmpeg/blob/23151b11c75aa44d9ab8db796a53c76acf00f6c0/fftools/ffprobe.c#L2440-L2442[FFmpeg 8.1.3's ffprobe sets `scan_all_pmts` by default] and https://github.com/FFmpeg/FFmpeg/blob/23151b11c75aa44d9ab8db796a53c76acf00f6c0/libavformat/mpegts.c#L3109-L3121[its MPEG-TS demuxer reports every program's table only with `scan_all_pmts` off]
 * https://github.com/chromium/chromium/blob/4a84ff43ddb481a1c0035b185fe384870f5e428c/media/formats/mp4/aac.cc#L269[Chromium's AAC parser refuses channel configuration 0]
+* https://github.com/superuser404notfound/AetherEngine/blob/7.53.0/Sources/AetherEngine/Audio/FLACStreamInfo.swift#L5-L14[AetherEngine 7.53.0 `FLACStreamInfo.swift`: CoreMedia's 192-sample floor on the STREAMINFO minimum block size]
+* https://www.rfc-editor.org/rfc/rfc9639#section-8.2[RFC 9639 §8.2: FLAC's STREAMINFO block]
 * https://ffmpeg.org/ffmpeg-utils.html#Channel-Layout[FFmpeg channel layout names]
 * https://docs.kernel.org/accounting/psi.html[Linux kernel documentation: PSI - Pressure Stall Information]
 * https://ffmpeg.org/ffprobe.html[ffprobe documentation]

@@ -117,9 +117,11 @@ Otherwise the encode follows link:0050-viewer-limits-bind-copies-and-quality-tie
 It takes the first of E-AC-3, AC-3 and AAC whose capability entry for HLS keeps more than two of the track's channels.
 When none does, it takes AAC with at most two channels.
 * When the default track can be copied but its codec has no encoder that the server uses, and another track would have to be encoded to that codec, the default track is encoded too.
-DTS and TrueHD are those codecs today.
+DTS is that codec today, and TrueHD is never copied (below).
 The session's audio codec is then the codec of the default track's encode, as in the previous case.
 So a TrueHD or DTS-HD MA default track becomes FLAC wherever the client declares FLAC with enough channels.
+* When the default track is TrueHD with Dolby Atmos and the file holds an E-AC-3 track with Atmos (JOC) in the same language that can be copied, that E-AC-3 track becomes the default track and is copied.
+The copy keeps the objects, which a FLAC encode of the TrueHD track loses.
 
 A FLAC encode of a lossless default track keeps every channel of the track, up to eight, by the layout rules below.
 FFmpeg decodes the channel mix of a TrueHD track with Dolby Atmos and of a DTS-HD MA track with DTS:X, and ignores their objects, so the encode loses the objects.
@@ -127,6 +129,12 @@ Only a player that decodes such a track itself can keep them.
 AetherEngine, the playback engine of the tvOS player Rivulet, renders TrueHD Atmos and DTS:X objects into a speaker mix on the device in an optional build.
 A server encode cannot, because neither FLAC nor the server's other encodes carry objects.
 The lossless encode has no audio steps of its own, so under ADR 0050 it steps like a copied FLAC track, through the E-AC-3, AC-3 or AAC encode that the server would choose without it.
+
+A FLAC or ALAC rendition above 48 kHz, copied or encoded, adds one audio step before ADR 0050's multichannel steps.
+That step keeps the codec, the layout and the probed depth, at 48 kHz, or at 44.1 kHz when the source's rate is a multiple of 44.1 kHz.
+Like every step, it counts only when it is smaller than the session's audio, and under it every rendition above that rate is resampled to it.
+So a maximum bitrate reaches a lossy step only when the 48 kHz or 44.1 kHz lossless step does not fit either.
+A client can also bound the rate in its FLAC or ALAC capability entry with ADR 0049's optional maximum sample rate (https://github.com/streamarr/streamarr-server/issues/717[streamarr/streamarr-server#717]).
 
 Each other track keeps its own copy-or-encode decision.
 Another track is copied only when that track already has the session's audio codec and a capability entry accepts the track.
@@ -173,15 +181,17 @@ A segment can hold one more frame than its interval: FFmpeg's FLAC encoder write
 A cap below it would understate some segments: the largest 3 s window of a decoded film track reached 85 % of the PCM bitrate, and of decoded white noise 94 %.
 Evidence: <<evidence-lossless-size>>.
 
-DTS and TrueHD follow the same declared-codec rule as every other codec.
-A DTS or TrueHD track is copied only when the client declares that codec in fMP4.
-Otherwise the DTS or TrueHD track is encoded.
-A file whose only audio track is DTS or TrueHD keeps that copy, because no other track needs the codec.
+DTS follows the same declared-codec rule as every other codec.
+A DTS track is copied only when the client declares DTS in fMP4, and is otherwise encoded.
+A file whose only audio track is DTS keeps that copy, because no other track needs the codec.
+A TrueHD track is never copied.
+FFmpeg's MP4 muxer writes TrueHD only under `-strict experimental`, and the worker passes `-strict unofficial`.
+So a file whose only audio track is TrueHD encodes it like any other lossless default track, to FLAC wherever a FLAC capability entry for HLS accepts its channels.
 No tested browser or Apple player decoded DTS or TrueHD from fMP4, in 0 of 36 plays across six players.
-Media3, the Android media library, can play both codecs on the SHIELD TV Pro by passthrough to an HDMI receiver, or with Media3's FFmpeg decoder module.
+Media3, the Android media library, can play DTS on the SHIELD TV Pro by passthrough to an HDMI receiver, or with Media3's FFmpeg decoder module.
 A reading of Media3 1.11.1's source found both Media3 paths, and no measurement covers them.
-The Android client declares DTS and TrueHD only after a check on the SHIELD TV Pro through an HDMI receiver (https://github.com/streamarr/streamarr-android/issues/1[streamarr/streamarr-android#1]).
-The Android client declares TrueHD only once the client regroups TrueHD frames for passthrough.
+The Android client declares DTS only after a check on the SHIELD TV Pro through an HDMI receiver (https://github.com/streamarr/streamarr-android/issues/1[streamarr/streamarr-android#1]).
+A TrueHD capability entry for HLS changes nothing, because the server never copies TrueHD.
 
 *Why:* In the audio measurements, hls.js 1.7.0 in Chromium, Chrome and Firefox played audio renditions of AAC, Opus and FLAC, and the page switched between those renditions.
 After a switch that changed the codec, the audio played 90 to 140 ms late until the next seek.
@@ -751,8 +761,11 @@ The lossless encode adds no quality, because the lossy source already lost it.
 A lossless rendition counts 65 % of its output's PCM bitrate and peaks at the full rate, so an encoded FLAC or ALAC track can be larger than the copied default track, and it then raises every variant's cost and `BANDWIDTH`.
 Such a track then becomes the step track (ADR 0050).
 A step below the session's audio caps every rendition.
-* A client that declares DTS or TrueHD loses the copy of a DTS or TrueHD default track when another track would need an encode to that codec.
+* A client that declares DTS loses the copy of a DTS default track when another track would need an encode to DTS.
 The default track is then encoded with the other tracks, so a switch stays in sync.
+* No client gets a TrueHD copy, even a Media3 player that could pass TrueHD through to a receiver.
+A TrueHD track reaches every client as FLAC or as ADR 0050's lossy encode, so its Atmos objects reach no client unless the file also holds an E-AC-3 track with Atmos.
+* A FLAC or ALAC session above 48 kHz under a maximum bitrate stays lossless at 48 or 44.1 kHz before it goes lossy.
 * A client that declares FLAC with eight channels gets a TrueHD or DTS-HD MA default track as lossless 7.1, and every other track of the file as FLAC.
 The Atmos or DTS:X objects of such a track are lost.
 * A lossless `2.1`, `3.1`, `3.0(back)`, `4.0`, `4.1`, `6.0` or `7.0` track reaches the player as FLAC with silent channels, and the player shows the padded layout, such as 6.1 for a `4.0` track.
@@ -848,7 +861,11 @@ The client's declaration can make that choice for its own audio path.
 * Encoding such a track to E-AC-3 or AC-3 keeps its layout but loses samples, and a stereo FLAC downmix changes the mix and can run ADR 0050's limiter.
 * FFmpeg's default Opus mapping plays a 5.0 track's dialogue from the rear right.
 * Renditions for the default track and the viewer's preferred languages only leave the file's other languages out of the menu.
-* Encoding DTS and TrueHD whatever the client declares refuses a copy to a client that can play the codec, such as Media3 with an HDMI receiver.
+* Encoding DTS whatever the client declares refuses a copy to a client that can play the codec, such as Media3 with an HDMI receiver.
+* Copying TrueHD under `-strict experimental` keeps a bit-identical track for a future client, but relies on muxing that FFmpeg marks experimental, and no tested player played TrueHD from fMP4.
+AetherEngine also treats TrueHD as a codec that cannot be copied into fMP4, and encodes it to FLAC in its lossless mode.
+* Encoding a TrueHD track with Atmos to FLAC when the file holds a copyable E-AC-3 track with Atmos keeps a lossless bed but loses the height objects that the E-AC-3 copy keeps.
+* Stepping a hi-res FLAC or ALAC session straight to a lossy codec gives up lossless audio that fits at 48 kHz.
 * Marking the segments after an audio track's end with `EXT-X-GAP` stopped hls.js for good on an iPhone after a switch into the ended track.
 * Padding a copied track with silence in the track's own codec, without encoding the track, needs a way to make silence in every codec that the worker copies.
 Encoding the track pads every codec in the same way.
@@ -1236,6 +1253,7 @@ The checks ran FFmpeg 8.1.3 from the pinned worker image, `streamarr/streamarr-t
 The sources were synthetic 48 kHz tones.
 
 * `ffmpeg -encoders` listed `aac`, `ac3`, `eac3`, `flac`, `alac` and `libopus` as ready for use.
+* On 2026-11-02, a copy of a TrueHD track into fragmented MP4 under `-strict unofficial` failed with "truehd in MP4 support is experimental".
 It marked `dca` (DTS), `truehd`, `mlp` and FFmpeg's native `opus` encoder as experimental.
 * Each encode below wrote fragmented MP4, and ffprobe read back its channel layout.
 * FLAC wrote 3.0 and quad unchanged, and wrote quad(side) as quad.
@@ -1367,4 +1385,5 @@ Each percentage is of the PCM bitrate at 48 kHz and the written depth: 1,536 kb/
 * https://www.rfc-editor.org/rfc/rfc7845#section-5.1.1.2[RFC 7845 §5.1.1.2: Opus channel mapping family 1]
 * https://github.com/jellyfin/jellyfin/blob/ed211765c2ebbb3f5093f67596c267058c6a4124/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs#L804-L807[Jellyfin `EncodingHelper.cs`: Opus encodes with `libopus` and no mapping family]
 * https://media.xiph.org/sintel/[Xiph.Org: Sintel soundtrack masters] and https://media.xiph.org/tearsofsteel/[Tears of Steel soundtrack masters and AC-3 track] (Creative Commons Attribution 3.0, Blender Foundation)
+* https://github.com/superuser404notfound/AetherEngine/blob/7.53.0/Sources/AetherEngine/Player/PlayerState.swift#L599-L602[AetherEngine 7.53.0 `PlayerState.swift`: TrueHD is encoded, to FLAC in the lossless mode]
 * https://github.com/superuser404notfound/AetherEngine/blob/7.53.0/docs/formats.md#audio[AetherEngine 7.53.0 `docs/formats.md`, Audio]: on-device decoding of TrueHD and DTS-HD MA, the optional lossless FLAC mode up to 7.1, the lost objects, the optional object renderer, and the HDMI routes that tvOS cannot tell apart

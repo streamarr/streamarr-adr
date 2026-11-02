@@ -67,7 +67,7 @@ Issue https://github.com/streamarr/streamarr-apple/issues/4[streamarr/streamarr-
 [[decision-audio-renditions]]
 === Every audio track is its own audio rendition
 
-The stream decision selects every audio track in the media file.
+The stream decision selects every audio track in the media file, except a track whose `dependent` disposition is set.
 Each selected audio track becomes its own HLS audio rendition.
 A rendition is an alternate track that the multivariant playlist lists in an `EXT-X-MEDIA` tag.
 Each rendition has its own media playlist.
@@ -81,6 +81,10 @@ The video keeps playing.
 The switch starts no job attempt.
 
 The stream decision (link:0013-stream-decision-architecture.adoc[ADR 0013]) also chooses which rendition is the default.
+The default track is the track whose `default` disposition is set.
+It is never a commentary, an audio description or a music-and-effects track while another track remains (<<decision-names>>).
+When no remaining track has the `default` flag, the default track is the first remaining track in stream order.
+A dependent track, such as narration alone that a receiver mixes into the main track, stays out of the renditions for now, because played alone it carries only the narration.
 An audio rendition's `NAME` follows the naming rules of <<decision-names>>, applied among the file's audio tracks.
 Each `EXT-X-STREAM-INF` tag's `CODECS` attribute lists the stream session's one audio codec (<<decision-audio-codec>>).
 Each `EXT-X-STREAM-INF` tag's `BANDWIDTH` attribute counts the largest audio rendition.
@@ -430,12 +434,14 @@ Names that still collide get a trailing number in file order, such as "English" 
 RFC 8216 section 4.3.4.1.1 says "All EXT-X-MEDIA tags in the same Group MUST have different NAME attributes."
 An audio rendition's `NAME` follows the same rules, applied among the file's audio tracks, with these additions:
 
-* The flags of an audio name are "Commentary" when ffprobe's `comment` disposition is set and "Audio description" when its `visual_impaired` disposition is set, for example "English Commentary".
-Probe version 7 reports both flags, as pull request https://github.com/streamarr/streamarr-adr/pull/85[streamarr/streamarr-adr#85] amends link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032].
+* The flags of an audio name are "Commentary" when ffprobe's `comment` disposition is set, "Audio description" when its `visual_impaired` or `descriptions` disposition is set, and "Music and effects" when its `clean_effects` disposition is set, for example "English Commentary".
+link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032's probe version 7] reports these dispositions.
+* A music-and-effects rendition carries `AUTOSELECT=NO`, because it has no dialogue.
 * When names built from the language and the flags still collide, each colliding name adds the source track's format and channel layout after a middle dot, such as "English · TrueHD 7.1" and "English · AC-3 5.1".
 The format is the codec's common name: AAC, AC-3, E-AC-3, TrueHD, DTS, FLAC, ALAC, Opus, PCM or MP3.
 A DTS track whose profile name, which probe version 5 reports, starts with "DTS-HD MA" shows as "DTS-HD MA".
-The format leaves out Atmos and DTS:X, because an encode loses the objects.
+A copied track whose profile name contains "Dolby Atmos" or "DTS:X" adds "Atmos" or "DTS:X" to its format, such as "English · E-AC-3 Atmos 7.1", because a copy keeps the objects.
+An encoded track leaves them out, because an encode loses the objects, an E-AC-3 track with Atmos (JOC) included.
 The layout is probe version 7's layout name without its parenthesized part, such as "5.1" for `5.1(side)`, with "Mono" for `mono` and "Stereo" for `stereo`.
 A track without a known layout shows its channel count instead, such as "6 channels".
 * A trailing number goes only on names that still collide, such as "English · AC-3 5.1" and "English · AC-3 5.1 2".
@@ -470,6 +476,10 @@ On macOS 26.6.2, AVFoundation's `displayName` for an audio rendition was the lan
 The `NAME` reached the rendition's title metadata unchanged, middle dot included.
 For a subtitle rendition, `displayName` used the `NAME`.
 So an Apple client labels an audio rendition from its title metadata, and an audio description name that keeps its flag shows no doubled token in `displayName`.
+FFmpeg reads an MPEG-TS audio description marked by an AC-3 or E-AC-3 descriptor as `descriptions` alone, so the flag reads both dispositions (ADR 0032).
+A music-and-effects track has no dialogue, and a dependent track holds only what a receiver mixes into the main track, so a player that picks either by itself plays the film without its dialogue.
+For the same reason the default track passes over commentary, audio description and music-and-effects tracks while another track remains.
+A copied E-AC-3 track with Atmos keeps its JOC objects in identical packets, so its name can say Atmos; Jellyfin, Plezy and AetherEngine also show Atmos.
 Evidence: <<evidence-subtitle-cases>>, <<evidence-handler-names>>, <<evidence-audio-names>>.
 
 [[decision-cue-text]]
@@ -552,9 +562,9 @@ These three issues leave the probe version unchanged.
 Issue https://github.com/streamarr/streamarr-server/issues/505[streamarr/streamarr-server#505] adds caption detection, which decodes the video's keyframes.
 That ticket increases the probe version when the ticket merges.
 The server then probes existing media files again by itself.
-Probe version 7, as pull request https://github.com/streamarr/streamarr-adr/pull/85[streamarr/streamarr-adr#85] amends ADR 0032, adds each audio stream's channel layout and two flags that the names use: ffprobe's `comment` disposition on each audio and subtitle stream, and its `visual_impaired` disposition on each audio stream.
-That pull request moves the start time correction to probe version 8, so a probe version 7 outcome always carries these facts.
-Until the server stores a file's probe version 7 outcome, the file's names carry neither flag, and its audio names show channel counts instead of layouts.
+link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032's probe version 7] adds each audio stream's channel layout, sample format and bit depth, the dispositions that the names and the default track use, and the `comment` disposition of each subtitle stream.
+The audio dispositions are `comment`, `visual_impaired`, `descriptions`, `original`, `dub`, `clean_effects` and `dependent`.
+Until the server stores a file's probe version 7 outcome, the file's names carry no flag, its audio names show channel counts instead of layouts, and its encodes take their bit depth from the source's codec.
 
 [[decision-image-subtitles]]
 === An image subtitle that the viewer selects is burned into the video
@@ -637,6 +647,7 @@ It probes 6 and 2 channels for each codec, so no entry accepts more than 6 chann
 Lifting the 6-channel cap waits for a test of 7.1 channel order on real speakers (https://github.com/streamarr/streamarr-web/issues/29[streamarr/streamarr-web#29]).
 Firefox plays 7.1 AAC in AAC's own channel order and plays 5.1 AAC in WAVE order.
 * Measure what a lossless encode of each audio track writes, in ADR 0054's bitrate scan, so that the cost and `BANDWIDTH` of a FLAC or ALAC rendition follow its bytes instead of a share of the PCM bitrate.
+* Mix a dependent narration track into the main track, so that a viewer who needs audio description hears both.
 * Allow more than one audio codec per stream session for Apple clients.
 Apple clients get that exception only if a check shows that their switches between codecs stay in sync.
 * Test audio and subtitle renditions on cast receivers.
@@ -684,6 +695,11 @@ After decoding, the junction adds at most 0.2 dB to that difference.
 * The first 21 ms of an AAC rendition decode without the overlap that the priming frame would supply.
 No player showed an error.
 An AC-3 or E-AC-3 rendition loses about 27 ms of real audio at the start of the stream, and an Opus rendition loses about 14 ms.
+* A file's dependent narration track gets no rendition.
+A viewer who needs audio description hears it only when the file also holds a complete audio description track.
+* A copied E-AC-3 track with Atmos keeps its objects, but FFmpeg 8.1.3 wrote FATE's Atmos sample's `dec3` box without `flag_ec3_extension_type_a`.
+Media3 reports E-AC-3 with Atmos only when that flag is set, so a Media3 player treats such a copy as plain E-AC-3.
+Whether a receiver still shows Atmos for the copy is an Apple TV and SHIELD check at the end of the epic.
 * An Apple client loses the copy of a FLAC or E-AC-3 track when the file's default track uses another codec.
 The one-codec rule encodes that track to the session's audio codec.
 * When the session copies a FLAC or ALAC default track, every other track that is not already in that codec is encoded to it.
@@ -823,6 +839,8 @@ AVFoundation's `displayName` for audio ignores the `NAME`, so keeping the flag d
 * Leaving duplicate names violates RFC 8216.
 AVPlayer and WebKit's native HLS then exposed only one of two renditions named "English".
 * Telling colliding names apart by the stream index shows the viewer a number that means nothing outside the file.
+* Listing a dependent narration track with `AUTOSELECT=NO` lets a viewer pick a track that plays the narration alone.
+* Leaving Atmos and DTS:X out of every name hides that a copy keeps the objects.
 * Converting a whole SubRip track with FFmpeg's `-sub_charenc` damages the track's UTF-8 cues.
 On a UTF-8 track with 5 windows-1252 cues, that conversion gave 35 of 100 correct cues.
 * Skipping a SubRip track with invalid cues drops tracks that are mostly readable, such as a track with 80 of 100 valid cues.
@@ -1205,6 +1223,9 @@ Each `NAME` appeared unchanged as the option's title metadata.
 * A stereo rendition with the describes-video characteristic had the `displayName` "English AD", whether it was named "Described" or "Commentary".
 * A subtitle rendition named "English SDH" with the SDH characteristics had the `displayName` "English SDH SDH", and one named "Signs" had "Signs - English".
 * ffprobe in the pinned image read the `comment` and `visual_impaired` dispositions back from Matroska and from MP4 after FFmpeg wrote them.
+* On 2026-11-02, FFmpeg 8.1.3 in the pinned image copied FATE's `eac3/the_great_wall_7.1.eac3`, which ffprobe reads as "Dolby Digital Plus + Dolby Atmos", into fragmented MP4.
+Its `dec3` box held 6 bytes and no `flag_ec3_extension_type_a`, because FFmpeg writes that flag only when its parser finds a complexity index in the stream.
+Media3 1.11.1 reports E-AC-3 with Atmos only when that flag is set.
 
 [[evidence-lossless-size]]
 === The size of lossless encodes
@@ -1261,6 +1282,7 @@ Each percentage is of the PCM bitrate at 48 kHz and the written depth: 1,536 kb/
 * https://github.com/jellyfin/jellyfin/blob/ed211765c2ebbb3f5093f67596c267058c6a4124/MediaBrowser.Model/Entities/MediaStream.cs#L271-L326[Jellyfin `MediaStream.cs`: an audio track's display title from its codec or profile, channel layout and flags]
 * https://github.com/l984-451/Rivulet/blob/4ab544bf1bc452f18807156a4a26698801bd07f4/RivuletCore/Playback/Tracks/MediaTrack.swift#L24-L47[Rivulet `MediaTrack.swift`: Plex's display title, and the commentary and audio description flags from the container]
 * https://www.rfc-editor.org/rfc/rfc9639#section-9.1.3[RFC 9639 §9.1.3: FLAC channel assignment]
+* https://github.com/FFmpeg/FFmpeg/blob/n8.1/libavformat/movenc.c#L648-L651[FFmpeg n8.1 `movenc.c`: `flag_eac3_extension_type_a` is written only with a complexity index] and https://github.com/androidx/media/blob/1.11.1/libraries/extractor/src/main/java/androidx/media3/extractor/Ac3Util.java#L255-L256[Media3 1.11.1 `Ac3Util.java`: E-AC-3 with Atmos only when the flag is set]
 * https://www.rfc-editor.org/rfc/rfc7845#section-5.1.1.2[RFC 7845 §5.1.1.2: Opus channel mapping family 1]
 * https://media.xiph.org/sintel/[Xiph.Org: Sintel soundtrack masters] and https://media.xiph.org/tearsofsteel/[Tears of Steel soundtrack masters and AC-3 track] (Creative Commons Attribution 3.0, Blender Foundation)
 * https://github.com/superuser404notfound/AetherEngine/blob/7.53.0/docs/formats.md#audio[AetherEngine 7.53.0 `docs/formats.md`, Audio]: on-device decoding of TrueHD and DTS-HD MA, the optional lossless FLAC mode up to 7.1, the lost objects, the optional object renderer, and the HDMI routes that tvOS cannot tell apart

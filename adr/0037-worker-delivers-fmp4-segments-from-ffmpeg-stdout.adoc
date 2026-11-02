@@ -38,7 +38,9 @@ A completed attempt reports where each stream ended and whether the source ended
 
 NOTE: An amendment settles how merged segment lists ship (<<decision-segment-list>>).
 Each job attempt carries the stream session's segment list, and the segment cap of 128 MiB is a constant of the worker contract.
-The server encodes a source from the start when a measured merged segment would exceed the segment cap, and no duration bound limits a merged segment.
+Every variant and rendition shares the list, so the server bounds every advertised output's largest segment against the segment cap when it creates the stream session.
+A stream session in which any output exceeds the cap, or any encode has no bound, uses the plain 3 s grid and encodes its video, and no duration bound limits a merged segment.
+A request that follows a held request for an earlier segment is prefetch and never relocates past that segment.
 The interim rule, and its refusal to copy a source with an interval that holds no keyframe, end once the pinned worker image groups on the list.
 
 NOTE: Under link:0013-stream-decision-architecture.adoc#reshape-rpus-starting-samples[ADR 0013], a job attempt that encodes an HEVC Dolby Vision source with no compatible base, such as profile 5, runs two FFmpeg processes when ADR 0013's conditions for moving the source's RPUs hold.
@@ -352,18 +354,41 @@ A keyframe that skips a listed segment still fails the attempt with `SKIPPED_SEG
 Streamarr has no production instances, so the change makes no provision for workers of different versions.
 
 The segment cap, 128 MiB, is a constant of the worker contract that the server and the worker each fix in code, and no worker configures it.
-A merged segment can be long, so the server decides up front whether it fits.
-When ADR 0054's measurements give a merged segment's size, the server adds the segment's framing and compares the total with the segment cap when it creates the stream session.
-When a merged segment would exceed the segment cap, the server encodes the source from the start instead of copying it.
-When no measurement exists, a merged segment that grows past the segment cap fails the copy attempt with the named reason `EXCEEDS_SEGMENT_CAP`, and ADR 0052's fallback moves playback to an encode.
+A merged segment can be long, and every variant and rendition of the stream session cuts its segments on the same list, so the server decides up front whether every advertised output fits.
+When it creates a stream session with merged segments, the server bounds the largest segment of each advertised variant and audio rendition, adds that segment's framing (link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc#segment-framing[ADR 0054]), and compares the total with the segment cap:
+
+* A copied variant or rendition takes each segment's size from ADR 0054's measurements.
+* An encoded variant takes the longest merged segment's duration times the maximum rate that the encode's rate control enforces, plus the size of the encode's rate-control buffer, with the framing of its samples at its output frame rate.
+The server sets that maximum rate and buffer, so the bound holds whatever the source's picture holds.
+An encode whose rate control enforces no maximum rate has no bound.
+* An encoded audio rendition takes the longest merged segment's duration at the largest frame that its codec allows for its channel layout and sample rate.
+A FLAC or ALAC encode takes its full PCM bitrate, widened by one frame, as ADR 0043 counts its peak.
+* A subtitle rendition's WebVTT segment carries only the cues that overlap its interval, so the server bounds no subtitle rendition.
+
+When any copied output exceeds the segment cap, or any encoded output's bound exceeds it or is missing, the stream session uses no merged list.
+It uses the plain 3 s grid, offers no copied video variant and encodes every variant's video.
+The server makes that choice when it creates the stream session, so no attempt of that session meets a merged segment.
+A copied output without a measurement is the one exception: it keeps the merged list, and the worker's cap is its only check.
 No duration bound limits a merged segment.
+
+A job attempt whose merged segment grows past the segment cap fails with the named reason `EXCEEDS_SEGMENT_CAP`, in a copied or an encoded output alike.
+An encoded output can still exceed its bound, because a hardware encoder or a rate control that the worker doesn't verify can overshoot its buffer.
+Every replacement attempt would repeat the failure, so the server spends no replacement attempt on it.
+It starts a new format attempt under link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052] instead, whose stream session uses the plain 3 s grid and encodes every variant's video.
+That format attempt counts against the playback session's format-attempt budget, as every ADR 0052 fallback does, and in Original the playback choice changes to Auto.
 A producer of a long merged segment is not taken for stalled: wherever ADR 0019 allows one target segment duration for a segment, a merged segment counts its own length.
 After a publication, the producer receives the stall threshold plus the length by which the next segment exceeds one slot.
 A client scales its wait for a segment, and its stall limit, by that segment's advertised duration, so it does not abandon a long merged segment that a healthy producer is still encoding.
 hls.js abandons a segment request that has received no byte after 10 s by default, and the web client's stall limit (https://github.com/streamarr/streamarr-web/pull/139[streamarr/streamarr-web#139]) is fixed, so both must follow the advertised duration before merged segment lists ship.
-With merged segments, the relocation gap counts slots, not segments: the server waits for a running attempt only when the unproduced media before the requested segment spans at most two slots, and relocates otherwise.
-A request therefore never waits behind an unfinished long merged segment.
+With merged segments, the relocation gap counts slots, not segments, and it counts only media that no held request waits for.
+The server measures the unproduced media between the running attempt's output and the requested segment, leaves out every segment that a held request for the same variant still waits for, and waits for the running attempt when the rest spans at most two slots.
+Otherwise it relocates.
+A request that follows a held request for an earlier segment of the same variant, with no more than two slots of unrequested media between them, is therefore prefetch, not a seek.
+It waits on the same producer, relocates nothing, and supersedes no request under link:0019-recoverable-jit-hls-segment-delivery.adoc#decision-newest-request[ADR 0019]'s newest-request rule.
+A request that lies more than two slots of unrequested media past the producer's output and past every held request is a seek: it relocates, and ADR 0019's newest-request rule then answers an earlier held request that the new attempt can't produce `503`, as before.
+A request therefore never waits behind an unfinished long merged segment that no player requested, and a prefetch never stops the producer of the long segment that it follows.
 The merge gate of https://github.com/streamarr/streamarr-server/issues/512[streamarr/streamarr-server#512] plays a seek and a variant switch into a merged segment whose encode outlasts those default limits, and a seek to a short segment just after an unfinished long one.
+It also sends concurrent requests for a long merged segment and its successor, which one attempt answers in order with no relocation and no `503`, and a request more than two slots of unrequested media past a held long segment, which relocates.
 
 Slots after the video's end never merge when the server knows that end, because a video that ends at least one segment early is encoded and holds its last picture (<<decision-early-ends>>).
 When the server does not yet know the video's end time, the slots after the source's last keyframe merge into the last segment, which then takes in the audio after the video's end.
@@ -403,13 +428,22 @@ Without the exemption, the server would encode that file although every full int
 Streamarr adopts the exemption to learn how players handle the longer last segment, and will revisit it if players mishandle that segment.
 Evidence: https://github.com/streamarr/streamarr-server/issues/504[streamarr/streamarr-server#504], https://github.com/streamarr/streamarr-server/issues/512[streamarr/streamarr-server#512], https://github.com/streamarr/streamarr-server/pull/534[streamarr/streamarr-server#534].
 
+*Why a prefetch doesn't relocate:* ADR 0019 rejected a relocation gap of one segment because the server would then relocate whenever a player requests the next segment while the running attempt still produces the current one.
+Counting slots alone brought that failure back for a merged segment: a request for the segment after a held 60 s segment lies 20 slots past the producer's output, so it relocated past the held segment, and the newest-request rule then answered the held request `503`.
+Media that a held request already waits for costs the prefetch nothing extra, because the producer must make it anyway.
+Unrequested media still counts, so a player that seeks while an old request is held does not wait for the old producer to reach the new position.
+
 *Why the segment cap is checked up front, with no duration bound:* The interim refusal is common.
 libx264 and libx265 place a keyframe at least every 250 frames by default, which lasts 10.4 s at 23.976 frames per second.
 A static scene in an encode made with the default settings can therefore leave a 6 s interval without a keyframe, and leaves more 3 s intervals without one.
 Each refused source spends encoder capacity, and the viewer sees an encoded picture instead of the source's own.
 A copy that fails on the segment cap fails at the merged segment, which can lie deep into playback, and the viewer then sees a stall followed by a drop to an encode.
 Wherever ADR 0054's measurements give the merged segment's size, the server avoids that stall by encoding from the start.
-The worker's segment cap failure and ADR 0052's fallback catch a merged segment that no measurement covers.
+An encoded variant gains nothing from a copy's measurement: another codec, a higher resolution or the keyframes that the encoder forces can write more bytes than the copy for the same interval.
+The server sets an encode's maximum rate and buffer, so it can bound every encoded output before playback starts, and only a copy needs a measurement.
+The worker's segment cap failure and ADR 0052's fallback catch a copied merged segment that no measurement covers, and an encode that overshoots its buffer.
+Refusing every unmeasured copy would encode Matroska sources whose keyframes come from the container index until their background bitrate scan finishes, to spare a stall that only an oversized segment causes.
+That failure needs a new stream session, because every replacement attempt of the same session cuts the same merged segment.
 A duration bound would encode every source with long gaps between keyframes, although each such source copies bit for bit while its merged segments fit the segment cap.
 The server needs the worker's cap to decide up front, and a cap that each worker set would let a worker disagree with the server's own upload limit, which already decides what the server accepts.
 Jellyfin builds a copy's segments from the source's keyframes only for files whose extension its settings list, by default only `mkv`.
@@ -871,6 +905,14 @@ The server stores each learned end time beside the file's probe facts, apart fro
 A learned end time never rewrites a probe outcome, and a new probe outcome for the same source snapshot never discards it.
 A changed source snapshot discards it, with the stored outcome and its stream rows, because the server can't tell a re-mux from a tag edit.
 
+A learned end time belongs to the source snapshot that the attempt read.
+Each job attempt carries the source snapshot of the probe outcome that its stream session was built from (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]).
+The worker reads the source's snapshot when it opens the source and again before it reports, and it reports end times only when both readings equal the carried snapshot.
+The server publishes learned end times as ADR 0032 publishes a probe outcome: one transaction locks the media file row, verifies that the reported snapshot equals the snapshot of the requested inputs and of the stored outcome, and only then writes the end times.
+A request that saves a changed snapshot deletes the learned end times under the same row lock, in the transaction that deletes the outcome.
+A report from an attempt that read a replaced source therefore finds another snapshot, whenever it arrives, and the server drops its end times.
+The tests of https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511] complete an attempt that read snapshot A only after the watcher saved snapshot B and B's probe published, and check that A's end times never reach B's padding or seeks.
+
 These rules apply to a stream that ends early:
 
 * When an audio stream ends at least one segment before the video, that audio stream is encoded and padded with silence up to the advertised end.
@@ -953,6 +995,8 @@ The held picture of a 64 s video scaled before the hold repeated its last scaled
 
 *Why an end time is learned, and kept apart from the probe outcome:* The probe reads a stream's end time only where the container header states it, and a job attempt that reaches a stream's end observes it at no extra cost.
 A learned end time is an observation of playback, not a probe fact, so it must not rewrite a probe outcome or vanish when a probe runs again.
+Deleting learned end times when the snapshot changes doesn't stop a late report from writing them back: an attempt that read the old file can complete after the watcher replaced it and the new file's probe published.
+Only a check of the attempt's own snapshot at the write, under the lock that the snapshot change also takes, keeps the old file's ends off the new file.
 
 *Why padding also fixes an initialization segment:* Without padding, an attempt that copied or encoded AC-3 or E-AC-3 audio and started after the source audio's end wrote an `moov` box of size zero, because the mp4 muxer cannot write that sample entry without a packet.
 FFmpeg exited 0, and ffprobe could not read the result.
@@ -1257,8 +1301,9 @@ The frame-count GOP and the output rate therefore cannot disagree.
 At 3 s segments the server must hold every segment request for less than 3 s, because macOS AVPlayer abandons a request after one target duration without a byte.
 * Until merged segment lists arrive, a stream session that only copies keeps 6 s segments, and a copied variant in a stream session that also encodes is encoded when its keyframes do not fit the 3 s grid.
 Once merged segment lists arrive, every stream session uses 3 s slots, and a stream copy's playlist advertises segments of different lengths.
-* A source whose keyframes lie further apart than one segment is copied instead of encoded, unless a measured merged segment would exceed the segment cap.
-Before ADR 0054's measurements exist, a copy whose merged segment exceeds the segment cap fails at that segment and falls back to an encode under ADR 0052.
+* A source whose keyframes lie further apart than one segment is copied instead of encoded, unless a measured merged segment would exceed the segment cap or an encoded output of the same stream session can't be bounded within it.
+A stream session that offers a copy beside encoded variants therefore needs encodes whose rate control enforces a maximum rate, and the rate-control choices that ADR 0044 defers must provide one.
+Without a measurement, a copy whose merged segment exceeds the segment cap fails at that segment, and a new format attempt encodes on the plain grid under ADR 0052.
 * An encoded variant that shares a merged segment list encodes a whole merged segment before it publishes that segment, so a seek or a switch into a long merged segment waits longer for its first picture.
 The server's stall allowance and each client's segment wait grow with the segment's length instead of failing a healthy producer.
 * In a stream session with a copied variant, every variant's last segment can last up to twice the period when the grid's final interval holds no source keyframe.
@@ -1372,6 +1417,7 @@ The server would need a second attempt to pad what the first attempt found.
 The server replaced the attempt before that segment arrived, and a longer or richer tail exceeds the segment cap.
 * Leaving streams unpadded, as Jellyfin does, left the segments after the video's end undelivered, and playback after a seek past the video's end failed.
 * Storing a learned end time in the probe outcome would rewrite a probe fact with an observation of playback, and the next probe of the same source would discard it.
+* Discarding learned end times on a snapshot change without checking each report's snapshot at the write would let a late report from the replaced file write its ends onto the new file.
 * Reading each file to its end in the probe to find every stream's end would read the whole file for a fact that the first attempt past the end observes at no extra cost.
 * Marking the segments after an audio track's end with `EXT-X-GAP` left hls.js stuck on the iPhone.
 * Padding a copied audio track with silence in its own codec, without encoding the track, would join encoder-made silence to copied frames.
@@ -1427,6 +1473,11 @@ Every worker would report the same constant.
 * Cutting a copy's segment at a frame that is not a keyframe, as Plex's transcoder can, breaks the rule that every segment's video opens at a keyframe.
 * Advertising equal-length segments for a copy, as Jellyfin does for every file outside its `mkv` default, advertises durations that differ from the segments that the copy cuts at the source's keyframes.
 * Giving each variant or rendition its own segment list would stop a player from switching variants or renditions at every segment boundary.
+That holds for the narrower escape of letting only the encoded variants keep the plain grid when a merged segment of theirs would exceed the segment cap: their boundaries would no longer meet the copy's, and the audio and subtitle renditions could follow only one of the two lists.
+* Checking only the copy against the segment cap would leave every encoded variant and audio rendition on the same merged segment unchecked, although an encode can write more bytes than the copy for that interval.
+* Refusing a merged list whenever a copied output has no measurement would encode most Matroska sources until their background bitrate scan finishes.
+* Counting a held request's segment toward the relocation gap would relocate a prefetch past that segment, and ADR 0019's newest-request rule would answer the held request `503`, as the rejected one-segment gap did.
+* Never relocating while an earlier request of the same variant is held would make a player that seeks while an old request is held wait for the old producer to reach the new position.
 * Supporting workers of different versions in one fleet adds a rule for a fleet that does not exist, because Streamarr has no production instances.
 * Keeping the refusal `interval_without_keyframe` encodes every source whose keyframes lie further apart than one segment, which libx264's and libx265's default settings make common.
 * Requiring a source keyframe in the grid's final interval as well, the interim rule that this decision first accepted, would encode ordinary sources.

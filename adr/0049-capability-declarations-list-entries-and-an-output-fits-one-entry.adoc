@@ -10,6 +10,9 @@ The second question asks which playback paths a Dolby Vision or HDR10+ source pe
 The third question asks whether a `MediaFileProbePropertyIssue` rules out direct play.
 ADR 0036 stays Accepted.
 
+An amendment lets an audio capability entry give an optional maximum sample rate (<<decision-entries>>).
+A later amendment lets a FLAC capability entry give an optional minimum block size.
+
 == Context
 
 The server chooses each output from the client's client capability declaration (ADR 0036).
@@ -66,8 +69,21 @@ An audio capability entry names one audio codec.
 A video capability entry lists the codec profiles and the dynamic-range features that the player accepts for the entry's codec family.
 A video capability entry also gives the maximum bit depth, the maximum picture width and height, and the maximum frame rate.
 An audio capability entry gives the maximum channel count that the player accepts for the entry's audio codec.
-A capability entry that a client sends gives every maximum.
-Issue #395 defines the fields and their spellings.
+An audio capability entry can also give a maximum sample rate.
+A capability entry that a client sends gives every maximum, except that maximum sample rate.
+An audio capability entry without a maximum sample rate states no limit on the sample rate.
+Issue #395 defines the fields and their spellings, and https://github.com/streamarr/streamarr-server/issues/717[streamarr/streamarr-server#717] adds the maximum sample rate.
+An encode that a maximum sample rate forces resamples to the highest rate at or below the maximum that the encoder writes, from the source's own family of 44.1 kHz or 48 kHz multiples where that family has one.
+
+*Why the maximum sample rate is optional:* FLAC and ALAC sources at 96 and 192 kHz exist, and a player that decodes FLAC only up to 48 kHz fails on such a copy, which costs a format attempt.
+A required field would make every client measure its sample rates before it could start a stream session.
+
+A FLAC capability entry can also give a minimum block size.
+A FLAC copy fits that entry only when the track's STREAMINFO minimum block size is at least that size, and an unknown block size fits no entry that gives one.
+link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc#decision-audio-codec[ADR 0043] decides which clients give it and what replaces a refused copy, and https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] defines its spelling.
+
+*Why:* Apple's CoreMedia drops a FLAC track whose STREAMINFO minimum block size is below 192 samples, so such a copy plays without sound, which no format attempt detects.
+Other players accept smaller blocks, so the minimum belongs to the player's entry rather than to a rule for every client.
 
 Inside one capability entry, the player accepts every combination that takes one value from each list of that capability entry and stays within that capability entry's maximums.
 The contract of the client capability declaration gives the lists inside one capability entry this combining meaning explicitly, as ADR 0036 requires.
@@ -135,7 +151,7 @@ A capability entry never uses a level number on a scale that differs between cod
 === A maximum accepts every value at or below the maximum
 
 A maximum accepts every value at or below the maximum.
-The maximums are the picture width, the picture height, the frame rate, the codec level, the codec tier, the Dolby Vision level, the bit depth and the channel count.
+The maximums are the picture width, the picture height, the frame rate, the codec level, the codec tier, the Dolby Vision level, the bit depth, the channel count and the sample rate.
 The High tier is above the Main tier.
 A frame rate, of a copy or of an encode, fits a maximum frame rate up to 0.5% above that maximum.
 The margin absorbs timestamp rounding, which can put a measured rate slightly above the stream's standard rate: a 60 fps stream with millisecond timestamps can measure 60.2 fps.
@@ -177,6 +193,7 @@ The server applies the same rule for every client:
 The server encodes such a stream.
 * An unknown codec level or codec tier fits a capability entry only when that capability entry accepts the stream's known picture size and frame rate.
 * An unknown frame rate fits a capability entry that accepts every known property of the stream.
+* An unknown sample rate fits an audio capability entry without a maximum sample rate, and fits no entry that gives one.
 * An `UNSPECIFIED` compatible base fits a capability entry that accepts `SDR`.
 ADR 0036 already copies a source with an `UNSPECIFIED` compatible base as SDR.
 
@@ -233,8 +250,9 @@ The API boundary also rejects a declaration that holds no video capability entry
 The server assumes no capability entry for a client.
 
 The API boundary also rejects a declaration that holds no audio capability entry for AAC that applies to HLS.
-link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043] encodes the default audio track to AAC when the declaration does not cover the track's codec.
-That AAC encode then fits the declaration.
+When link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043] encodes the default audio track, it takes FLAC only when a FLAC capability entry accepts the channel count of the FLAC layout that ADR 0043 gives the track.
+Otherwise it takes E-AC-3 or AC-3 only when a capability entry for that codec keeps more than two of the track's channels.
+When neither fits, it encodes AAC, and that AAC encode fits the declaration.
 The AAC encode stays within the channel maximum of the AAC capability entry.
 Every platform that Streamarr's clients run on plays AAC over HLS.
 
@@ -335,8 +353,12 @@ In Original and in a fixed quality, the server then falls back from the rejected
 * A client that sends no declaration cannot start a stream session.
 Every client must build a declaration before the client plays anything.
 * Every declaration carries an AAC capability entry for HLS, even when the client prefers another audio codec.
+* A client that sends no maximum sample rate can receive a 96 or 192 kHz FLAC or ALAC copy that its player cannot decode, which costs a format attempt.
+* A client that sends no minimum block size can receive a FLAC copy with small blocks that its player drops.
 
 == Rejected Alternatives
+
+* A required maximum sample rate makes every client measure its sample rates before its first stream session.
 
 * Independent lists across the whole declaration would imply combinations that the player cannot play.
 A client that plays H.264 at 1920×1080 and HEVC at 3840×2160 would imply H.264 at 3840×2160.
@@ -355,8 +377,8 @@ Auto is the playback choice in which the player adapts quality to bandwidth acro
 * A default capability entry for a client that sends no declaration would authorize outputs that nobody tested.
 A default H.264 entry with no maximums would send a 3840×2160 copy to a player that decodes only 1920×1080.
 A default H.264 entry with conservative maximums would still guess at a player that the server knows nothing about.
-* Choosing the audio encode's codec from the declaration's audio capability entries would need worker encoders beyond AAC.
-That choice would also need a rule for refusing a stream session when no audio encode fits, and the epic still lists that rule as an open question.
+* Refusing a stream session when no audio encode fits needs a rule that the epic still lists as an open question.
+The required AAC capability entry for HLS means that an AAC encode always fits, so no stream session needs that rule.
 * A capability entry that lists a source container and therefore also applies to HLS would treat direct play and HLS as one capability.
 A player can open a codec from an MP4 file and still fail on the same codec in fragmented MP4.
 * Ranges with minimums, alignment rules or lists of exact sizes would let a capability entry express a gap below a maximum.

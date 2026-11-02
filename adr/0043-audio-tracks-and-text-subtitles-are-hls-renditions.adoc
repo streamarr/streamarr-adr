@@ -18,6 +18,20 @@ The stream decision selects every audio track and chooses the subtitle tracks.
 Each audio track keeps its own copy-or-encode decision inside one audio codec per stream session.
 An image subtitle track that the viewer selects is burned into the video.
 
+An amendment after an audiophile review sets how the worker treats samples.
+Only an encode that writes every decoded sample unchanged is called lossless.
+Every audio encode joins its job attempts on its audio frame grid, and the producer never moves a copied track (<<decision-audio-grid>>).
+The worker decodes AC-3 and E-AC-3 without their dynamic range compression and with their dialogue normalization, dithers every conversion to 16 bits, and resamples with tuned settings (<<decision-sample-processing>>).
+A FLAC or ALAC encode pads a layout that its codec does not carry with silent channels, a FLAC or ALAC rendition above 48 kHz has a 48 kHz step, and Opus encodes have measured rates (<<decision-audio-codec>>).
+A later amendment changes what the default track becomes (<<decision-audio-codec>>).
+A TrueHD or DTS default track keeps its copy wherever the client declares the codec, and a track that cannot reach that codec is offered by replacing the stream session.
+A default track that cannot be copied, lossy or lossless, is encoded to FLAC wherever the client declares FLAC.
+Among the tracks of the default track's language, a lossless copy comes first, then a FLAC encode of a lossless track, then a copy of a lossy track that keeps as many channels as any lossy encode, then a lossy encode.
+A FLAC copy needs a block size that the client accepts, and a copied E-AC-3 track with Atmos is marked `CHANNELS="16/JOC"` (<<decision-audio-renditions>>).
+A title marks a commentary or an audio description track when no flag does (<<decision-names>>).
+ADR 0054's bitrate scan measures the FLAC encodes that a stream session can deliver.
+Mac browser checks gate the tickets, and the TV checks run once at the end of the epic (<<decision-device-checks>>).
+
 == Context
 
 This section describes the system before this decision.
@@ -67,7 +81,7 @@ Issue https://github.com/streamarr/streamarr-apple/issues/4[streamarr/streamarr-
 [[decision-audio-renditions]]
 === Every audio track is its own audio rendition
 
-The stream decision selects every audio track in the media file.
+The stream decision selects every audio track in the media file, except a track whose `dependent` disposition is set.
 Each selected audio track becomes its own HLS audio rendition.
 A rendition is an alternate track that the multivariant playlist lists in an `EXT-X-MEDIA` tag.
 Each rendition has its own media playlist.
@@ -81,10 +95,17 @@ The video keeps playing.
 The switch starts no job attempt.
 
 The stream decision (link:0013-stream-decision-architecture.adoc[ADR 0013]) also chooses which rendition is the default.
+The default track is never a commentary, an audio description or a music-and-effects track while another track remains, whether a disposition or the title marks it (<<decision-names>>).
+Among the remaining tracks, it is the first in stream order whose `default` disposition is set, or the first in stream order when none has it.
+The ranking of <<decision-audio-codec>> can then let another track of the same language play as the default.
+A dependent track, such as narration alone that a receiver mixes into the main track, stays out of the renditions for now, because played alone it carries only the narration.
 An audio rendition's `NAME` follows the naming rules of <<decision-names>>, applied among the file's audio tracks.
 Each `EXT-X-STREAM-INF` tag's `CODECS` attribute lists the stream session's one audio codec (<<decision-audio-codec>>).
 Each `EXT-X-STREAM-INF` tag's `BANDWIDTH` attribute counts the largest audio rendition.
 RFC 8216 requires both rules.
+Each audio rendition's `CHANNELS` attribute gives the channel count that the rendition delivers.
+A copied E-AC-3 track whose profile name contains "Dolby Atmos" gives `CHANNELS="16/JOC"` instead, and its `CODECS` value stays `ec-3`.
+An encode of such a track gives its channel count, because the encode loses the objects.
 
 *Why:* In all five players tested, a switch between audio renditions never restarted or rewound the video.
 The players were Chromium, Firefox and WebKit with hls.js 1.7.0, WebKit's native HLS, and AVPlayer.
@@ -92,6 +113,8 @@ Chromium played the new language after about 0.3 s.
 Firefox played the new language after about 1.0 s.
 Both delays came from the browsers' audio output queues.
 A rendition for every audio track lets the viewer switch to any language without a new stream session.
+Apple's HLS authoring specification marks E-AC-3 with Atmos by `JOC` in the rendition's `CHANNELS` attribute, for example `CHANNELS="16/JOC"`, and keeps `ec-3` in `CODECS`.
+It asks for the number to match the `complexity_index_type_a` field of the track's `dec3` box, but FFmpeg 8.1.3 wrote no such field for FATE's Atmos sample, so the server writes 16, the specification's example.
 Evidence: <<evidence-switching>>.
 
 [[decision-audio-codec]]
@@ -100,26 +123,140 @@ Evidence: <<evidence-switching>>.
 A stream session has one audio codec, and every audio rendition of the stream session uses that codec.
 The session's audio codec is the codec of the default track as delivered.
 The client capability declaration is the record of the combinations that a player and its delivery path can accept.
-When the client capability declaration covers the default track's codec, the default track is copied, and the session's audio codec is the default track's codec.
-When the declaration does not cover the default track's codec, the default track is encoded to AAC, and the session's audio codec is AAC.
+A track can be copied only when one audio capability entry for HLS accepts the track's codec and channel count (link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049]).
+
+The server encodes audio to AAC, AC-3, E-AC-3, FLAC, Opus and ALAC.
+The default track decides the session's audio codec:
+
+* When the default track can be copied, the default track is copied, and the session's audio codec is the default track's codec.
+This holds for a TrueHD or DTS default track too, although the server has no encoder for either codec (below).
+* When the default track cannot be copied, the default track is encoded, and the session's audio codec is the codec of that encode.
+The default track, lossless or lossy, is encoded to FLAC when a FLAC capability entry for HLS accepts the channel count of the FLAC layout that the layout rules below give the track.
+A lossless track is TrueHD, DTS-HD MA, PCM, FLAC or ALAC.
+Otherwise the encode follows link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc[ADR 0050]'s encode for the default track.
+It takes the first of E-AC-3, AC-3 and AAC whose capability entry for HLS keeps more than two of the track's channels.
+When none does, it takes AAC with at most two channels.
+When the viewer's maximum bitrate leaves no room for the FLAC encode, ADR 0050's audio steps take that E-AC-3, AC-3 or AAC encode instead.
+
+[[decision-sibling-ranking]]
+Before these rules apply, the stream decision chooses which track of the default track's language plays as the default.
+The candidates are the default track and every other track in its language that is neither a commentary, an audio description, a music-and-effects track nor a dependent track.
+Each candidate ranks by what the rules above would deliver for it:
+
+. a copy of a lossless track;
+. a FLAC encode of a lossless track;
+. a copy of a lossy track that keeps at least as many channels as every lossy encode among the candidates;
+. a lossy encode;
+. any other copy of a lossy track.
+
+The best-ranked candidate plays as the default, and decides the session's audio codec.
+Among candidates of equal rank, the default track comes first, then the candidate with more channels, then the first in stream order, so the order is total.
+For example, with a flagged stereo AAC default, a TrueHD track that only an E-AC-3 5.1 encode reaches, and an AC-3 5.1 track, all copyable except the TrueHD track, the AC-3 copy plays as the default, then the TrueHD encode would, then the stereo copy.
+One exception keeps Atmos objects: when the best candidate is a FLAC encode of a TrueHD track with Dolby Atmos, and the language holds an E-AC-3 track with Atmos (JOC) that can be copied, that E-AC-3 track plays as the default and is copied.
+The copy keeps the objects, which a FLAC encode of the TrueHD track loses.
+
+[[decision-restart-tracks]]
+The server has no TrueHD or DTS encoder, so in a session whose audio codec is TrueHD or DTS, only a track already in that codec that a capability entry accepts gets a rendition, as a copy.
+Every other track cannot reach the session's codec.
+The stream decision still lists such a track, and the client offers it beside the renditions.
+Choosing it replaces the stream session inside the playback session at the viewer's position, and the chosen track plays as the default of the new stream session, without the ranking, and decides its audio codec.
+In that stream session, a TrueHD or DTS track whose copy a capability entry accepts is listed for a replacement, which returns the viewer to the copy.
+It also gets a rendition encoded to the session's codec when the server encodes that codec, and none when the session's codec is TrueHD or DTS too.
+Such a replacement uses none of the format-attempt budget, as for an image subtitle (<<decision-image-subtitles>>).
+Every switch between renditions still starts no job attempt.
+
+A FLAC encode of a lossless default track keeps every channel of the track, up to eight, except where the layout rules below downmix.
+A FLAC encode of a lossy default track is not lossless, but it adds no second lossy generation to the track.
+FFmpeg decodes the channel mix of a TrueHD track with Dolby Atmos and of a DTS-HD MA track with DTS:X, and ignores their objects, so the encode loses the objects.
+Only a player that decodes such a track itself can keep them.
+A server encode cannot, because neither FLAC nor the server's other encodes carry objects.
+The FLAC encode has no audio steps of its own, so under ADR 0050 it steps like a copied FLAC track, through the E-AC-3, AC-3 or AAC encode that the server would choose without it.
+
+A FLAC or ALAC rendition above 48 kHz, copied or encoded, adds one audio step before ADR 0050's multichannel steps.
+That step keeps the codec, the layout and the written depth, at 48 kHz, or at 44.1 kHz when the source's rate is a multiple of 44.1 kHz.
+Like every step, it counts only when it is smaller than the session's audio, and under it every rendition above that rate is resampled to it.
+So a maximum bitrate reaches a lossy step only when the 48 kHz or 44.1 kHz FLAC or ALAC step does not fit either.
+That step resamples, so it is not lossless.
+A client can also bound the rate in its FLAC or ALAC capability entry with ADR 0049's optional maximum sample rate (https://github.com/streamarr/streamarr-server/issues/717[streamarr/streamarr-server#717]).
+
 Each other track keeps its own copy-or-encode decision.
-Another track is copied only when that track already has the session's audio codec.
-Otherwise that track is encoded to the session's audio codec.
+Another track is copied only when that track already has the session's audio codec and a capability entry accepts the track.
+Otherwise that track is encoded to the session's audio codec, with no more channels than that codec's capability entry accepts.
 So the worker can copy one track and encode another.
 
-A track is copied only when the client capability declaration covers the track's codec.
-Typed declarations will carry a channel count for each codec (https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395]).
-Once typed declarations carry that channel count, a track is copied only when the declaration also covers the track's channel count.
-Until then, no rule limits the channel count of a copied Opus track, because no client can declare Opus.
+A FLAC capability entry can give a minimum block size.
+Under such an entry, a FLAC track can be copied only when its STREAMINFO minimum block size, which link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032's probe version 7] reports, is at least that size.
+An unknown block size fits no entry that gives one.
+A FLAC track that fails this check is encoded to FLAC like any other track, and that encode keeps every sample, because its frames hold the sample rate ÷ 20 samples, at least 400 at 8 kHz.
+The Apple client gives 192, and so does the web client in WebKit, whose media stack is Apple's CoreMedia.
+A lower audio step under the viewer's maximum bitrate caps every track, as link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc[ADR 0050] decides.
+
+Every audio encode names its output channel layout under the channel layout rule of https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395].
+link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc#decision-channel-layout[ADR 0050] lists the layouts that each encoder carries, and its downmix applies whenever the output lacks a channel of the track's layout.
+FLAC writes `3.0`, `quad`, `5.0(side)`, `5.1(side)`, `6.1` and `7.1`; Opus writes `3.0`, `quad`, `5.0`, `5.1`, `6.1` and `7.1`; ALAC writes `3.0`, `4.0`, `5.0`, `5.1`, `6.1(back)` and `7.1(wide)`.
+A side pair and a back pair count as one surround pair.
+Every FLAC or ALAC encode, of a lossless or a lossy track, writes the smallest layout of its codec that holds every channel of the track:
+
+* FLAC carries mono, stereo, `3.0`, `quad`, 5.0, 5.1, `6.1` and 7.1, so a `6.1(back)` track keeps every channel as FLAC's `6.1`.
+FLAC pads `2.1` and `3.1` to `5.1(side)`; `3.0(back)`, `4.0`, `4.1` and `6.0` to `6.1`; and `7.0` to `7.1`, with silent channels.
+`7.1(wide)` and `7.1(wide-side)` have no FLAC layout that holds them, because their extra pair sits between the front centre and the front left and right, so they take ADR 0050's downmix.
+* ALAC carries mono, stereo, `3.0`, `4.0`, 5.0, 5.1, `6.1(back)` and `7.1(wide)`, so a `6.1` track keeps every channel as `6.1(back)`, and a `7.1(wide-side)` track as `7.1(wide)`.
+ALAC pads `3.0(back)` to `4.0`; `quad` to 5.0; `2.1` and `3.1` to 5.1; and `4.1` and `6.0` to `6.1(back)`, with silent channels.
+ALAC's `7.1(wide)` holds front-of-centre channels instead of a second surround pair, so ALAC does not carry 7.1, and `7.0` and 7.1 take ADR 0050's downmix to 5.0 and 5.1.
+
+When that layout has more channels than the capability entry accepts, the encode follows ADR 0050's rules for a channel maximum.
+An encode that only renames a surround pair maps the channels with FFmpeg's `channelmap` filter, and an encode that pads uses `pan` with a gain of 0 for each added channel.
+A FLAC or ALAC encode of a lossless track keeps every sample when it keeps or pads the track's layout, and is not lossless after a downmix.
+Every Opus encode of more than two channels uses `-mapping_family 1`.
+
+An Opus encode uses constrained VBR (`-vbr constrained`) at 96 kb/s for mono, 160 kb/s for stereo, 448 kb/s for 5.1, 576 kb/s for 6.1 and 640 kb/s for 7.1.
+A `3.0`, `quad` or 5.0 encode takes the 5.1 rate until a measurement gives it its own.
+These rates are provisional until an ABX listening check against the master, through a receiver, confirms them before production.
+An Opus encode counts its rate plus 2 %, because constrained VBR ran up to 1.5 % over it.
+Opus has no audio steps of its own, so under a maximum bitrate the session steps through ADR 0050's E-AC-3, AC-3 or AAC steps, and only the steps smaller than the Opus rate count.
+
+A FLAC or ALAC encode has no target bitrate.
+Its output's PCM bitrate is sample rate × bit depth × channels.
+ADR 0054's bitrate scan measures what a FLAC encode of each audio track of a file with a lossless track writes (link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc#lossless-audio-measurement[ADR 0054]).
+With a measurement of the same output, a FLAC encode counts its measured average and peak.
+Without one, and for every ALAC encode, such an encoded rendition's bitrate is 65 % of that PCM bitrate, and its cost adds its framing.
+Its segments then hold the audio of their intervals, widened by one encoded frame, at the full PCM bitrate plus their framing, and its peak follows ADR 0054's rule for an encoded audio rendition.
+So an unmeasured stereo FLAC encode at 16 bits counts about 1,000 kb/s in the cost and 1,536 kb/s in `BANDWIDTH`, and a 7.1 encode at 24 bits counts 5,990 and 9,216 kb/s.
+
+An encoded variant (link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044]) and a copy without a measured peak advertise `BANDWIDTH` as 1.2 × `AVERAGE-BANDWIDTH`.
+When any audio rendition of the session is a FLAC or ALAC encode, such a variant's `BANDWIDTH` is instead 1.2 × its `AVERAGE-BANDWIDTH` without the audio, plus the largest peak among the audio renditions.
+For that rule, a FLAC or ALAC encode's peak is its measured peak, or without a measurement its full PCM bitrate, widened by one frame, plus its framing.
+A copied rendition's peak is its measured peak (ADR 0054) when the server holds one.
+Every other rendition's peak is 1.2 × its counted bitrate.
+The largest peak can belong to another rendition than the largest cost, and 1.2 × 65 % would cover only 78 % of the PCM bitrate.
+
+FFmpeg's ALAC encoder, and its FLAC encoder outside an experimental 32-bit mode, write 16 or 24 bits.
+link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032's probe version 7] reports each audio stream's sample format and bit depth.
+A FLAC or ALAC encode of an integer track of up to 24 bits keeps every sample: a track of up to 16 bits writes 16 bits, and a track of 17 to 24 bits writes 24 bits, with zero low bits added.
+Float or 32-bit PCM is cut to 24 bits and is not lossless: FFmpeg's FLAC encoder drops the low 8 bits, and float samples above full scale clip.
+When the probe gives no depth for a lossless track, the written depth follows the source codec, as before: PCM whose codec name states 16 bits, such as `pcm_s16le`, writes 16 bits, and any other lossless track 24 bits.
+Decoded lossy audio writes 16 bits with TPDF dither (`aresample=osf=s16:dither_method=triangular`, <<decision-sample-processing>>).
+A downmix of a 24-bit lossless track writes 24 bits, and a downmix of a 16-bit lossless track writes 16 bits with the same dither.
+Only an encode that writes every decoded sample unchanged is called lossless.
+The PCM bitrate counts the bit depth that the encode writes.
+
+The 65 % lies above every film soundtrack measured: FLAC of decoded AAC, AC-3 and lossless film audio averaged 26 to 53 % of the PCM bitrate, and ALAC wrote 2 to 5 % more than FLAC.
+The PCM bitrate bounds every frame, because FLAC and ALAC store a frame that does not compress as plain samples.
+A segment can hold one more frame than its interval: with FFmpeg's default FLAC frame of 4,608 samples, 96 ms at 48 kHz, a 3 s window of white-noise PCM held 2 % more than its PCM bitrate, and the 50 ms frames of <<decision-audio-grid>> hold less.
+A cap below it would understate some segments: the largest 3 s window of a decoded film track reached 85 % of the PCM bitrate, and of decoded white noise 94 %.
+Evidence: <<evidence-lossless-size>>.
 
 DTS and TrueHD follow the same declared-codec rule as every other codec.
-A DTS or TrueHD track is copied only when the client declares that codec in fMP4.
-Otherwise the DTS or TrueHD track is encoded.
+A DTS or TrueHD track is copied only when the client declares that codec in fMP4, and is otherwise encoded.
+FFmpeg's MP4 muxer writes TrueHD only under `-strict experimental`, so a job that copies a TrueHD track passes `-strict experimental`, and every other job keeps `-strict unofficial`.
+A TrueHD copy writes an `mlpa` sample entry with a `dmlp` box, and its `CODECS` value is `mlpa`.
 No tested browser or Apple player decoded DTS or TrueHD from fMP4, in 0 of 36 plays across six players.
-Media3, the Android media library, can play both codecs on the SHIELD TV Pro by passthrough to an HDMI receiver, or with Media3's FFmpeg decoder module.
+AVFoundation reads a TrueHD copy's sample entry but has no TrueHD decoder, so a client that plays through AVPlayer never declares TrueHD.
+An Apple client that decodes TrueHD itself can declare it.
+Media3, the Android media library, can play DTS on the SHIELD TV Pro by passthrough to an HDMI receiver, or with Media3's FFmpeg decoder module.
 A reading of Media3 1.11.1's source found both Media3 paths, and no measurement covers them.
-The Android client declares DTS and TrueHD only after a check on the SHIELD TV Pro through an HDMI receiver (https://github.com/streamarr/streamarr-android/issues/1[streamarr/streamarr-android#1]).
-The Android client declares TrueHD only once the client regroups TrueHD frames for passthrough.
+For TrueHD, Media3 1.11.1 reads the `mlpa` sample entry, but maps no `mlpa` codec string and regroups TrueHD for passthrough only in its MP4 and Matroska extractors, not in the fragmented MP4 extractor that its HLS player uses.
+The Android client declares DTS or TrueHD only after a check on the SHIELD TV Pro through an HDMI receiver (https://github.com/streamarr/streamarr-android/issues/1[streamarr/streamarr-android#1]).
 
 *Why:* In the audio measurements, hls.js 1.7.0 in Chromium, Chrome and Firefox played audio renditions of AAC, Opus and FLAC, and the page switched between those renditions.
 After a switch that changed the codec, the audio played 90 to 140 ms late until the next seek.
@@ -129,7 +266,63 @@ When a variant's `CODECS` attribute listed `ec-3` or `ac-3`, hls.js in Chromium,
 So one rendition that a player cannot decode fails the whole stream, and a copy needs the client's declaration.
 Stereo Opus played in all six tested players, but 5.1 Opus failed in every Apple player.
 So a safe Opus copy depends on the channel count as well as the codec.
-Evidence: <<evidence-audio-cases>>.
+Before the FLAC, Opus and ALAC encodes, a copied default track in one of those codecs left every other track needing a codec that the server did not encode.
+FFmpeg 8.1.3 in the pinned worker image lists its native `flac` and `alac` encoders and the `libopus` encoder as ready for use.
+So the server can keep a lossless or passthrough default track as a copy and still encode the other tracks to its codec.
+The same FFmpeg marks its `dca` (DTS) and `truehd` encoders as experimental, so the server encodes neither codec.
+Under `-strict experimental`, the same FFmpeg copied FATE's 7.1 TrueHD Atmos and 5.1 TrueHD samples into fragmented MP4 with every packet byte-identical, its major-sync flags kept, and the same decoded samples.
+Seeked copies wrote the same `dmlp` box, because FFmpeg's copy starts at a major sync, so a TrueHD copy keeps one init across job attempts.
+FFmpeg's experimental flag here guards the muxing, which the readback shows to be sound, not an encoder.
+Encoding a TrueHD default track because a commentary track needs its codec would lose the Atmos objects that a client decoding TrueHD keeps, so the server copies the default track and offers the commentary by a replacement.
+An encode of the default track keeps every track in one codec, so a switch stays in sync.
+ADR 0050's encode takes E-AC-3 before AC-3 and AAC, so the encoded default track keeps surround wherever the client declares E-AC-3 or AC-3 with more than two channels.
+A FLAC encode of a lossless track keeps every sample of up to eight channels, where the lossy E-AC-3 and AC-3 encodes stop at 5.1.
+A FLAC encode of a lossy track keeps the decoded audio, where an E-AC-3, AC-3 or AAC encode adds a second lossy generation.
+A disc's own lossy track was encoded once from the master, so its copy beats the server's lossy encode of the lossless track.
+On macOS 26.6.2, AVPlayer played a stream whose audio rendition was 7.1 FLAC at 24 bits in fMP4, and reported eight channels in WAVE 7.1 order.
+In the same FFmpeg, an Opus encode refused 2.1, 3.0(back), 4.0 and quad(side).
+An ALAC encode wrote 2.1 as stereo, and quad, quad(side) and 3.0(back) as five channels.
+A FLAC encode wrote 2.1, 3.0(back) and 4.0 under another layout, with only a warning.
+Such an encode moves channels: a `4.0` track's centre played from the back left, a `2.1` track's low-frequency channel from the centre, and a `6.0` or `7.0` track's back channel from the low-frequency channel.
+Padded with silent channels to the smallest FLAC layout that holds them, `2.1`, `3.1`, `3.0(back)`, `4.0`, `4.1`, `6.0` and `7.0` tracks kept every sample in place, for at most 0.06 % more bytes.
+Padded to the smallest ALAC layout, `2.1`, `3.1`, `quad`, `3.0(back)`, `4.1` and `6.0` tracks did too.
+A player then shows the padded layout, such as 6.1 for a `4.0` track.
+FFmpeg's `pan` filter copies channels by position when every gain is 1, so a rename with it put a `6.1` track's back centre in the back left, while `channelmap` kept every channel in place.
+Each multichannel Opus rate is the lowest tested rate at which every real channel of Tears of Steel and Sintel scored within about 1.5 points of disturbed frames and 1 dB of stereo at 160 kb/s, on a per-channel noise-to-mask measure.
+Xiph's guidance gives 96 to 128 kb/s for stereo music, 128 to 256 kb/s for 5.1 and 256 to 450 kb/s for 7.1 as starting points to adjust by listening, and 5.1 at 384 kb/s already left 11.5 to 21.4 % of the worst channel's frames disturbed.
+Unconstrained VBR at 448 kb/s spent 406 kb/s on Tears of Steel and left 26.5 % of the centre channel's frames disturbed, against 1.4 % with constrained VBR.
+Without `-mapping_family 1`, FFmpeg's `libopus` encoder played a 5.0 track's centre from the rear right and a 6.1 track's side left from the centre.
+With it, every channel of 5.0, 5.1, 6.1 and 7.1 landed in its RFC 7845 position.
+Evidence: <<evidence-audio-cases>>, <<evidence-encoders>>, <<evidence-lossless-surround>>.
+
+[[decision-sample-processing]]
+=== The worker decodes AC-3 and E-AC-3 without compression, dithers every conversion to 16 bits, and resamples with tuned settings
+
+The worker decodes every AC-3 and E-AC-3 track that it encodes with `-drc_scale 0 -target_level -31`.
+The decode applies none of the track's dynamic range compression, and applies the track's dialogue normalization as a hardware decoder does for the copy, so an encode plays at the copy's level through an AV receiver and a step from a copy to an encode keeps the level.
+ADR 0050's downmix mixes these decoded samples.
+
+Every conversion from floating point to 16 bits applies TPDF dither (`aresample=osf=s16:dither_method=triangular`).
+That covers every 16-bit FLAC or ALAC encode of decoded lossy audio and every downmix that writes 16 bits.
+
+A capability entry's maximum sample rate (link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049]) bounds every encode, lossy or lossless, as ADR 0049 decides.
+Within that bound, a lossy encode keeps a source rate of 44.1 or 48 kHz and writes 48 kHz from any other rate, and an Opus encode writes 48 kHz.
+A FLAC or ALAC encode keeps the source's rate, except under that bound and in its 48 kHz step (<<decision-audio-codec>>).
+Every rate change uses `aresample=filter_size=128:phase_shift=14:cutoff=0.95:kaiser_beta=14`.
+
+*Why:* FFmpeg's AC-3 and E-AC-3 decoders apply a track's dynamic range compression unless `drc_scale` is 0.
+On FATE's Miller's Crossing AC-3 sample, the compression lowered the peak from −6.41 to −14.03 dBFS, and on The Great Wall's E-AC-3 sample it changed the gain by −1.6 to +5.9 dB from one 10 ms window to the next.
+A FLAC encode that carries that compression is not the track's audio.
+A Dolby decoder applies the track's dialogue normalization to a copy, so the copy's dialogue plays at −31 dBFS.
+With `-drc_scale 0`, `-target_level -31` lowered Miller's Crossing by 4.0 dB and CSI Miami's E-AC-3 by 5.0 dB, and left The Great Wall unchanged, so an encode matches the copy through a receiver.
+Without dither, FFmpeg's conversion of a −90 dBFS 1 kHz float tone to 16 bits put harmonics at −112 and −106 dBFS and read the tone 0.85 dB too loud.
+With TPDF dither, every harmonic fell to −136 dBFS or below, under the dither's own noise.
+On decoded AAC, the conversion also floored instead of rounding, which left a −0.5 LSB offset.
+The pinned image has no soxr resampler.
+With FFmpeg's default resampler settings, 44.1 to 48 kHz lowered a 21 kHz tone by 2.09 dB, and 96 to 48 kHz folded a 24.5 kHz tone back to 23.5 kHz at −14.4 dB.
+With the tuned settings, the 21 kHz tone lost 0.03 dB and the folded tone fell to −138.3 dB, and a 7.1 resample from 96 to 48 kHz ran at about 45 times real time.
+No HLS player was tested with AAC above 48 kHz, so a lossy encode writes at most 48 kHz.
+Evidence: <<evidence-sample-processing>>.
 
 [[decision-video-job]]
 === Every running variant's job attempt produces the audio renditions
@@ -151,10 +344,7 @@ To keep that origin, every FFmpeg that reads the source cancels FFmpeg's start t
 That FFmpeg passes `-discard none` and `-start_at_zero`, and `-itsoffset` with the start time correction that the probe reports.
 The start time correction does not depend on which tracks a job attempt maps, so every job attempt and every rendition share one origin.
 On the path that moves RPUs, the FFmpeg that reads the source passes those flags, and the FFmpeg that reads its copy keeps the copy's timestamps without `-start_at_zero`, as link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] states.
-Copied audio with fixed-length frames, such as AAC and AC-3, is snapped to its codec's encoder frame grid, as link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] states.
-The encoder frame grid is the set of frame start times that FFmpeg's encoder for that codec would write.
-ADR 0037 owns the snapping rule.
-The snapping rule applies to every audio rendition.
+Every audio encode joins its job attempts on its audio frame grid, and the producer never moves a copied track (<<decision-audio-grid>>).
 
 Every running job attempt of every variant writes every selected audio track.
 The server keeps the first delivery of each audio segment that it receives.
@@ -176,10 +366,47 @@ On an MPEG-TS source, FFmpeg's `-start_at_zero` option measured media time zero 
 Mapping a different set of languages moved media time by 170.7 ms.
 With `-discard none` on the input, media time zero stayed at the container's earliest stream.
 A subtitle or data stream that starts 1 s or more before the other streams still moves media time zero under `-discard none`, so ADR 0037 also cancels the start time correction.
-Copied AAC from an FFmpeg-made Matroska file sat 16 samples off the AAC encoder's frame grid.
-Without the snap, switches between AAC renditions moved the audio's offset to the picture by −46 to +60 ms.
-With the snap, the same switches stayed within −12 to +9 ms, which is about the measurement's own ±10 ms jitter.
 Evidence: <<evidence-video-job>>, <<evidence-audio-cases>>.
+
+[[decision-audio-grid]]
+=== Every audio encode joins its job attempts on its audio frame grid, and the producer never moves a copied track
+
+Each encoded audio rendition has its own audio frame grid: the start times of its encoder's frames, at the encode's frame length and sample rate, counted from the default track's first sample.
+When the session copies the default track, that first sample is the copy's own.
+When the session encodes the default track, it is the track's probed start.
+The frame length is the encoder's: 1,024 samples for AAC, 1,536 for AC-3 and E-AC-3, 960 for Opus, the sample rate ÷ 20 rounded down to a whole sample for FLAC, such as 2,400 at 48 kHz and 1,102 at 22.05 kHz, set with `-frame_size`, and 4,096 for ALAC, whose FFmpeg encoder writes no other length.
+A copied track keeps its own frames, whatever their length.
+
+Every audio encode puts its output frames on its grid.
+FFmpeg's encoders start their first frame a fixed delay before their input: 256 samples for AC-3 and E-AC-3, 312 for Opus, one whole frame for AAC, and none for FLAC and ALAC.
+Each job attempt decodes each encoded track from one segment period before the start of its first segment.
+It trims the decoded audio to the first point at or after that start that lies the encoder's delay after a grid point, so the encoder's first frame starts on that grid point.
+An attempt that starts at the track's first sample instead adds silence before that sample, so that its first frame starts on the last grid point that lies at least the encoder's delay before that sample.
+The silence is the distance from that grid point to the first sample, less the encoder's delay, so it also absorbs a track whose first sample lies off the default track's grid.
+For a track that starts on a grid point, it is 1,280 samples for AC-3 and E-AC-3 and 648 for Opus.
+So consecutive attempts meet without a gap or an overlap, and a FLAC or ALAC encode of a lossless track decodes to the same samples on both sides of a junction.
+When the source container rounds timestamps, as Matroska rounds them to 1 ms, a seeked attempt takes its decoded audio's start from the source track's own frame grid, counted from the track's probed start, and not from the rounded packet time.
+
+The producer never moves a copied track.
+link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-audio[ADR 0037] rebuilds each copied sample's duration from its sample count, and its decode time from the running sum.
+A session with two copied tracks whose frames start at different times keeps both, and its encodes count their grids from the default copy's first sample.
+A switch between those two copies accepts a gap or an overlap of up to half a frame, the frame's samples ÷ (2 × the sample rate): 10.7 ms for AAC and 16 ms for AC-3 at 48 kHz.
+A viewer's audio delay moves every audio rendition by the same amount (link:0055-a-viewers-audio-delay-is-a-playback-session-parameter-and-the-server-shifts-the-audio-renditions.adoc[ADR 0055], proposed in https://github.com/streamarr/streamarr-adr/pull/87[streamarr/streamarr-adr#87]).
+
+The merge gate of https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503] decodes across a junction for every pair of source codec and encoder, TrueHD, DTS-HD MA and AC-3 included, at 44.1, 48 and 96 kHz.
+It requires 0 samples of gap or overlap, and identical decoded samples for a FLAC or ALAC encode of a lossless track.
+
+*Why:* An encoder's frames start a fixed delay before its input.
+After a plain seek to a segment boundary, consecutive attempts met with gaps or overlaps of −59.3 to +26.2 ms, depending on the encoder's frame length and the boundary.
+DTS-HD MA decoded from a plain seek differed from a continuous decode in 17,801 samples after the junction, so even its FLAC encode was not lossless there.
+Decoding from 3 s early and trimming to the grid gave 0 samples of gap or overlap at all 60 measured junctions, and the FLAC and ALAC encodes of FLAC, TrueHD and DTS-HD MA tracks decoded to the source's samples on both sides.
+FLAC's default frame of 4,608 samples does not divide most boundaries, and the sample rate ÷ 20 gives 50 ms frames for 0.4 to 0.8 % more bytes.
+FFmpeg's ALAC encoder ignored `-frame_size 2400` and wrote 4,096-sample frames.
+Copied AAC from an FFmpeg-made Matroska file sat 16 samples off the AAC encoder's frame grid.
+Without alignment, switches between AAC renditions moved the audio's offset to the picture by −46 to +60 ms, and with the copy and the encodes on one grid they stayed within −12 to +9 ms, about the measurement's own ±10 ms jitter.
+Counting the encodes' grids from the copy's first sample aligns the renditions without moving the copy, which keeps the copy's authored sync.
+An encode of AAC copied in Matroska started 8 samples early after a seek, because Matroska had rounded the seek packet's timestamp.
+Evidence: <<evidence-audio-junctions>>, <<evidence-audio-cases>>.
 
 [[decision-init]]
 === Each audio rendition has one initialization segment
@@ -231,8 +458,11 @@ A multiplexed variant's media segment carries video and audio together under lin
 Multiplexed variants remain in use until the server delivers audio renditions.
 A video-only variant's media segment carries no audio, so neither rule applies to that segment.
 Before the renditions ticket (https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503]) merges, the ticket's player check shows again that every tested player plays audio renditions without the priming frame (<<decision-device-checks>>).
+The drop stays until the Apple TV check of the end of the epic.
+If AVPlayer trims a kept priming frame at the start, by an edit list whose media time is 1,024 samples, every client gets the kept frame with that edit list instead.
+If AVPlayer plays the kept frame late, as Firefox does, the drop stays.
 
-*Why:* When segment 0 kept the priming frame, a language switch in the first 6 s stopped hls.js playback for good.
+*Why:* When segment 0 kept the priming frame at a negative decode time, hls.js playback stopped for good, at first after a language switch in the first 6 s.
 The stall happened in 10 of 10 runs in Chromium, Firefox and WebKit.
 The stall also happened in 3 of 3 runs of an independent re-check.
 The frame's decode time is the 64-bit two's complement of −1024.
@@ -242,7 +472,10 @@ At 48 kHz, that start is 89,478 s.
 When the worker dropped the frame, every run played.
 A later re-run with other fixtures kept the priming frame, switched at 2 s, and played to the end in 15 of 15 hls.js runs.
 So the stall depends on a condition that the later re-run lacked.
-The renditions ticket's player check identifies that condition.
+A third run stalled with no switch at all: WebKit with hls.js stopped for good at 6.02 s in 2 of 55 plays of a negative decode time, so the negative decode time alone can cause it.
+The drop costs the first frame's quality: the first 21.3 ms of an AAC tone decoded at 2.8 dB signal-to-noise ratio, against 37.2 dB with the frame kept.
+A kept frame with an edit list, or with a composition offset of −1,024 samples, stalled in none of 45 plays per player, and Chromium played it in sync.
+Firefox played it one AAC frame, 21.3 ms, late from a start at 0 until the first seek.
 hls.js places a multiplexed fragment by the fragment's video track.
 So the priming frame's decode time does not decide where hls.js places a multiplexed segment.
 An audio rendition's fragment has no video track, so hls.js places that fragment by its audio decode time.
@@ -278,7 +511,8 @@ On a Mac, AVPlayer stopped the whole stream where a rendition's playlist ended e
 On an iPhone, hls.js stopped for good inside the `EXT-X-GAP` segments when the viewer switched to the ended track.
 Silence padding played to the end on the iPhone and in every headless engine.
 AVPlayer stopped at the end of multiplexed audio in 12 of 12 runs, so multiplexed audio needs the padding too.
-In a sample of 300 library files, the container header stated a duration for 349 of the 416 audio streams (84 %).
+A non-fragmented MP4 file states each track's duration in its track header (ISO/IEC 14496-12), and mkvmerge writes a `DURATION` statistics tag for each Matroska track.
+A Matroska file without statistics tags and an MPEG-TS file state no track duration, so the server also learns the end time from a job attempt.
 In normal output, audio trails video by at most 0.16 s, so the 1 s margin never closes a segment while the segment's audio is still on the way.
 Evidence: <<evidence-audio-cases>>.
 
@@ -356,28 +590,65 @@ Probe version 4 of link:0032-media-file-probe-results-are-persisted.adoc[ADR 003
 The server, not the worker, decides which handler names are generic.
 The server treats a handler name as generic when the name contains "Handler" or " handler", starts with "Gestionnaire ", "Module ", "Gestor ", "Procedura ", "Core Media " or "ISO Media file produced by", or equals the track's four-character handler type, such as `soun`.
 The first three checks come from MediaInfo's rule for MP4 handler names.
-The server's rule keeps all 57 handler names in the library sample that name a track and leaves out all 97 generic ones.
-The 154 handler names of the library sample are the rule's test set.
+The rule's test set comes from public sources (<<evidence-handler-names>>).
+The rule leaves out every generic name in that set and keeps every track name written for the test, such as "English", "Commentary" and "Descriptive audio".
 Names that still collide get a trailing number in file order, such as "English" and "English 2".
 RFC 8216 section 4.3.4.1.1 says "All EXT-X-MEDIA tags in the same Group MUST have different NAME attributes."
-An audio rendition's `NAME` follows the same rules, applied among the file's audio tracks.
+An audio rendition's `NAME` follows the same rules, applied among the file's audio tracks, with these additions:
+
+* The flags of an audio name are "Commentary" when ffprobe's `comment` disposition is set, "Audio description" when its `visual_impaired` or `descriptions` disposition is set, and "Music and effects" when its `clean_effects` disposition is set, for example "English Commentary".
+link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032's probe version 7] reports these dispositions.
+* When none of those dispositions is set, the track's title, or its handler name when that name is not generic, marks it.
+A commentary word marks a commentary: "commentary", "commentaire", "kommentar", "comentario" or "commento".
+An audio description word marks an audio description: "audio description", "descriptive", "described", "DVS" or "visually impaired".
+The match ignores case and takes whole words only.
+A track that a word marks counts as flagged for every rule of this ADR, the default track and the describes-video characteristic included.
+The server owns both word lists, as it owns the generic handler names, so a fix needs no new probe.
+* A music-and-effects rendition carries `AUTOSELECT=NO`, because it has no dialogue.
+* When names built from the language and the flags still collide, each colliding name adds the source track's format and channel layout after a middle dot, such as "English · TrueHD 7.1" and "English · AC-3 5.1".
+The format is the codec's common name: AAC, AC-3, E-AC-3, TrueHD, DTS, FLAC, ALAC, Opus, PCM or MP3.
+A DTS track whose profile name, which probe version 5 reports, starts with "DTS-HD MA" shows as "DTS-HD MA".
+A copied track whose profile name contains "Dolby Atmos" or "DTS:X" adds "Atmos" or "DTS:X" to its format, such as "English · E-AC-3 Atmos 7.1", because a copy keeps the objects.
+An encoded track leaves them out, because an encode loses the objects, an E-AC-3 track with Atmos (JOC) included.
+The layout is probe version 7's layout name without its parenthesized part, such as "5.1" for `5.1(side)`, with "Mono" for `mono` and "Stereo" for `stereo`.
+A track without a known layout shows its channel count instead, such as "6 channels".
+* A trailing number goes only on names that still collide, such as "English · AC-3 5.1" and "English · AC-3 5.1 2".
+* An audio description rendition carries `CHARACTERISTICS="public.accessibility.describes-video"` and `AUTOSELECT=YES`, and its name keeps "Audio description".
+
+A subtitle name also takes the "Commentary" flag from the same disposition.
+The format and the layout apply to audio names only, because every text subtitle becomes WebVTT, so a subtitle's source format tells the viewer nothing.
+The generic handler-name rule, the replacements below and the trailing number stay shared, so https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60] and https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503] use one name rule.
 Before the server writes a title or handler name into `NAME`, it replaces each carriage return or line feed with a space, each double quote with an apostrophe, and each backslash with a slash.
 RFC 8216 section 4.2 forbids a carriage return, a line feed and a double quote in a quoted string.
 
 *Why:* AVPlayer appends " SDH" to the name of a rendition that carries the SDH characteristics.
 So a rendition named "English SDH" showed as "English SDH SDH".
 In a test where two renditions were both named "English", AVPlayer and WebKit's native HLS exposed only one of the two, in 3 of 3 plays.
-In a sample of 300 library files, the title told apart 165 of the 244 text tracks that share a language with another text track of the same file.
+A title such as "Commentary" tells apart two tracks in one language, where the language and the flags cannot.
 Many muxers write a fixed name for the track's type, such as `SoundHandler`, into every MP4 track.
 The list of generic handler names is open-ended.
 A rule in the worker would need a new probe version for each fix, and every file would then need a new probe.
 For example, a rule that treats a name as generic when the name ends with "Handler" would keep "ISO Media file produced by Google Inc." as a track name.
 The server can fix its own rule without a new probe.
 Of the open-source players and tools we read, only MediaInfo filters generic handler names, and its rule misses "Core Media Audio" and "ISO Media file produced by Google Inc.".
-VLC, mpv and MKVToolNix never use a handler name as a track title, but the library sample holds 57 real track names that only the handler name carries.
+VLC, mpv and MKVToolNix never use a handler name as a track title.
+But GPAC's MP4Box writes the track name that its `name` import option sets into the handler name, so a file from MP4Box carries that name nowhere else.
 No HLS writer we read escapes a title in `NAME`, because none of them writes text from the file there.
 VLC's and FFmpeg's HLS readers treat a backslash as an escape, so the server replaces the backslash too.
-Evidence: <<evidence-subtitle-cases>>, <<evidence-library>>.
+FFmpeg's MOV and WebM muxers write neither the commentary nor the audio description disposition (ADR 0032), so a file that they wrote marks a commentary only in its title.
+The source's format and layout tell apart two untitled tracks in one language.
+The delivered codec would tell apart nothing, because every audio rendition of a stream session has the same codec.
+RFC 8216 lets an audio rendition carry the describes-video characteristic.
+Apple's authoring specification requires that characteristic and `AUTOSELECT=YES` on an audio description rendition, and says that its name should show that it is audio description.
+On macOS 26.6.2, AVFoundation's `displayName` for an audio rendition was the language alone, such as "English", whatever the `NAME`, and "English AD" with the describes-video characteristic.
+The `NAME` reached the rendition's title metadata unchanged, middle dot included.
+For a subtitle rendition, `displayName` used the `NAME`.
+So an Apple client labels an audio rendition from its title metadata, and an audio description name that keeps its flag shows no doubled token in `displayName`.
+FFmpeg reads an MPEG-TS audio description marked by an AC-3 or E-AC-3 descriptor as `descriptions` alone, so the flag reads both dispositions (ADR 0032).
+A music-and-effects track has no dialogue, and a dependent track holds only what a receiver mixes into the main track, so a player that picks either by itself plays the film without its dialogue.
+For the same reason the default track passes over commentary, audio description and music-and-effects tracks while another track remains.
+A copied E-AC-3 track with Atmos keeps its JOC objects in identical packets, so its name can say Atmos.
+Evidence: <<evidence-subtitle-cases>>, <<evidence-handler-names>>, <<evidence-audio-names>>.
 
 [[decision-cue-text]]
 === Extraction repairs SubRip that is not UTF-8 and judges each track on its own output
@@ -399,12 +670,12 @@ FFmpeg's SubRip decoder drops text between a `<` and a later `>`.
 *Why:* FFmpeg's text decoders reject every cue that is not valid UTF-8.
 When a track loses more than two thirds of its cues, FFmpeg exits with an error.
 In a job that extracts every track in one pass, that error would fail every track.
-In a sample of 300 library files, 1 of 682 SubRip tracks was not UTF-8, and FFmpeg rejected 594 of that track's 596 cues.
+On a synthetic German track in ISO-8859-1, FFmpeg kept only 45 of 100 cues.
 The per-cue conversion gave 100 of 100 correct cues on each of 8 synthetic tracks in six code pages.
 One of those tracks was a UTF-8 track with 5 windows-1252 cues, and a conversion of that whole track gave 35 of 100 correct cues.
-In the same library sample, 274 of 277 forced cues were also in the matching full track.
-In the same library sample, 0 of 910,377 SubRip lines hold text that the decoder would drop between a `<` and a later `>`.
-Evidence: <<evidence-subrip>>, <<evidence-library>>.
+Nothing in Matroska or MP4 ties a forced track's lines to the full track of the same language.
+SubRip defines no escape for `<`, so no reader can tell such text from a tag for certain.
+Evidence: <<evidence-subrip>>.
 
 [[decision-captions]]
 === Captions carried in the video become WebVTT subtitle renditions
@@ -415,8 +686,8 @@ The extraction job extracts those captions from the source.
 The probe detects caption data by decoding the video's keyframes.
 The server lists a caption rendition only when the extraction finds at least one cue.
 
-*Why:* FFmpeg's header probe marked captions on 0 of 300 library files.
-Decoding the first 30 s of each file found caption data in 24 of the 254 files that decoded.
+*Why:* A header probe marks captions only when FFmpeg's decoder meets caption data in the few frames that it decodes to read the stream parameters.
+A recording whose captions start later shows no captions in that report.
 Decoding only keyframes found caption data in 0.11 to 0.14 s for the first 10 s of a 1080p H.264 file.
 A full decode of the same 10 s took 0.71 to 0.77 s.
 Caption data proves only that a caption channel exists, and a broadcast can send padding with no text.
@@ -459,6 +730,9 @@ These three issues leave the probe version unchanged.
 Issue https://github.com/streamarr/streamarr-server/issues/505[streamarr/streamarr-server#505] adds caption detection, which decodes the video's keyframes.
 That ticket increases the probe version when the ticket merges.
 The server then probes existing media files again by itself.
+link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032's probe version 7] adds each audio stream's channel layout, sample format and bit depth, the dispositions that the names and the default track use, each FLAC stream's minimum block size, and the `comment` disposition of each subtitle stream.
+The audio dispositions are `comment`, `visual_impaired`, `descriptions`, `original`, `dub`, `clean_effects` and `dependent`.
+Until the server stores a file's probe version 7 outcome, the file's names carry only the flags that titles mark, its audio names show channel counts instead of layouts, its encodes take their bit depth from the source's codec, and no Apple client gets a copy of its FLAC tracks.
 
 [[decision-image-subtitles]]
 === An image subtitle that the viewer selects is burned into the video
@@ -484,10 +758,10 @@ An audio switch that changes which forced image track applies replaces the strea
 That replacement uses none of the format-attempt budget.
 
 *Why:* No code burns a subtitle into the video today, so no client can show an image subtitle.
-In the library sample, 66 of 300 files carry PGS or VobSub subtitles, about one file in five.
+Blu-ray discs carry graphic subtitles as PGS, and DVDs carry subtitles only as VobSub.
+So a disc copy that keeps those subtitles holds image subtitles.
 A subtitle choice is the viewer's choice, not a format error, so the replacement spends none of the format-attempt budget.
 A forced track carries lines that a viewer needs even with subtitles off.
-Evidence: <<evidence-library>>.
 
 [[decision-seek-after-change]]
 === AVFoundation clients seek in two steps after an audio or subtitle change
@@ -512,35 +786,42 @@ hls.js did not freeze, so the web client needs neither fix where the web client 
 Evidence: <<evidence-subtitle-cases>>.
 
 [[decision-device-checks]]
-=== Device checks are merge gates on the tickets
+=== Mac browser checks gate the tickets, and the TV checks run once at the end of the epic
 
-Each device check is a merge gate on the ticket that delivers the behavior that the check covers.
-The checks run AVPlayer on the Apple TV 4K, a Media3 player on the SHIELD TV Pro, and hls.js in Mac browsers.
+The player checks in Mac browsers, hls.js in Chromium, Firefox and WebKit, are merge gates on the ticket that delivers the behavior that they cover.
+The checks on the Apple TV 4K with AVPlayer and on the SHIELD TV Pro with a Media3 player run once, after the epic https://github.com/streamarr/streamarr-server/issues/496[streamarr/streamarr-server#496] closes, and gate nothing.
 The rules of this ADR hold whatever a check shows.
-A failing check comes back to the ticket as a question before the ticket merges.
+A failing Mac browser check comes back to its ticket as a question before the ticket merges, and a failing TV check becomes a new issue.
+The TV pass plays multichannel FLAC, padded layouts, a copied E-AC-3 track with Atmos under `CHANNELS="16/JOC"` and multichannel Opus through the receiver, and compares a copy's level with an encode's.
+It also checks whether AVPlayer trims a kept priming frame by its edit list (<<decision-priming>>), and listens for junctions between attempts, FLAC copied from Matroska, 96 kHz FLAC, switches between renditions at different sample rates and the audio description choice under tvOS's accessibility settings.
 The player check of the audio renditions ticket, https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503], runs the real server and worker.
 That check shows again that hls.js plays audio renditions without the priming frame.
-That check also plays a Matroska source whose copied AAC starts off the AAC encoder's frame grid.
+That check also plays a Matroska source whose copied AAC starts off the AAC encoder's frame grid, beside encoded tracks whose grids count from the copy's first sample.
+It also checks that WebKit drops a FLAC copy whose minimum block size is below 192 samples, as AVFoundation does, and plays the FLAC encode that replaces it.
 The Apple client's ticket, https://github.com/streamarr/streamarr-apple/issues/4[streamarr/streamarr-apple#4], checks the cover of <<decision-seek-after-change>> on an iPhone.
 
-Three cases have no measurement.
-The cases are an ALAC source, AAC at 44.1 kHz, and an audio request for the segment just before a relocated attempt's first segment.
+Four cases have no measurement.
+The cases are an ALAC source, sources at 44.1 kHz and at 96 kHz with a switch between renditions at different sample rates, and an audio request for the segment just before a relocated attempt's first segment.
 A relocation starts a new job attempt at the requested segment when that segment lies before the running attempt's first segment, or too far beyond the running attempt's output (link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]).
-The acceptance tests of https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503] cover the three cases.
+The acceptance tests of https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503] cover the four cases.
 
 [[explicitly-deferred]]
 === Explicitly deferred
 
 * Deliver image subtitles as renditions.
-* Deliver teletext subtitles.
-The library sample holds no teletext among its 1,162 subtitle streams.
+* Deliver teletext subtitles, which come from DVB broadcast recordings.
 * Deliver external subtitle files that sit beside the source, in a follow-on to https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60].
-* Copy Opus with more than two channels.
-Copies of multichannel Opus wait until typed declarations carry a channel limit for each codec (https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395]).
-* Declare audio from the browser's own report of what the browser decodes, with channel counts (https://github.com/streamarr/streamarr-web/issues/29[streamarr/streamarr-web#29]).
-Until then, the web client declares AAC, with at most 6 channels in Firefox.
-* Lift the 6-channel AAC limit in Firefox after a test of 7.1 channel order on real speakers (https://github.com/streamarr/streamarr-web/issues/29[streamarr/streamarr-web#29]).
+* Declare more than 6 channels from the web client.
+The web client's declaration (https://github.com/streamarr/streamarr-web/pull/130[streamarr/streamarr-web#130]) always carries an AAC capability entry for HLS.
+It adds AC-3, E-AC-3, Opus, FLAC and ALAC entries only when the browser's `decodingInfo()` confirms them.
+It probes 6 and 2 channels for each codec, so no entry accepts more than 6 channels, and Opus stays at 2 channels in WebKit.
+Lifting the 6-channel cap waits for the speaker-free test of https://github.com/streamarr/streamarr-web/issues/29[streamarr/streamarr-web#29], which splits the player's output into its channels with a `ChannelSplitterNode` and checks which channel carries each tone.
+Real speakers only confirm that test.
 Firefox plays 7.1 AAC in AAC's own channel order and plays 5.1 AAC in WAVE order.
+* Mix a dependent narration track into the main track, so that a viewer who needs audio description hears both.
+* Normalise loudness or boost dialogue at the viewer's request.
+A later background scan measures each track's integrated loudness, loudness range and true peak for that setting (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032]).
+* Measure the FLAC encodes of a file without a lossless track in ADR 0054's bitrate scan.
 * Allow more than one audio codec per stream session for Apple clients.
 Apple clients get that exception only if a check shows that their switches between codecs stay in sync.
 * Test audio and subtitle renditions on cast receivers.
@@ -554,7 +835,7 @@ Issue https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamar
 Choosing an image subtitle track, or leaving one, replaces the stream session, because the job attempts burn that track into the video.
 Playback then resumes at the viewer's position.
 * Every stream session with a burned-in subtitle encodes its video, which uses worker capacity.
-In the library sample, 4 of 300 files hold 7 forced image tracks, so automatic burn-in can apply to about 1 % of files.
+Automatic burn-in applies only while subtitles are off, to a file with a forced image track in the selected audio's language.
 Each such file then plays over HLS with an encoded video, instead of a stream copy or direct play.
 * In some players, a switch holds the picture for a short time.
 During a hold, the same frame stays on screen.
@@ -585,11 +866,52 @@ A junction is the segment boundary where one job attempt's output ends and anoth
 Copied audio stays byte-identical across a junction.
 Encoded audio differs from the earlier attempt's encoded audio, because the decoders start on a different packet.
 After decoding, the junction adds at most 0.2 dB to that difference.
-* The first 21 ms of an AAC rendition decode without the overlap that the priming frame would supply.
+Every encode meets the earlier attempt's output without a gap or an overlap, and a FLAC or ALAC encode of a lossless track decodes to the same samples across the junction.
+* Each encoded track's decode starts one segment period before its attempt's first segment, so every attempt decodes up to one period of audio that it discards.
+* Two copied tracks on different grids meet with a gap or an overlap of up to half a frame when the viewer switches between them.
+* The first 21 ms of an AAC rendition decode without the overlap that the priming frame would supply, at about 3 dB signal-to-noise ratio for a tone.
 No player showed an error.
 An AC-3 or E-AC-3 rendition loses about 27 ms of real audio at the start of the stream, and an Opus rendition loses about 14 ms.
+* A file's dependent narration track gets no rendition.
+A viewer who needs audio description hears it only when the file also holds a complete audio description track.
+* A copied E-AC-3 track with Atmos keeps its objects, but FFmpeg 8.1.3 wrote FATE's Atmos sample's `dec3` box without `flag_ec3_extension_type_a`.
+Media3 reports E-AC-3 with Atmos only when that flag is set, so a Media3 player treats such a copy as plain E-AC-3.
+Whether a receiver still shows Atmos for the copy is an Apple TV and SHIELD check at the end of the epic.
 * An Apple client loses the copy of a FLAC or E-AC-3 track when the file's default track uses another codec.
 The one-codec rule encodes that track to the session's audio codec.
+* When the session copies a FLAC or ALAC default track, every other track that is not already in that codec is encoded to it.
+A FLAC or ALAC encode of a lossy track writes the decoded audio at 16 bits with dither, so its bitrate follows the decoded audio, not the source track's bitrate.
+In the measurements, FLAC of a 128 kb/s AAC film track ran 573 to 818 kb/s, and of a speech-like synthetic track 193 kb/s.
+The server counts such a stereo track at about 1,000 kb/s, eight times a 128 kb/s source, and its peak at 1,536 kb/s.
+Such an encode is not lossless and adds no quality, because the lossy source already lost it.
+* Under link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc[ADR 0054], every variant's cost and `BANDWIDTH` count the largest audio rendition.
+Until ADR 0054's bitrate scan measures it, a FLAC rendition counts 65 % of its output's PCM bitrate, as an ALAC rendition always does, and peaks at the full rate, so an encoded FLAC or ALAC track can count larger than the copied default track, and it then raises every variant's cost and `BANDWIDTH`.
+Such a track then becomes the step track (ADR 0050).
+A step below the session's audio caps every rendition.
+* A client that declares DTS or TrueHD keeps the copy of such a default track, and with it the Atmos or DTS:X objects.
+A track in another codec then reaches that client only through a replacement of the stream session, which restarts the video at the viewer's position.
+* No tested client declares TrueHD today: AVPlayer has no decoder, and Media3's HLS player does not regroup TrueHD for passthrough.
+Until a client declares it, a TrueHD track reaches every client as FLAC or as ADR 0050's lossy encode, and its Atmos objects reach a client only through an E-AC-3 track with Atmos.
+* A job that copies TrueHD runs FFmpeg's MP4 muxer under `-strict experimental`.
+* A client without FLAC, TrueHD or DTS gets a 7.1 lossless track as at most 5.1 E-AC-3, because FFmpeg's E-AC-3 encoder stops at 5.1.
+* A client that declares FLAC gets a lossy default track that it cannot copy, such as DTS, Opus or MP3, as FLAC of the decoded audio.
+That encode is much larger than the source, about 573 to 818 kb/s for 128 kb/s AAC in stereo, and ADR 0054's scan does not measure it, so it counts 65 % of its PCM bitrate and can push a session under a maximum bitrate to a lossy step sooner.
+* A FLAC track whose STREAMINFO minimum block size is below 192 samples reaches Apple clients as a FLAC encode with the same samples, and so does every FLAC track until the server stores the file's probe version 7 outcome.
+* The server writes `16/JOC` for every copied E-AC-3 track with Atmos, whatever the track's real complexity index.
+* A track marked by a word in its title can be wrong when a title uses a word in another sense; the default track then passes over it while another track remains.
+* A FLAC or ALAC session above 48 kHz under a maximum bitrate keeps its codec at 48 or 44.1 kHz, resampled, before it goes lossy.
+* A client that declares FLAC with eight channels, but neither TrueHD nor DTS, gets a TrueHD or DTS-HD MA default track as lossless 7.1, and every other track of the file as FLAC.
+The Atmos or DTS:X objects of such a track are lost.
+* A lossless `2.1`, `3.1`, `3.0(back)`, `4.0`, `4.1`, `6.0` or `7.0` track reaches the player as FLAC with silent channels, and the player shows the padded layout, such as 6.1 for a `4.0` track.
+A `7.1(wide)` or `7.1(wide-side)` track loses its lossless encode to ADR 0050's downmix.
+* A player that receives multichannel FLAC decodes it to multichannel PCM, which only some audio paths carry.
+A soundbar on legacy HDMI ARC takes stereo PCM or a Dolby bitstream, so there the player plays the FLAC rendition as stereo, where an E-AC-3 encode would have reached the soundbar as 5.1.
+The server cannot tell such a soundbar from a receiver, so the client's declaration carries that choice, for example from a viewer setting for lossless audio.
+The Apple TV check stays an epic-end check and does not gate this decision.
+* An encode of an AC-3 or E-AC-3 track plays at the level that a receiver gives the copy, which is quieter than a decode without dialogue normalization by 31 dB less the track's dialogue level, 4 to 5 dB for the FATE samples.
+* Every 16-bit encode of decoded audio carries TPDF dither noise, about 5 dB above plain 16-bit rounding noise, in place of distortion that follows the signal.
+* The worker encodes FLAC, Opus and ALAC as well as AAC, AC-3 and E-AC-3.
+Each new audio encode only adds to the worker contract, as link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033] requires.
 * An audio track that ends at least one media segment before the video is always encoded, even when the client could play a copy of the track.
 * Once the server delivers audio renditions, video-only variants replace link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]'s multiplexed variants.
 An init per rendition then replaces ADR 0037's single init per variant.
@@ -644,7 +966,13 @@ Keeping the first delivery of each audio segment needs no designation and no suc
 * One separate job per stream session could write every audio rendition.
 That job reads the source region a second time and needs its own worker slot.
 A seek relocates that job as well as the variant's job attempt.
-* An audio rendition whose segment 0 keeps the AAC priming frame stops hls.js after a language switch in the first segment.
+* An audio rendition whose segment 0 keeps the AAC priming frame at a negative decode time can stop hls.js for good, with or without a language switch.
+* Keeping the priming frame with an edit list for every client before the Apple TV check plays the first 21.3 ms late in Firefox, and possibly in AVPlayer.
+* Packaging each rendition twice, with the frame for Chromium and AVPlayer and without it for Firefox, doubles the audio packaging.
+* Snapping a copied track to the encoder's grid moves its authored sync by up to half a frame, 16 ms for AC-3 at 48 kHz and 64 ms for AAC at 8 kHz.
+FFmpeg's AC-3 encoder starts each frame 256 samples before a 32 ms point, so the snap moved an authored +12 ms delay to +26.7 ms.
+* Starting each encode at a plain seek to the boundary leaves gaps or overlaps of up to 59 ms between attempts.
+* Snapping only the non-default of two copies on different grids moves a bit-exact copy.
 * Dropping audio before media time zero from multiplexed variant segments as well changes segments that need no change.
 hls.js places a multiplexed fragment by the fragment's video track, and ADR 0037 keeps that audio in multiplexed segments.
 * An init that also writes the language in an `elng` box, or that keeps the source's language tag, stores the language in a second place.
@@ -653,9 +981,42 @@ That second copy of the language can disagree with the playlist's `LANGUAGE` att
 * One audio codec per stream session for hls.js clients only needs a second rule for the other clients.
 Nobody measured whether Apple players stay in sync after a switch that changes the codec.
 * Accepting the drift leaves the audio 90 to 140 ms late after a switch that changes the codec, until the next seek.
+* Keeping the copied default track and encoding every other track to AAC mixes codecs in one stream session.
+After a switch that changed the codec, hls.js left the audio 90 to 140 ms late until the next seek.
+* Switching the whole stream session to AAC whenever another track needs an encode loses the copy of a lossless or passthrough default track, such as FLAC or E-AC-3.
+* Encoding DTS or TrueHD with FFmpeg's `dca` or `truehd` encoder relies on encoders that FFmpeg marks as experimental.
+* Encoding a default track that cannot be copied always to AAC gives up surround that the client declares in E-AC-3 or AC-3.
+* Counting a FLAC or ALAC encode at its full PCM bitrate counts a 128 kb/s commentary track at 1,536 kb/s, while FLAC of film audio averaged at most 53 % of that rate.
+* Keeping the 65 % count for good lets a lossy commentary's FLAC encode cap a lossless default track at a lossy step.
+* Counting an ALAC encode as its FLAC measurement plus 5 % understates it: ALAC of synthetic tones and noise wrote 34 to 39 % more than FLAC.
+* Taking the FLAC bytes from the segments that the worker delivers during playback measures only the segments that viewers watched, after the first stream session already chose its steps.
+* Capping a FLAC or ALAC encode's peak below its PCM bitrate understates a noisy segment, such as the 94 % that decoded white noise reached.
+* Encoding a lossless default track to E-AC-3 before FLAC keeps 5.1 behind a soundbar on legacy ARC.
+It also turns a 7.1 lossless track into 5.1 lossy audio for every client that declares eight-channel FLAC.
+The client's declaration can make that choice for its own audio path.
+* Decoding AC-3 and E-AC-3 with FFmpeg's default compression changes the dynamics of every encode, a FLAC encode included.
+* Decoding without dialogue normalization makes a step from a copy to an encode louder by the track's normalization, up to 5 dB in the FATE samples.
+* Converting floating point to 16 bits without dither leaves distortion products that follow the signal, at −106 dBFS for a −90 dBFS tone.
+* FFmpeg's default resampler settings roll off the top octave by 2 dB and fold content above the new Nyquist frequency back at −14 dB.
+* Unconstrained Opus VBR takes bits from the dialogue channel and runs 10 % over its rate in its busiest fixed 6 s window.
+* Opus at Xiph's starting rates, 5.1 at 384 kb/s, left 11.5 to 21.4 % of frames disturbed in the worst channel, against 2.4 to 6.9 % at 448 kb/s.
 * Never copying Opus gives up copies that every tested player plays, because stereo Opus played in all six players.
+* Writing a lossless track that FLAC does not carry under its own layout name moves its channels, such as a `4.0` track's centre to the back left.
+* Encoding such a track to E-AC-3 or AC-3 keeps its layout but loses samples, and a stereo FLAC downmix changes the mix and can run ADR 0050's limiter.
+* FFmpeg's default Opus mapping plays a 5.0 track's dialogue from the rear right.
 * Renditions for the default track and the viewer's preferred languages only leave the file's other languages out of the menu.
-* Encoding DTS and TrueHD whatever the client declares refuses a copy to a client that can play the codec, such as Media3 with an HDMI receiver.
+* Encoding DTS whatever the client declares refuses a copy to a client that can play the codec, such as Media3 with an HDMI receiver.
+* Never copying TrueHD loses the Atmos objects for a client that decodes TrueHD or passes it to a receiver, although FFmpeg's experimental muxing kept every packet byte-identical.
+* Encoding a TrueHD or DTS default track whenever another track needs its codec keeps every switch free of restarts, but a commentary track then costs the viewer the Atmos copy.
+* Leaving the tracks that cannot reach a TrueHD or DTS session's codec out of the menu hides a commentary or another language from the viewer.
+* Encoding a lossy default track that cannot be copied to E-AC-3, AC-3 or AAC when the client declares FLAC adds a second lossy generation.
+* Choosing among same-language tracks by file order can pick a stereo track over a surround one, and ignores whether a track is lossless.
+* Copying a disc's lossy track before a FLAC encode of its lossless track gives up lossless audio for the client that declares FLAC.
+* Refusing every FLAC copy whose block size is below 192 samples, for every client, gives up copies that other players accept.
+* Writing the bed's channel count for a copied E-AC-3 track with Atmos leaves AVFoundation nothing above the segments that marks object audio.
+* Matching a wider word list, which adds "director", "description" and "narration", marks a main track titled "Director's Cut" as commentary and a dependent narration as a complete description.
+* Encoding a TrueHD track with Atmos to FLAC when the file holds a copyable E-AC-3 track with Atmos keeps a lossless bed but loses the height objects that the E-AC-3 copy keeps.
+* Stepping a hi-res FLAC or ALAC session straight to a lossy codec gives up a FLAC or ALAC step at 48 kHz that adds no coding loss beyond the resampling.
 * Marking the segments after an audio track's end with `EXT-X-GAP` stopped hls.js for good on an iPhone after a switch into the ended track.
 * Padding a copied track with silence in the track's own codec, without encoding the track, needs a way to make silence in every codec that the worker copies.
 Encoding the track pads every codec in the same way.
@@ -669,7 +1030,7 @@ The audio that arrives late comes only at the very end of the output, where no m
 * Subtitle extraction for each stream session reads a whole Matroska file every time a viewer starts playback.
 At 8 MB/s, a 20 GB file would take about 40 minutes, a figure derived from the read rate.
 An extraction of only a time window misses a line that is already on screen when the window starts.
-* Recording image subtitles as unsupported leaves about one file in five of the library sample without its PGS or VobSub subtitles.
+* Recording image subtitles as unsupported leaves every disc copy that keeps PGS or VobSub subtitles without them.
 * Delivering image subtitles as timed-image renditions in this work would widen the work beyond audio and text tracks.
 * Burning in a forced image track only when the viewer selects the track leaves out lines that a viewer needs even with subtitles off.
 * Seeking in place after every change as the first fix lengthens the longest gap between shown frames at every change.
@@ -677,7 +1038,8 @@ That seek also fetches the whole forward buffer again.
 The seek in place stays the fallback if the iOS cover fails.
 * Relying on 2 to 3 s segments to bound the freeze does not remove the freeze, because the freeze lasts until the next keyframe.
 A 2 s GOP still froze the picture for about 0.58 s, and a shorter GOP costs bitrate on every stream.
-* Holding the subtitle tickets until the device checks run delays the tickets, while each ticket's merge gate runs the checks anyway.
+* Holding the tickets until the TV checks run delays them, while the Mac browser checks already gate each ticket.
+* Gating each ticket on the Apple TV and SHIELD checks ties every merge to hardware sessions that the end-of-epic pass covers once.
 * Optical character recognition could convert image subtitles to text.
 That conversion adds a recognition engine to the worker.
 The engine's output can differ from the image.
@@ -687,14 +1049,19 @@ On Streamarr's zero-based fMP4 timeline, that offset put every cue 10 s late in 
 * `AUTOSELECT=YES` on every subtitle rendition lets Safari override the viewer's choice to turn subtitles off.
 * `AUTOSELECT=YES` on SDH renditions, as Apple's authoring guide says, let WebKit turn on subtitles by itself in 3 of 3 runs.
 * Leaving forced tracks to hls.js on the web never shows forced lines, because hls.js ignores `FORCED`.
-* Names from the language and the flags alone ignore the stream's title, which told apart 165 of 244 same-language text tracks in the library sample.
+* Names from the language and the flags alone ignore the stream's title, which can tell apart tracks in one language that the flags cannot, such as a commentary.
 * Names without the SDH token can duplicate the name of the regular track in the same language.
 * Numbered names as the naming scheme tell the viewer nothing about the track.
 The server numbers only names that still collide.
 * Always keeping the SDH token doubles the token in AVPlayer, which appends " SDH" itself.
+* Naming an audio rendition by its delivered codec tells apart nothing, because every audio rendition of a stream session has the same codec.
+* Leaving "Audio description" out of an audio description rendition's name, as the SDH rule does for SDH, leaves only the language in players that show the `NAME`, such as hls.js clients.
+AVFoundation's `displayName` for audio ignores the `NAME`, so keeping the flag doubles nothing there.
 * Leaving duplicate names violates RFC 8216.
 AVPlayer and WebKit's native HLS then exposed only one of two renditions named "English".
 * Telling colliding names apart by the stream index shows the viewer a number that means nothing outside the file.
+* Listing a dependent narration track with `AUTOSELECT=NO` lets a viewer pick a track that plays the narration alone.
+* Leaving Atmos and DTS:X out of every name hides that a copy keeps the objects.
 * Converting a whole SubRip track with FFmpeg's `-sub_charenc` damages the track's UTF-8 cues.
 On a UTF-8 track with 5 windows-1252 cues, that conversion gave 35 of 100 correct cues.
 * Skipping a SubRip track with invalid cues drops tracks that are mostly readable, such as a track with 80 of 100 valid cues.
@@ -703,9 +1070,9 @@ On a UTF-8 track with 5 windows-1252 cues, that conversion gave 35 of 100 correc
 The track's remaining lines still help the viewer, and the log line and the worker metric expose the loss.
 * Failing the whole extraction job for one damaged track loses every other track of the file.
 * Showing the loss to a ServerAdmin in the UI or the API adds UI or API work that the log line and the worker metric make unnecessary.
-* Merging forced cues into the full track changes the source's text to fix a gap that only 3 of 277 forced cues showed in the library sample.
-* A SubRip parser of the worker's own replaces FFmpeg's decoder to save text that 0 of 910,377 sample lines would lose.
-* Keeping captions deferred leaves the caption data in 24 of 254 decodable sample files unused.
+* Merging forced cues into the full track changes the source's text.
+* A SubRip parser of the worker's own replaces FFmpeg's decoder, and it would still have to guess, because SubRip defines no escape for `<`.
+* Keeping captions deferred leaves the captions of broadcast recordings unused.
 * Keeping CEA-608 captions in the video and signaling them with the `CLOSED-CAPTIONS` attribute shows no cues in WebKit's native HLS and AVPlayer.
 SVT-AV1 encodes also drop that caption data.
 * Delivering captions both as a rendition and in the video lists the captions twice in players.
@@ -769,6 +1136,7 @@ Holds, stalls and seek times differed by no more than the spread between runs.
 In these measurements, each junction joined an attempt that started at 0 and a replacement attempt.
 At 96 of 96 audio junctions, the step between attempts was 0 samples.
 At every audio junction, the replacement attempt's first audio frame sat on the frame grid of the attempt that started at 0.
+Those junctions covered only pairs of source and encoder whose frame lengths match, and a plain seek misses the grid for the other pairs (<<evidence-audio-junctions>>).
 At 24 of 24 video junctions, the replacement attempt's first segment started at the frame time that the attempt from 0 gave that segment.
 * Copied audio was byte-identical across junctions.
 Encoded audio differed, because AC-3 dither and AAC noise substitution depend on where the decoder starts.
@@ -849,6 +1217,16 @@ The stall happened in 10 of 10 runs, and in 3 of 3 runs of the re-check.
 * A later re-run with other fixtures kept the priming frame in segment 0, with the same `tfdt` value, and switched at 2 s.
 That re-run played to the end in 15 of 15 hls.js runs.
 So the stall depends on a condition that the later re-run lacked.
+* A later measurement on 2026-11-02 built a 30 s source in the pinned image, with a one-frame white flash every second and two 48 kHz stereo tones that clicked at each flash, encoded to AAC at 128 kb/s with the worker's flags.
+It compared four packagings of segment 0: the drop, the kept frame with an edit list of media time 1,024 at decode time 0, the kept frame with a composition offset of −1,024, and the kept frame at a negative decode time.
+hls.js 1.7.3 ran in Chromium, Firefox and WebKit through Playwright, beside WebKit's native HLS, with switches at 2, 6 and 15 s and 15 plays per switch point, on a host whose load average was 30 to 45.
+* Neither kept packaging stalled in any player, in 45 of 45 plays each, and no hls.js error was fatal.
+The negative decode time stopped WebKit with hls.js for good at 6.02 s, before any switch, in 1 of 15 plays and in 1 of 40 plays of a re-run.
+* In Chromium, both kept packagings started within 0.2 ms of the drop, and a control placed 21.3 ms late measured 20.8 to 22.0 ms late.
+In Firefox, both kept packagings played 21.2 to 21.5 ms late from a start at 0, and returned to the drop's offset after a seek.
+WebKit passed only silence to the measuring audio tap, so its timing is unknown, but its buffered audio ended at the same time for every kept packaging.
+* Decoded by FFmpeg, the first 1,024 samples after media time zero reached 2.8 dB signal-to-noise ratio with the drop and 37.2 dB with the frame kept for a 440 Hz tone, 3.2 and 9.4 dB for pink noise, and 2.6 and 34.6 dB for a plucked multitone.
+The next 1,024 samples matched in both.
 * AAC copied from the excerpt's Matroska source started at media time zero and carried no priming frame.
 AAC copied from an FFmpeg-made Matroska file started at −1008 samples, which is a priming frame.
 
@@ -879,10 +1257,10 @@ A 5.1 Opus rendition failed in every Apple player, in 0 of 3 plays each.
 At each change of codec, the audio's offset to the picture moved and stayed until the next seek.
 In the re-run, each switch from FLAC to AAC added a median of 91 to 98 ms of audio lag in Chromium and Chrome.
 The largest offset in a run had a median of 121 ms in Chromium and 137 ms in Chrome.
-Switches between AAC renditions stayed in sync once copied audio was snapped to the frame grid.
+Switches between AAC renditions stayed in sync once copied and encoded audio shared one frame grid.
 * Copied AAC from an FFmpeg-made Matroska file started at −1008 samples, 16 samples off the AAC encoder's frame grid.
-Without the snap, switches between AAC renditions moved the offset by −46 to +60 ms, and runs ended 40 to 57 ms late.
-With the snap, the same switches stayed within −12 to +9 ms.
+With the renditions on different grids, switches between AAC renditions moved the offset by −46 to +60 ms, and runs ended 40 to 57 ms late.
+With the copy moved onto the encoder's grid, the same switches stayed within −12 to +9 ms.
 * In one test, an audio track ended at 40 s, and an attempt started at 48 s.
 The input ran at twice real time, and each case ran 3 times.
 With the ended track mapped, the attempt wrote its first byte after 12.0 s, when the input ended.
@@ -1018,45 +1396,218 @@ The tracks used windows-1250, windows-1251, windows-1252, windows-1255, ISO-8859
 * Converting a whole track with FFmpeg's `-sub_charenc` gave 35 of 100 correct cues on a UTF-8 track with 5 windows-1252 cues.
 * U+FFFD alone kept every cue but replaced every letter of the Hebrew and Russian tracks.
 
-[[evidence-library]]
-=== Library sample
+[[evidence-handler-names]]
+=== Handler names
 
-The library sample holds 300 files: 109 movie files and 191 TV files.
-The sample gave Matroska files double weight, so the sample is not proportional to the library.
+The generic handler-name rule's test set comes from public sources only.
 
-* 53 of the 133 files with text subtitles have two or more text tracks in one language.
-In those groups, the title tells apart 165 of 244 tracks (68 %).
-Another 59 tracks need the flags, and 20 tracks in 10 groups need a trailing number.
-* The hearing-impaired flag marks only 25 of the 78 text tracks that are SDH by flag or by title.
-* 79 audio and 75 subtitle streams have a handler name.
-97 of those 154 names are generic, such as `SoundHandler` (43 audio streams), `SubtitleHandler` (28 subtitle streams) and `USP Sound Handler` (18 audio streams).
-Every one of the 97 ends with "Handler".
-The other 57 names are track names, such as a language, "English SDH" or "Surround".
-The tests of the server's generic-name rule use these 154 names.
-* Of the 305 titled text tracks, 67 store their title in MP4's `name` or `handler_name`, never in `title`.
-* 1 of 682 SubRip tracks is not UTF-8.
-* 274 of 277 forced cues, from 23 forced text tracks in 8 files, are also in the matching full track.
-* In 682 SubRip tracks, 0 of 910,377 lines hold text that FFmpeg's SubRip decoder would drop between a `<` and a later `>`.
-* The container header states a duration for 349 of 416 audio streams (84 %).
-* FFmpeg's header probe marks captions on 0 files.
-Decoding the first 30 s of each file finds caption data in 24 of the 254 files that decode.
-* The sample holds no teletext among its 1,162 subtitle streams.
-* 66 files carry PGS or VobSub subtitles, in 372 PGS streams and 23 VobSub streams.
-The sample holds no DVB subtitles.
-* 4 files hold 7 forced image tracks.
+* FFmpeg 8.1's MP4 muxer writes `SoundHandler`, `VideoHandler`, `SubtitleHandler`, `ClosedCaptionHandler`, `PictureHandler`, `DataHandler`, `HintHandler` and `TimeCodeHandler` when a stream has no handler name of its own.
+* MediaInfo treats a handler name as generic when the name contains "Handler" or " handler", or starts with "Gestionnaire ", "Module ", "Gestor " or "Procedura ".
+The test set holds one name for each of those localized prefixes.
+* Apple's capture and export write "Core Media Audio", and YouTube's MP4 files carry "ISO Media file produced by Google Inc.".
+MediaInfo's rule misses both names.
+* The test set also holds each four-character handler type, such as `soun`, `vide`, `sbtl` and `text`.
+* GPAC's MP4Box writes the name that its `name` import option sets into the handler name.
+
+[[evidence-encoders]]
+=== Audio encoders and channel layouts
+
+The checks ran FFmpeg 8.1.3 from the pinned worker image, `streamarr/streamarr-transcode-worker:0.1.0-SNAPSHOT@sha256:f2011e95de3323e4b31de2fd3e22c0bee980ee2d2993ac404aa1bc5ac7d78691`, on 2026-11-01.
+The sources were synthetic 48 kHz tones.
+
+* `ffmpeg -encoders` listed `aac`, `ac3`, `eac3`, `flac`, `alac` and `libopus` as ready for use.
+* On 2026-11-02, a copy of a TrueHD track into fragmented MP4 under `-strict unofficial` failed with "truehd in MP4 support is experimental".
+* Under `-strict experimental`, in the pinned image `streamarr/streamarr-transcode-worker:0.1.0-SNAPSHOT@sha256:a11de4631250ce3bb120a734998ecb84bcd9d507a43a5aceb236e892908be481`, with the worker's movie flags (`cmaf`, `delay_moov`, `skip_trailer`, `frag_keyframe`, `frag_discont`), FATE's `truehd/atmos.thd` (7.1, "Dolby TrueHD + Dolby Atmos", 128 access units) and `lossless-audio/truehd_5.1.raw` (5.1, 3,410 access units) became `mlpa` tracks with a `dmlp` box and a 32-bit sample rate field, the form that Media3 reads for TrueHD.
+Every packet kept its size and MD5, the major-sync flags matched the source (214 of 3,410 in the 5.1 sample), and FFmpeg decoded the copies to the source's samples.
+* Copies seeked to 0.5, 1.003, 1.5 and 2.0117 s, with and without an H.264 track, each started at a major sync and wrote the same `dmlp` box.
+* On macOS 26.6.2, AVFoundation loaded each copy's track as `mlpa` with its channel count, and `AVAssetReader` refused to decode it with `fmt?`.
+It marked `dca` (DTS), `truehd`, `mlp` and FFmpeg's native `opus` encoder as experimental.
+* Each encode below wrote fragmented MP4, and ffprobe read back its channel layout.
+* FLAC wrote 3.0 and quad unchanged, and wrote quad(side) as quad.
+It wrote 2.1 and 3.0(back) as 3.0, and 4.0 as quad, each with only a warning that FLAC does not support the layout.
+FLAC's channel assignment gives 3 channels as left, right and center, and 4 channels as front left, front right, back left and back right (RFC 9639).
+* `libopus` wrote 3.0 and quad, and refused 2.1, 3.0(back), 4.0 and quad(side).
+Opus channel mapping family 1 orders 3 channels as left, center and right, and 4 channels as front left, front right, rear left and rear right (RFC 7845).
+* ALAC wrote 3.0 and 4.0.
+It wrote 2.1 as stereo, and 3.0(back), quad and quad(side) as five channels.
+FFmpeg's ALAC encoder lists mono, stereo, 3.0, 4.0, 5.0, 5.1, 6.1(back) and 7.1(wide) as its layouts.
+* FFmpeg's AC-3 and E-AC-3 encoders list 2.1, 3.0, 3.0(back), 4.0, quad and quad(side) among their layouts.
+* FLAC wrote 5.1 and 5.1(side) as 5.1(side), 6.1 and 6.1(back) as 6.1, and 7.1 and 7.1(wide) as 7.1, as ffprobe read them back from fragmented MP4.
+* On 2026-11-02, the same FFmpeg wrote 60 s of Tears of Steel's 24-bit 5.1 master (Creative Commons), with synthetic pink noise in the channels that the master lacks, as 24-bit FLAC in each layout that FLAC does not carry.
+Under the source's own layout name, FLAC kept the samples in order and relabelled them: a `2.1` track's low-frequency channel came back as the centre, a `4.0` track's centre and back centre as the back pair, a `6.0` track's back centre as the low-frequency channel, and a `7.0` track's back left as the low-frequency channel and its back right as the back centre.
+Padded with silent channels, `2.1` and `3.1` as `5.1(side)`, `3.0(back)`, `4.0`, `4.1` and `6.0` as `6.1`, and `7.0` as `7.1`, every source sample decoded unchanged in its own channel, and every added channel decoded as zero.
+The padded files were 2,500 to 10,000 bytes larger per minute than the relabelled ones, at most 0.06 % (`2.1`, 12,177,527 against 12,170,027 bytes).
+* The same 60 s padded into 24-bit ALAC, `2.1` and `3.1` as 5.1, `quad` as 5.0, `3.0(back)` as `4.0`, and `4.1` and `6.0` as `6.1(back)`, decoded with 0 changed samples and every added channel at zero.
+* Eight channels of synthetic pink noise, each from its own seed, were renamed by `pan` with every gain 1 and by `channelmap`, then encoded to 24-bit ALAC and FLAC.
+With `pan`, `6.1` to `6.1(back)` put the back centre in the back left and the surround pair one place later, in ALAC and in FLAC, and `7.1(wide-side)` to `7.1(wide)` put the front-of-centre pair in the back pair.
+`5.1(side)` to `5.1`, whose channels keep their positions, came through intact.
+With `channelmap`, every rename decoded with 0 changed samples.
+`pan` with a gain of 0 in any output, as padding uses, mixed through a matrix and moved no channel.
+* The same FFmpeg encoded 3 s of a different tone in each channel with `libopus` at 512 kb/s, and libopus 1.5 decoded the Ogg files without FFmpeg.
+With FFmpeg's default mapping, the 5.0 file played the centre from the rear right, the left surround from the centre and the right surround from the rear left, and the 6.1 file played the side left from the centre, the back centre from the side left and the centre from the rear centre.
+5.1 and 7.1 played every channel in place.
+With `-mapping_family 1`, every channel of 5.0, 5.1, 6.1 and 7.1 played in its RFC 7845 position, and libopus coded the low-frequency channel as such.
+
+[[evidence-lossless-surround]]
+=== Lossless surround on macOS
+
+This check ran on 2026-11-01 on macOS 26.6.2, and it is macOS evidence only.
+The pinned image's FFmpeg 8.1.3 wrote a synthetic 30 s stream as fMP4 HLS with 6 s segments, in the form that the server serves.
+The variant carried H.264 video alone.
+The default audio rendition was 7.1 FLAC at 48 kHz and 24 bits, with a different tone in each channel, and `CODECS` listed `fLaC`.
+A small Swift program loaded the stream with `AVURLAsset` and played it with `AVPlayer`.
+
+* `isPlayable` was true, and the player item reached `readyToPlay` without an error.
+* After 10 s of playback, the current time was 9.88 s and the rate was 1.0.
+* The audio track's format was `flac` with eight channels at 48 kHz, in the layout `kAudioChannelLayoutTag_WAVE_7_1`, whose order (L, R, C, LFE, back left, back right, side left, side right) is FLAC's 8-channel order.
+* A switch to a second, stereo FLAC rendition kept playback going without an error.
+
+The check did not test what an audio output then receives, and it did not cover tvOS.
+
+[[evidence-audio-names]]
+=== Audio names in AVFoundation
+
+The same macOS 26.6.2 run read the media selection options of the stream in <<evidence-lossless-surround>>, with `NAME`, `LANGUAGE` and `CHARACTERISTICS` varied.
+
+* Audio renditions named "English · FLAC 7.1", "English FLAC 7.1" and "Main Mix", with `LANGUAGE="en"`, each had the `displayName` "English".
+Each `NAME` appeared unchanged as the option's title metadata.
+* A stereo rendition with the describes-video characteristic had the `displayName` "English AD", whether it was named "Described" or "Commentary".
+* A subtitle rendition named "English SDH" with the SDH characteristics had the `displayName` "English SDH SDH", and one named "Signs" had "Signs - English".
+* ffprobe in the pinned image read the `comment` and `visual_impaired` dispositions back from Matroska and from MP4 after FFmpeg wrote them.
+* On 2026-11-02, FFmpeg 8.1.3 in the pinned image copied FATE's `eac3/the_great_wall_7.1.eac3`, which ffprobe reads as "Dolby Digital Plus + Dolby Atmos", into fragmented MP4.
+Its `dec3` box held 6 bytes and no `flag_ec3_extension_type_a`, because FFmpeg writes that flag only when its parser finds a complexity index in the stream.
+Media3 1.11.1 reports E-AC-3 with Atmos only when that flag is set.
+
+[[evidence-audio-junctions]]
+=== Audio junctions on the frame grid
+
+The measurements ran on 2026-11-02 with FFmpeg 8.1.3 from the pinned worker image.
+The sources were 30 s of Tears of Steel's 24-bit 5.1 master (Creative Commons) as FLAC, as TrueHD from FFmpeg's experimental encoder, as AC-3 at 448 kb/s and as AAC at 384 kb/s, each in Matroska, and FATE's 12.5 s DTS-HD MA 7.1 sample remuxed to MP4.
+Each source was encoded to AAC, AC-3, E-AC-3, Opus, FLAC (`-frame_size 2400`) and ALAC in 5.1, once from 0 and once from each of two boundaries, 6.000 s and 10.010 s.
+Each replacement attempt started either with a plain seek to the boundary, or by decoding from 3 s early and trimming to the first grid point at or after the boundary.
+The gap is the first replacement packet at or after the boundary minus the end of the attempt from 0's last packet before it.
+
+* With a plain seek, the gap was 0 only where the boundary fell on the encoder's grid.
+Elsewhere it was −16.0 to −16.7 ms for AAC, +16.0 to +26.2 ms for AC-3 and E-AC-3, +10.0 to +16.0 ms for Opus, −34.0 to −40.0 ms for FLAC and −53.3 to −59.3 ms for ALAC.
+* With the grid method, the gap was 0 and the first replacement packet sat on the grid of the attempt from 0 at all 60 junctions.
+* Cross-correlated against the source's continuous decode over 0.5 s, starting 0.5 s after each junction, every replacement encode of the grid method sat at an offset of 0 samples, apart from Opus's one-sample resolution and the AAC source below.
+* The FLAC and ALAC encodes of the FLAC, TrueHD and DTS-HD MA sources decoded identically to the source's continuous decode on both sides of every grid junction.
+With a plain seek, those of DTS-HD MA differed in 17,801 samples after the 6 s junction and 4,956 after the 10.01 s junction.
+* Every replacement encode of the AAC source in Matroska sat 8 samples early, with either method, because Matroska stores the seek packet's time rounded to 1 ms.
+* With `-frame_size 2400`, FLAC wrote 0.4 % more bytes for the 24-bit master and 0.8 % more for decoded AC-3 than with its default 4,608-sample frames.
+* FFmpeg's ALAC encoder wrote 4,096-sample frames with `-frame_size 2400`, and FLAC wrote 2,400-sample frames.
+* From a 48 kHz input that started at 0, the first packet started at −256 samples for AC-3 and E-AC-3, −312 for Opus, −1,024 for AAC and 0 for FLAC and ALAC.
+With the input trimmed to start at 1,792 samples, AC-3's first packet started at 1,536, and trimmed to 1,272, Opus's started at 960.
+
+[[evidence-sample-processing]]
+=== Decoding, dither and resampling
+
+The measurements ran on 2026-11-02 with FFmpeg 8.1.3 from the pinned worker image, on FATE samples and synthetic signals.
+
+* Decoded with FFmpeg's defaults and with `-drc_scale 0`, FATE's `ac3/millers_crossing_4.0.ac3` peaked at −14.03 and −6.41 dBFS.
+`eac3/the_great_wall_7.1.eac3` peaked at −10.91 and −10.05 dBFS, and the compression changed its RMS level by −1.6 to +5.9 dB from one 10 ms window to the next.
+* With `-drc_scale 0`, adding `-target_level -31` changed the level by −4.0 dB for Miller's Crossing, −5.0 dB for `eac3/csi_miami_5.1_256_spx_small.eac3` and 0.0 dB for The Great Wall.
+* A 10 s, −90 dBFS, 1 kHz tone in 32-bit float went to 16 bits in two ways, measured with a 393,216-point Blackman FFT.
+The plain conversion read the tone at −89.15 dBFS and put its third and fifth harmonics at −111.9 and −105.7 dBFS.
+`aresample=osf=s16:dither_method=triangular` read the tone at −90.00 dBFS, and its second to sixth harmonics lay at −136.0 to −145.4 dBFS.
+* Packed float rounded to 16 bits, with an error of ±0.48 LSB and no offset.
+Decoded stereo AAC, which is planar float, floored on its way to 16-bit FLAC: the error ran from −1.00 to 0.00 LSB, a mean of −0.50 LSB.
+* A float sine at +1 dBFS written as 24-bit FLAC clipped 143,820 of 480,000 samples, with an error of up to −18.3 dBFS.
+32-bit pink noise written as 24-bit FLAC changed 97.6 % of its samples by 0 to −255 32-bit steps, at most −138.5 dBFS, because the encoder drops the low 8 bits.
+* `ffmpeg -resamplers` lists only `swr`.
+A 21 kHz tone at 44.1 kHz resampled to 48 kHz came out 2.09 dB low with `aresample=48000` and 0.03 dB low with the tuned settings.
+A 24.5 kHz tone at 96 kHz resampled to 48 kHz folded to 23.5 kHz at −14.4 dB with the defaults and at −138.3 dB with the tuned settings.
+* The tuned resample of 120 s of 96 kHz 7.1 pink noise to 48 kHz took 2.68 s of wall time in one FFmpeg process, about 45 times real time, against 0.58 s with the defaults.
+
+[[evidence-opus-bitrates]]
+=== Opus bitrates
+
+The measurements ran on 2026-11-02 with FFmpeg 8.1.3 and libopus 1.5.2 from the pinned worker image.
+The sources were the first 734 s of Xiph's Creative Commons 5.1 masters of Tears of Steel (24 bits) and Sintel (16 bits).
+Stereo and mono were BS.775 downmixes, and 6.1 and 7.1 took the other film's surround pair as their extra channels, so those channels are synthetic.
+A noise-to-mask measure scored each channel of each encode against the master, as the share of frames with audible noise and the worst channel's noise-to-mask ratio.
+The measure compares waveforms, which penalizes Opus's band folding and favours AC-3 and E-AC-3, and it has no temporal masking, so it under-scores pre-echo and gives no credit for libopus's surround masking.
+ViSQOL could not be built on the host, so no standard measure checked these numbers.
+
+|===
+| Layout and rate | Worst channel, disturbed frames, Sintel / Tears of Steel
+
+| Stereo 160 kb/s (yardstick) | 1.3 % / 7.5 %
+| Mono 96 kb/s | 0.2 % / 4.0 %
+| 5.1 448 kb/s | 2.4 % / 6.9 %
+| 5.1 416 kb/s | – / 12.3 %
+| 5.1 384 kb/s | 11.5 % / 21.4 %
+| 6.1 576 kb/s, real channels | 1.8 % / 4.2 %
+| 7.1 640 kb/s | 1.6 % / 5.5 %
+| 7.1 576 kb/s, Tears of Steel's front left | – / 11.7 %
+|===
+
+* At 6.1 512 kb/s, Sintel's centre missed the yardstick by 4.3 points and 1.8 dB.
+* libopus 1.5.2 coded 5.1 as two coupled pairs plus centre and low-frequency channel, 6.1 as three coupled pairs, one of them centre and back centre, plus the low-frequency channel, and 7.1 as three coupled pairs plus centre and low-frequency channel.
+* On Tears of Steel, the worst channel's noise-to-mask ratio and disturbed frames were −3.0 dB and 80 % for AAC 5.1 at 384 kb/s, −8.8 dB and 34 % for E-AC-3 5.1 at 448 kb/s, −9.9 dB and 7 % for Opus 5.1 at 448 kb/s, −15.2 dB and 4 % for E-AC-3 5.1 at 640 kb/s and −15.4 dB and 2.5 % for AC-3 5.1 at 640 kb/s.
+* A re-run on 2026-11-02 encoded all 734 s of Tears of Steel 5.1 at a nominal 448 kb/s.
+Constrained VBR averaged 451.3 kb/s, and its largest fixed 6 s window ran 1.0 % over nominal.
+Unconstrained VBR averaged 405.9 kb/s, and its largest fixed 6 s window ran 10.6 % over nominal.
+Constrained stereo at 160 kb/s averaged 160.4 kb/s, with its largest window 0.6 % over.
+
+[[evidence-lossless-size]]
+=== The size of FLAC and ALAC encodes
+
+The measurements ran on 2026-11-01 with FFmpeg 8.1.3 from the pinned worker image.
+The sources were Creative Commons only: the Xiph.Org archive's lossless masters of Sintel (888 s, stereo and 5.1, 16 bits) and Tears of Steel (734 s, stereo, 24 bits), and Tears of Steel's official AC-3 5.1 track at 448 kb/s.
+The pinned encoders made the lossy sources from the masters.
+Two synthetic 300 s stereo signals bounded the range: pink noise band-limited to 100 to 4,000 Hz and gated in syllable-length bursts with pauses, as speech-like audio, and independent white noise in each channel.
+Each lossy source was decoded and encoded to FLAC at 16 bits with FFmpeg's default settings, as the worker would encode it.
+The rates count FLAC frames only, without fMP4 framing.
+The peak is the largest fixed window of 6 s or 3 s.
+Each percentage is of the PCM bitrate at 48 kHz and the written depth: 1,536 kb/s for stereo at 16 bits, 2,304 kb/s for stereo at 24 bits and 4,608 kb/s for 5.1 at 16 bits.
+
+[cols="4,1,2,2,2,2",options="header"]
+|===
+|Source |Channels |Average kb/s |Average % of PCM |Peak 6 s % |Peak 3 s %
+|Speech-like synthetic, AAC 128 kb/s |2 |193 |13 |15 |19
+|Sintel stereo, AAC 128 kb/s |2 |573 |37 |60 |62
+|Tears of Steel stereo, AAC 128 kb/s |2 |818 |53 |82 |85
+|White noise, AAC 128 kb/s |2 |1,414 |92 |93 |94
+|Sintel 5.1, AAC 384 kb/s |6 |1,183 |26 |46 |46
+|Sintel 5.1, AC-3 640 kb/s |6 |1,222 |27 |47 |48
+|Tears of Steel official AC-3 448 kb/s |6 |1,527 |33 |52 |54
+|Sintel stereo master, lossless |2 |644 |42 |63 |65
+|Sintel 5.1 master, lossless |6 |1,258 |27 |48 |49
+|Tears of Steel stereo master, 24 bits |2 |939 |41 |60 |62
+|White noise PCM |2 |1,531 |100 |100 |102
+|===
+
+* Per channel, the decoded film tracks ran 197 to 409 kb/s on average, and the speech-like track 97 kb/s.
+* FLAC of a decoded lossy track was about as large as FLAC of its lossless master: Sintel's stereo AAC track wrote 573 kb/s against the master's 644 kb/s.
+* ALAC of the same decoded audio was 2 to 5 % larger than FLAC: Tears of Steel's AAC track wrote 854 kb/s, 56 % of the PCM bitrate.
+* On 2026-11-02, in the pinned image, 6 s of synthetic 48 kHz stereo at 16 bits wrote 39 % more as ALAC than as FLAC with 2,400-sample frames for a 1 kHz tone (134,633 against 97,208 bytes), 34 % more for white noise and 39 % more for pink noise, so a FLAC measurement does not bound an ALAC encode.
 
 == References
 
 * Issue https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60] (subtitle extraction and WebVTT, in the server and the worker).
 * Issue https://github.com/streamarr/streamarr-server/issues/503[streamarr/streamarr-server#503] (audio renditions), issue https://github.com/streamarr/streamarr-server/issues/505[streamarr/streamarr-server#505] (captions), issue https://github.com/streamarr/streamarr-server/issues/508[streamarr/streamarr-server#508] (subtitles that extraction finishes during playback) and issue https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511] (streams that end early).
-* Issue https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] (typed capability declarations) and issue https://github.com/streamarr/streamarr-web/issues/29[streamarr/streamarr-web#29] (the web client's declarations).
+* Issue https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] (typed capability declarations and the channel layout rule), pull request https://github.com/streamarr/streamarr-web/pull/130[streamarr/streamarr-web#130] (the web client's declaration) and issue https://github.com/streamarr/streamarr-web/issues/29[streamarr/streamarr-web#29] (7.1 channel order in the web client).
 * Issue https://github.com/streamarr/streamarr-server/issues/496[streamarr/streamarr-server#496] (the epic for switching audio and subtitles without restarting the video) and issue https://github.com/streamarr/streamarr-server/issues/506[streamarr/streamarr-server#506] (image subtitle burn-in).
 * Issue https://github.com/streamarr/streamarr-apple/issues/4[streamarr/streamarr-apple#4] (audio and subtitle switching in the Apple client), issue https://github.com/streamarr/streamarr-web/issues/74[streamarr/streamarr-web#74] (the web player's menus) and issue https://github.com/streamarr/streamarr-android/issues/1[streamarr/streamarr-android#1] (playback with Media3 on Android TV).
 * Issue https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] (the VAAPI, QSV, AMF and RKMPP encoders), issue https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56] (NVENC) and issue https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57] (VideoToolbox).
 * Pull request https://github.com/streamarr/streamarr-transcode-worker/pull/50[streamarr/streamarr-transcode-worker#50], which declares copied audio's bitrate unknown.
-* link:0013-stream-decision-architecture.adoc[ADR 0013], link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018], link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019], link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032], link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033], link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036], link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037], link:0042-graphql-subscriptions-run-over-websocket-until-token-expiry.adoc[ADR 0042] and link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045].
+* link:0013-stream-decision-architecture.adoc[ADR 0013], link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018], link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019], link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032], link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033], link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036], link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037], link:0042-graphql-subscriptions-run-over-websocket-until-token-expiry.adoc[ADR 0042], link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045], link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049], link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc[ADR 0050] and link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc[ADR 0054].
 * The measurements of 2026-09-27 to 2026-09-30 and their harnesses were not committed, so the Evidence section gives their results.
 * https://datatracker.ietf.org/doc/html/rfc8216#section-4.3.4.1[RFC 8216 §4.3.4.1: `EXT-X-MEDIA`], https://datatracker.ietf.org/doc/html/rfc8216#section-4.3.4.2[§4.3.4.2: `EXT-X-STREAM-INF`, `CODECS` and `BANDWIDTH`] and https://datatracker.ietf.org/doc/html/rfc8216#section-3.5[§3.5: WebVTT segments and `X-TIMESTAMP-MAP`]
 * https://developer.apple.com/documentation/http-live-streaming/hls-authoring-specification-for-apple-devices/[Apple HLS authoring specification: audio and subtitle renditions]
 * https://www.w3.org/TR/webvtt1/[W3C WebVTT: The Web Video Text Tracks Format]
 * https://github.com/video-dev/hls.js/blob/v1.7.0/src/utils/mp4-tools.ts#L1256-L1270[hls.js 1.7.0 `mp4-tools.ts`: a version 1 `tfdt` whose upper word is 2^32^ − 1 is kept as that upper word]
+* https://github.com/FFmpeg/FFmpeg/blob/n8.1/libavformat/movenc.c#L3537-L3573[FFmpeg n8.1 `movenc.c`: the handler names that the MP4 muxer writes]
+* https://github.com/MediaArea/MediaInfoLib/blob/v26.10/Source/MediaInfo/Multiple/File_Mpeg4_Elements.cpp#L4678[MediaInfoLib v26.10 `File_Mpeg4_Elements.cpp`: MediaInfo's rule for generic handler names]
+* https://github.com/gpac/gpac/blob/v2.4.0/applications/mp4box/fileimport.c#L919-L921[GPAC v2.4.0 `fileimport.c`: the `name` import option] and https://github.com/gpac/gpac/blob/v2.4.0/applications/mp4box/fileimport.c#L1731-L1733[its write into the handler name]
+* https://datatracker.ietf.org/doc/html/draft-pantos-hls-rfc8216bis-22#section-4.4.6.1[draft-pantos-hls-rfc8216bis-22 §4.4.6.1] and RFC 8216 §4.3.4.1: an audio rendition may carry `public.accessibility.describes-video`
+* https://developer.apple.com/documentation/http-live-streaming/hls-authoring-specification-for-apple-devices/[Apple HLS authoring specification], items 2.12 to 2.14: audio description renditions
+* https://www.rfc-editor.org/rfc/rfc9639#section-9.1.3[RFC 9639 §9.1.3: FLAC channel assignment]
+* https://github.com/FFmpeg/FFmpeg/blob/n8.1/libavformat/movenc.c#L648-L651[FFmpeg n8.1 `movenc.c`: `flag_eac3_extension_type_a` is written only with a complexity index] and https://github.com/androidx/media/blob/1.11.1/libraries/extractor/src/main/java/androidx/media3/extractor/Ac3Util.java#L255-L256[Media3 1.11.1 `Ac3Util.java`: E-AC-3 with Atmos only when the flag is set]
+* https://www.rfc-editor.org/rfc/rfc7845#section-5.1.1.2[RFC 7845 §5.1.1.2: Opus channel mapping family 1]
+* https://wiki.xiph.org/index.php?title=Opus_Recommended_Settings&oldid=16818[Xiph wiki: Opus Recommended Settings, revision 16818]
+* https://media.xiph.org/sintel/[Xiph.Org: Sintel soundtrack masters] and https://media.xiph.org/tearsofsteel/[Tears of Steel soundtrack masters and AC-3 track] (Creative Commons Attribution 3.0, Blender Foundation)
+* https://github.com/FFmpeg/FFmpeg/blob/n8.1/libavformat/movenc.c#L8321-L8328[FFmpeg n8.1 `movenc.c`: TrueHD in MP4 needs `-strict experimental`] and https://github.com/FFmpeg/FFmpeg/blob/n8.1/libavformat/movenc.c#L908-L931[the `dmlp` box]
+* https://github.com/androidx/media/blob/1.11.1/libraries/extractor/src/main/java/androidx/media3/extractor/mp4/BoxParser.java#L2167-L2168[Media3 1.11.1 `BoxParser.java`: the `mlpa` sample entry] and https://github.com/androidx/media/blob/1.11.1/libraries/common/src/main/java/androidx/media3/common/MimeTypes.java[`MimeTypes.java`: no `mlpa` codec string]
+* https://developer.apple.com/documentation/http-live-streaming/hls-authoring-specification-for-apple-devices[Apple HLS authoring specification: `CHANNELS="16/JOC"` for Dolby Digital Plus with Atmos, and FLAC and Apple Lossless in fMP4]

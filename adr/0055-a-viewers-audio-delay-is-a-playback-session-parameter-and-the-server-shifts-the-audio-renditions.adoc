@@ -173,6 +173,9 @@ Before it reads any media, the worker opens the source once through its mount ma
 On a mismatch, it reads no media and fails the attempt with the typed reason `SOURCE_CHANGED`, and the failure reports the snapshot that it read.
 On a match, the worker hands that open file to the FFmpeg that reads the source, with FFmpeg's `fd` protocol, so FFmpeg reads the file that the worker checked.
 A file renamed over the path after the check never reaches the attempt, because FFmpeg never opens the path.
+An open file still shows a write into the same file, so the producer reads the open file's snapshot again before it hands over each closed segment.
+When the snapshot has changed, the producer discards that segment, stops FFmpeg and fails the attempt with `SOURCE_CHANGED`.
+FFmpeg read every byte behind a closed segment before that check, so a write that the check misses reaches only later segments, which the next check catches.
 Every new job attempt checks: a relocation after a seek, the attempt that a delay change starts for an audio lead (<<decision-audio-lead>>), a replacement under ADR 0019, and the first attempt of each new format attempt under ADR 0052.
 
 `SOURCE_CHANGED` is neither a format error nor a stall, so the server spends no replacement attempt and no format attempt on it.
@@ -191,6 +194,7 @@ The server's tests replace a file at the same path during playback with a file c
 They then seek past the stored segments, change the delay so that the player's segment needs an audio lead, and report a format error.
 Each new attempt fails with `SOURCE_CHANGED` before it reads media, the playback session ends with that terminal error, the file's outcome and corrections are gone, and the client's new playback session waits for the replacement's probe and plays it with no correction.
 The worker's tests rename a replacement over the path between the snapshot check and FFmpeg's start, and check that the attempt reads only the checked file.
+They also overwrite the open file in place after the first check, and check that no segment closed after the write is handed over and that the attempt fails with `SOURCE_CHANGED`.
 
 *Why:* A correction is tuned by ear against one mux, and a replacement at the same path can be another mux whose audio sits elsewhere.
 Only the worker sees the bytes that an attempt reads, and the server's stored snapshot lags a replacement until a scan or the watcher sees it, so the check runs where the attempt opens the source.
@@ -512,6 +516,8 @@ They include an E-AC-3 copy with Atmos through a receiver at +200 ms, to hear wh
 * The correction stored with the probe result — a new probe version would discard a value that a person set and no probe measures.
 * A running playback session that keeps its corrections after its source changes — ADR 0018 addresses media by location, so a later seek, delay change or format recovery would open the replacement's bytes and play the old mux's correction on them.
 * Moving a running playback session to the replacement's corrections in place — its playlists, segment list and keyframe positions describe the old bytes.
+* Checking the snapshot only when the attempt opens the source — a write into the same file reaches FFmpeg through the open file, so the attempt would publish the new bytes with the old corrections.
+* Copying the source into an immutable file before each attempt — every seek would copy the whole file first.
 * Checking the snapshot by path and letting FFmpeg open the path — a rename between the check and the open would hand the replacement's bytes to an attempt that carries the old corrections.
 * Ending playback on `SOURCE_CHANGED` without recording the new snapshot — the restart would read the old outcome and fail again until a scan or the watcher saw the change.
 * The source snapshot inside `MediaSourceRef` — the reference is the media's address, which a worker resolves through its mount mapping, and the snapshot is a fact that the worker checks at that address.

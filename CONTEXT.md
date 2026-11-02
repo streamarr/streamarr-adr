@@ -150,8 +150,16 @@ The logical span of one viewing of a media title, which survives replacement str
 _Avoid_: playback (ADR 0018's token and request surface), app session, stream session (one server-side run inside it)
 
 **Audio delay**:
-A signed offset, from −2,000 ms to +2,000 ms in 10 ms steps, that a viewer sets to correct the lip-sync error of one device's playback chain. A positive delay plays the sound later than the picture. It belongs to the playback session, the client keeps it per device and per audio output, and the server shifts every audio rendition by it, moving decode times and never changing a sample (ADR 0055).
-_Avoid_: audio offset, lip-sync offset, A/V sync setting, audio latency (what the chain adds, not the correction)
+A signed offset, from −2,000 ms to +2,000 ms in 10 ms steps, that a viewer sets to correct the lip-sync error of one device's playback chain. A positive delay plays the sound later than the picture. The client keeps it per device and per audio output and sends it with the playback session, which keeps it while it lasts (ADR 0055).
+_Avoid_: audio offset, lip-sync offset, A/V sync setting, audio latency (what the chain adds, not the correction), applied audio delay (the sum that the server shifts by)
+
+**Audio sync correction**:
+A signed offset, in the audio delay's range and step, that a ServerAdmin sets for a media file whose own audio is out of sync. One value covers all the file's audio streams, and an audio stream can carry its own, which replaces the file's for that stream. The server stores it with the media file, applies it for every viewer and device, and removes it when the source snapshot changes (ADR 0055).
+_Avoid_: title offset, audio offset, audio delay (the device's value), metadata edit (a catalog entry's field, which survives a file upgrade), override (reserved for administrative overrides in ADR 0024)
+
+**Applied audio delay**:
+The amount by which the server shifts one audio rendition: the playback session's audio delay plus the rendition's audio sync correction, clamped to −2,000 ms to +2,000 ms. The server moves decode times and never changes a sample (ADR 0055).
+_Avoid_: total delay, effective delay (effective value is a metadata term), audio delay (the device's part alone)
 
 **Source description**:
 The record of one media track as the probe found it.
@@ -258,7 +266,7 @@ Preroll is media that a job attempt's seek emits before the attempt's first medi
 _Avoid_: overlap, lead-in
 
 **Audio lead**:
-The audio of the 2 s of media time before a job attempt's first media segment, which the producer delivers apart from the segments while the playback session's audio delay is positive. An attempt that starts at segment 0 always delivers 2 s of encoded silence as its audio lead, whatever the delay. The server shifts a segment later from it when it holds no segment before the attempt's first (ADR 0055).
+The audio of the 2 s of media time before a job attempt's first media segment, which the producer delivers apart from the segments while an applied audio delay is positive. An attempt that starts at segment 0 always delivers 2 s of encoded silence as its audio lead, whatever the delay. The server shifts a segment later from it when it holds no segment before the attempt's first (ADR 0055).
 _Avoid_: lead-in, preroll (which the producer discards)
 
 **Stream copy**:

@@ -16,6 +16,9 @@ The rule covers the lower audio steps that keep a copied track's 3 or 4 channels
 https://github.com/streamarr/streamarr-server/pull/711[streamarr/streamarr-server#711] implements the copy side.
 The layout comes from probe version 7 (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032]).
 
+Another amendment replaces FFmpeg's default downmix with a named matrix and a limiter (<<decision-downmix>>).
+Dialogue keeps ITU-R BS.775's −3 dB in every codec, a `2.1` or `3.1` track keeps its low-frequency channel, and no downmix goes over full scale.
+
 NOTE: link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052] changes what this decision says about an encode in Original.
 Every encode that Original reaches now plays in Auto, and the client tells the viewer that the playback choice changed.
 That encode is Auto's encoded quality ladder, not one variant without a label.
@@ -452,10 +455,64 @@ ISO/IEC 14496-3 gives AAC channel configurations for `3.0` (configuration 3) and
 ATSC A/52's audio coding modes 2/0 with the low-frequency channel, 3/0, 2/1, 3/1 and 2/2 hold the AC-3 and E-AC-3 layouts that the rule names.
 With the source's layout named, AAC `3.0` and AC-3 `quad` kept every channel at the source's level.
 Stereo keeps every full-band channel of the source in the mix, so stereo is the safe output for a layout that the codec cannot carry.
-FFmpeg's downmix leaves out the low-frequency channel by default, so a `2.1` track loses its low-frequency channel in stereo.
+FFmpeg's default downmix leaves out the low-frequency channel, so <<decision-downmix>> folds that channel into the stereo of a `2.1` track.
 FFmpeg's 5-channel AAC layout, `5.0`, wrote channel configuration 5, but its 7-channel AAC layout wrote channel configuration 0, so a maximum of 7 takes 5.1.
 A downmix of a 5.1 track to AAC's 4-channel default, `4.0`, merges its surround pair into one back channel in the same way.
 ADR 0032's evidence holds the measurements (link:0032-media-file-probe-results-are-persisted.adoc#evidence-channel-layout[ADR 0032]).
+
+[[decision-downmix]]
+=== Every downmix uses a named matrix, and a limiter keeps it below full scale
+
+A downmix is an audio encode whose output layout has fewer channels than the source track.
+Every downmix uses the matrix below instead of FFmpeg's default.
+That includes the stereo and mono steps, the stereo encode of a 3- or 4-channel layout that the target codec cannot carry, and every encode that a channel maximum caps.
+It also includes an encode to 5.1 of a 7.1 track, such as AC-3 or E-AC-3 5.1 or the AAC 5.1 step, and an encode to 5.0 under a channel maximum of 5.
+The worker applies the matrix with FFmpeg's `pan` filter, then FFmpeg's `alimiter`, before the encoder.
+
+The stereo matrix follows ITU-R BS.775's 2/0 equations at ATSC A/52's default levels:
+
+* Left = FL + 0.7071 × FC + 0.7071 × LS, and right = FR + 0.7071 × FC + 0.7071 × RS.
+* LS and RS are the source's surrounds on each side.
+A source with one surround pair, side or back, uses that pair.
+A source with both pairs, such as 7.1, mixes each side's two surrounds at 0.7071 each.
+A back centre mixes into LS and RS at 0.7071.
+* The low-frequency channel mixes into left and right at 0.7071 only when the source has no surround channel, as in `2.1` and `3.1`.
+A source with surrounds, such as 5.1 or 7.1, leaves it out.
+* Mono is 0.7071 × (left + right), which is BS.775's mono equation for a 3/2 source.
+
+An encode to 5.1 of a 7.1 track keeps the front channels and the low-frequency channel, and mixes each side's two surrounds at 0.7071 each.
+An encode to 5.0 does the same and leaves out the low-frequency channel.
+
+The matrix places every channel of a layout built from front, centre, low-frequency, side, back and back-centre channels, such as `2.1`, `3.0(back)`, `3.1`, `4.0`, `quad`, `5.0`, `5.1(side)`, `6.1` and `7.1`.
+Those layouts count as layouts that this ADR names (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032]).
+Any other layout, such as `7.1(wide)`, and an unknown layout downmix as FFmpeg's default layout for the channel count, which is how `-ac` treats them.
+
+The matrix is not normalized.
+The limiter holds a stereo or mono downmix at or below −3 dBFS, and an encode to 5.1 or 5.0 at or below −1 dBFS.
+It looks ahead 5 ms, releases over 50 ms, adds no make-up gain (`level=0`) and removes its own delay (`latency=1`), so the audio keeps its timing.
+Below the ceiling, it changes nothing.
+A worker that does not list probe version 7 downmixes with FFmpeg's default, as before.
+
+*Why:* BS.775 and A/52 both mix the centre at −3 dB into each side.
+Two speakers at −3 dB give the same power as the centre speaker at 0 dB, so dialogue keeps its level against the front channels.
+FFmpeg's default uses the same levels, but its result depends on the sample format.
+FFmpeg normalizes the matrix only when the output or internal sample format is an integer.
+AAC, AC-3 and E-AC-3 take floating-point samples, so their downmix was not normalized and went over full scale in a loud scene.
+FLAC and ALAC take integer samples, so their downmix was normalized, and the centre fell to −10.7 dB from 5.1 and −12.9 dB from 7.1.
+That is A/52's worst-case scaling of 1/2.414, which protects a sum that only a loud scene reaches by turning every scene down.
+Jellyfin's default adds `volume=2` to `-ac 2`, which lifts the centre to +3 dB but put 33 % of a loud scene's samples over full scale.
+An unnormalized matrix keeps dialogue at −3 dB in every codec, and the limiter acts only on the peaks that would go over.
+The −3 dBFS ceiling leaves room for AAC's coding overshoot at 128 kb/s and above.
+An encode to 5.1 or 5.0 keeps the source's front channels, so its ceiling of −1 dBFS leaves their peaks up to −1 dBFS alone.
+With a side pair and a back pair, FFmpeg's default keeps one pair at 0 dB and mixes the other in at −3 dB, so a sound that pans between them changes level.
+Mixing both at 0.7071 keeps the power of the four surrounds.
+BS.775 says that a two-channel downmix often leaves out the low-frequency channel and that the main channels must carry every essential part of the programme.
+Film codes the low-frequency channel for +10 dB of playback gain (BS.775).
+Folding it in at its coded level would be 10 dB too quiet, and at its playback level it would drive the limiter on every explosion.
+A 5.1 or 7.1 track is most often a film mix, so it follows BS.775 and leaves the channel out.
+Music codes the low-frequency channel for no playback gain (BS.775), and a track without surrounds is more often music or television than a film mix.
+At 0.7071 into each side, that channel keeps its power, and a film's `2.1` track keeps its bass 10 dB below its playback level instead of losing it.
+The measurements are in <<evidence-downmix>>.
 
 [[decision-audio-for-picture]]
 === The server lowers multichannel audio when a lower bitrate lets a larger picture fit
@@ -519,6 +576,12 @@ When the source fits the viewer's limits and the server copies it in Auto, Auto'
 https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399] keeps that question open.
 * This ADR does not decide whether a client's playback details show that the server lowered the audio.
 The multivariant playlist already names the delivered audio codec and channel count.
+* This ADR does not add a night mode, a dialogue boost or other dynamic range compression for the viewer to turn on.
+Jellyfin's optional night-mode downmix and Plezy's centre boost setting do this.
+It is the viewer's choice, not a property of a correct downmix, so it needs a client setting and its own decision.
+* This ADR does not read the centre and surround mix levels that an AC-3 or E-AC-3 track signals.
+The matrix uses A/52's default code of −3 dB for both.
+Reading them would add a probe fact.
 
 == Consequences
 
@@ -571,6 +634,12 @@ Below 209 kb/s, the stream exceeds the maximum bitrate rather than not playing a
 A copied AAC `quad` or `2.1` track, and any 3- or 4-channel track whose layout the probe does not record, steps to stereo.
 * No AAC output carries channel configuration 0, so Chromium plays every AAC rendition that the server encodes.
 * A track with more channels than a capability entry's channel maximum of 3 or 4 plays in stereo, not in a 3- or 4-channel downmix.
+* A downmix keeps dialogue at −3 dB on each side in every codec, and a `2.1` or `3.1` track keeps its low-frequency channel in stereo.
+A 5.1 or 7.1 track still leaves its low-frequency channel out of stereo.
+* When a loud scene's stereo sum passes −3 dBFS, the limiter lowers the whole mix, dialogue included.
+In the synthetic loud scene of <<evidence-downmix>>, the centre fell from −3.0 dB to −7.3 dB while the limiter held the peaks.
+* A stereo downmix peaks 3 dB below full scale, so it plays up to 3 dB quieter than an unlimited mix in its loudest moments.
+* AAC at 64 kb/s can still go slightly over full scale after decoding: 12 of 1.92 million samples in the loud scene.
 * Every job that encodes audio names a layout, and a job that names a 3- or 4-channel layout needs a worker that lists probe version 7 (ADR 0032).
 Until the server stores a file's probe version 7 outcome, that file's 3- and 4-channel tracks step to stereo.
 * When the session keeps its own audio after both audio step rules, another audio track keeps its own decision, so a track larger than the default track can take the stream over the maximum bitrate.
@@ -638,6 +707,56 @@ A `quad` track then loses its rear channels' opposite-phase content in AAC `4.0`
 * Downmixing a track above a 3- or 4-channel maximum to that count merges a surround pair into one channel in AAC `4.0`.
 Stereo keeps every full-band channel in the mix.
 * Choosing the layout from the channel count alone cannot tell `quad` from `4.0`, or `2.1` from `3.0`.
+* FFmpeg's default downmix turns dialogue down to −10.7 dB in FLAC and ALAC, goes over full scale in AAC, AC-3 and E-AC-3, and drops a `2.1` track's low-frequency channel.
+* Jellyfin's default `-ac 2` with `volume=2` lifts every channel by 6 dB.
+In the loud scene, 33 % of the samples went over full scale, and the AAC output's true peak reached +9.7 dBTP.
+* A matrix normalized by A/52's worst-case scaling turns dialogue down to −10.7 dB in every scene, to protect a sum that only loud scenes reach.
+* A centre above −3 dB, or Jellyfin's Dave750 or night-mode matrix, by default changes the balance of the mix for every viewer.
+That choice belongs to the deferred viewer setting.
+* FFmpeg's `loudnorm` changes the programme's loudness over time, and its linear mode needs a first pass over the whole file.
+* One limiter ceiling for every downmix would either let AAC's overshoot go over full scale in stereo or limit the untouched front channels of a 5.1 encode by 3 dB.
+
+[[evidence-downmix]]
+== Evidence: downmix
+
+These measurements ran on 2026-11-01 against FFmpeg 8.1.3 in the pinned worker image (`streamarr/streamarr-transcode-worker@sha256:f2011e95…`).
+The sources were synthetic 48 kHz floating-point WAV files, 20 s long, that the same FFmpeg built.
+The dialogue scene had a 1 kHz tone at −20 dBFS peak in the centre and silence elsewhere.
+The loud scene had a tone at −6 dBFS peak in every channel, each at a different frequency, with the centre at 1 kHz.
+Each level below is the left output channel; the right matched.
+"Over" counts samples above full scale, out of 1.92 million.
+The AAC output was 192 kb/s stereo, decoded back to floating point.
+The named matrix used the −3 dBFS ceiling.
+
+|===
+| Downmix | Centre, dialogue scene | Centre, loud scene, before encoding | Peak before encoding | Over before encoding | Over after AAC | AAC true peak
+
+| FFmpeg default, 5.1 to AAC | −3.0 dB | −3.0 dB | +1.6 dBFS | 75,000 | 1,023 | +2.9 dBTP
+| FFmpeg default, 5.1 to 16-bit FLAC | −10.7 dB | −10.7 dB | −6.0 dBFS | 0 | – | –
+| Jellyfin default, 5.1 to AAC | +3.0 dB | +3.0 dB | +7.7 dBFS | 640,840 | 9,611 | +9.7 dBTP
+| Named matrix, 5.1 to AAC or FLAC | −3.0 dB | −7.3 dB | −3.0 dBFS | 0 | 0 | −2.7 dBTP
+| FFmpeg default, 7.1 to AAC | −3.0 dB | −3.0 dB | +3.7 dBFS | 138,680 | 2,727 | +3.7 dBTP
+| FFmpeg default, 7.1 to 16-bit FLAC | −12.9 dB | −12.9 dB | −6.2 dBFS | 0 | – | –
+| Jellyfin default, 7.1 to AAC | +3.0 dB | +3.0 dB | +9.7 dBFS | 752,840 | 14,425 | +9.7 dBTP
+| Named matrix, 7.1 to AAC or FLAC | −3.0 dB | −7.8 dB | −3.0 dBFS | 0 | 0 | −2.8 dBTP
+|===
+
+* ALAC, like FLAC, takes integer samples (`s16p` and `s32p`), and FFmpeg's default put the dialogue scene's centre at −10.7 dB in ALAC too.
+AAC, AC-3 and E-AC-3 take `fltp`.
+* In the dialogue scene, the named matrix's output matched FFmpeg's default for AAC, so the limiter changed nothing below its ceiling.
+* After AAC, the loud 5.1 scene's centre measured −4.9 dB for FFmpeg's default, −4.8 dB for Jellyfin's default and −7.3 dB for the named matrix.
+Jellyfin's 6 dB boost left the loud scene's dialogue no louder than FFmpeg's default after AAC, and it clipped.
+* A centre click at sample 48,000 came out at sample 48,000 with the limiter, and the output kept the source's 144,000 samples.
+* A `2.1` source with a 50 Hz tone at −20 dBFS peak in its low-frequency channel gave silence with FFmpeg's default and with Jellyfin's default, and −23.0 dBFS (−3.0 dB) on each side with the named matrix.
+FFmpeg's default `lfe_mix_level` is 0.
+* The limiter's ceiling decided whether the decoded output went over full scale in the loud 5.1 scene:
+** At −1 dBFS: AAC went over by 1,095 samples at 64 kb/s, 25 at 128 kb/s and 10 at 192 kb/s; AC-3 and E-AC-3 at 192 kb/s did not.
+** At −2 dBFS: AAC went over by 66 samples at 64 kb/s and 16 at 128 kb/s.
+** At −3 dBFS: AAC went over by 12 samples at 64 kb/s and by none at 128 or 192 kb/s; AC-3 and E-AC-3 did not.
+* A 7.1 source with a tone only in the left side channel, then only in the left back channel, gave −20 dBFS and −23 dBFS in the left surround of FFmpeg's default `5.1(side)`, and the reverse in its default `5.1`.
+The named fold gave −23 dBFS for both.
+* A 5.1 source with a tone only in its low-frequency channel gave silence in FFmpeg's default 5.0 and stereo.
+* The pinned image's `ffmpeg -filters` lists `pan` and `alimiter`.
 
 == References
 
@@ -657,3 +776,7 @@ Stereo keeps every full-band channel in the mix.
 * https://github.com/chromium/chromium/blob/4a84ff43ddb481a1c0035b185fe384870f5e428c/media/formats/mp4/aac.cc#L269[Chromium's AAC parser] refuses channel configuration 0.
 * ISO/IEC 14496-3, MPEG-4 Audio, defines AAC's channel configurations.
 * https://ffmpeg.org/ffmpeg-utils.html#Channel-Layout[FFmpeg's channel layout names]
+* https://www.itu.int/rec/R-REC-BS.775-4-202212-I/en[ITU-R BS.775-4: Multichannel stereophonic sound system with and without accompanying picture], Annex 4 for the downmix equations and the section on the low-frequency channel
+* https://github.com/FFmpeg/FFmpeg/blob/n8.1.3/libswresample/rematrix.c[FFmpeg 8.1.3's `rematrix.c`] builds the default matrix and normalizes it only for integer sample formats.
+* https://ffmpeg.org/ffmpeg-filters.html#alimiter[FFmpeg's `alimiter` filter]
+* https://github.com/jellyfin/jellyfin/blob/ed211765c2ebbb3f5093f67596c267058c6a4124/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs[Jellyfin's `EncodingHelper`] adds a `volume` filter to a stereo downmix at the gain that https://github.com/jellyfin/jellyfin/blob/ed211765c2ebbb3f5093f67596c267058c6a4124/MediaBrowser.Model/Configuration/EncodingOptions.cs[`EncodingOptions`] sets to 2 by default, and https://github.com/jellyfin/jellyfin/blob/ed211765c2ebbb3f5093f67596c267058c6a4124/MediaBrowser.Controller/MediaEncoding/DownMixAlgorithmsHelper.cs[`DownMixAlgorithmsHelper`] holds its optional matrices.

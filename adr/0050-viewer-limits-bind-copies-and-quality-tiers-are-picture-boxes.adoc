@@ -332,12 +332,13 @@ The server tries the audio steps from the first to the last:
 That audio is a copy at the track's bitrate or an encode at the codec's default bitrate, such as AC-3 5.1 at 640 kb/s, E-AC-3 5.1 at 768 kb/s or AAC 5.1 at 384 kb/s.
 This step costs the largest audio rendition (<<decision-bitrate>>).
 The track of that rendition is the step track.
-When renditions tie, the default track is the step track.
+When several renditions tie as the largest, the default track is the step track if its rendition is one of them, and otherwise the first of them in the file's stream order.
 . The multichannel steps.
 They keep the codec and the channel layout of the step track's encode: the encode that the session delivers for it, or, when the session copies it, the encode that the server would choose for it.
 When the session copies the step track in AAC, AC-3 or E-AC-3, which the server also encodes, the copy's codec adds its steps too.
 Those steps keep the copy's channel count, up to the 5.1 that the server encodes in AC-3 and E-AC-3.
-Those steps use the layouts of the server's own encode: a copy of 5 channels steps in 5.1, and an AAC copy of 7 channels steps in AAC 7.1 and AAC 5.1, never in a 7-channel layout.
+A copy of 5 channels steps in the encoder's 5.0 layout: `5.0` for AAC and `5.0(side)` for AC-3 and E-AC-3.
+An AAC copy of 7 channels steps in AAC 5.1 only, because FFmpeg's 7-channel AAC layout writes channel configuration 0 (<<decision-channel-layout>>).
 A copy of 3 or 4 channels keeps its channels only in a layout that its codec carries exactly (<<decision-channel-layout>>).
 Otherwise the copy's codec adds no step for it.
 AAC above 5.1, encoded or copied, also steps through AAC 5.1.
@@ -347,8 +348,8 @@ A copied codec that the server does not encode, such as FLAC, Opus or ALAC, step
 A codec adds these steps only when its encode or copy has more than two channels:
 ** E-AC-3 5.1 at 640, 448 and 384 kb/s;
 ** AC-3 5.1 at 448 and 384 kb/s;
-** for a copied 3- or 4-channel AC-3 or E-AC-3 track that keeps its layout, the same bitrates in that layout;
-** multichannel AAC at 64 kb/s per full-band channel, which is 448 kb/s for 7.1, 320 kb/s for 5.1, 256 kb/s for 4.0 and 192 kb/s for 3.0.
+** for a copied 3-, 4- or 5-channel AC-3 or E-AC-3 track that keeps its channels, the same bitrates in its layout;
+** multichannel AAC at 64 kb/s per full-band channel, which is 448 kb/s for 7.1, 320 kb/s for 5.1 and 5.0, 256 kb/s for 4.0 and 192 kb/s for 3.0.
 AAC 7.1 takes both steps.
 . The stereo steps: AAC stereo at 128, 96 and 64 kb/s.
 A mono track has one step instead: AAC mono at 64 kb/s.
@@ -474,7 +475,7 @@ A downmix is an audio encode whose output layout has fewer channels than the sou
 Every downmix uses the matrix below instead of FFmpeg's default.
 That includes the stereo and mono steps, the stereo encode of a 3- or 4-channel layout that the target codec cannot carry, and every encode that a channel maximum caps.
 It also includes an encode to 5.1 of a 7.1 track, such as AC-3 or E-AC-3 5.1 or the AAC 5.1 step, and an encode to 5.0 under a channel maximum of 5.
-The worker applies the matrix with FFmpeg's `pan` filter, then FFmpeg's `alimiter`, before the encoder.
+The worker converts the decoded audio to floating point (`aformat=sample_fmts=fltp`), applies the matrix with FFmpeg's `pan` filter, then FFmpeg's `alimiter`, before the encoder.
 
 The stereo matrix follows ITU-R BS.775's 2/0 equations at ATSC A/52's default levels:
 
@@ -492,9 +493,11 @@ An encode to 5.0 does the same and leaves out the low-frequency channel.
 
 The matrix places every channel of a layout built from front, centre, low-frequency, side, back and back-centre channels, such as `2.1`, `3.0(back)`, `3.1`, `4.0`, `quad`, `5.0`, `5.1(side)`, `6.1` and `7.1`.
 Those layouts count as layouts that this ADR names (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032]).
-Any other layout, such as `7.1(wide)`, and an unknown layout downmix as FFmpeg's default layout for the channel count, which is how `-ac` treats them.
+Any other layout that FFmpeg names, such as `7.1(wide)` or a layout with height channels, downmixes with FFmpeg's default matrix, which keeps each channel's position, then the same limiter.
+FFmpeg reads a stream with an unknown layout, such as PCM in Matroska, as its default layout for the channel count, which is how `-ac` treats it, and the matrix above applies to that layout.
 
 The matrix is not normalized.
+The sum stays in floating point until the limiter, so a 16-bit or 24-bit source cannot clip inside `pan`.
 The limiter holds a stereo or mono downmix at or below −3 dBFS, and an encode to 5.1 or 5.0 at or below −1 dBFS.
 It looks ahead 5 ms, releases over 50 ms, adds no make-up gain (`level=0`) and removes its own delay (`latency=1`), so the audio keeps its timing.
 Below the ceiling, it changes nothing.
@@ -759,6 +762,9 @@ AAC, AC-3 and E-AC-3 take `fltp`.
 * In the dialogue scene, the named matrix's output matched FFmpeg's default for AAC, so the limiter changed nothing below its ceiling.
 * After AAC, the loud 5.1 scene's centre measured −4.9 dB for FFmpeg's default, −4.8 dB for Jellyfin's default and −7.3 dB for the named matrix.
 Jellyfin's 6 dB boost left the loud scene's dialogue no louder than FFmpeg's default after AAC, and it clipped.
+* A 16-bit 5.1 source with the same 1 kHz tone at −6 dBFS peak in FL, FC and SL sums to 1.207 on the left.
+With `pan` on the 16-bit samples, the sum clipped before the limiter, and the limited output's third harmonic rose to −23 dBc.
+With `aformat=sample_fmts=fltp` first, the third harmonic stayed at −103 dBc and the peak at −3.0 dBFS.
 * A centre click at sample 48,000 came out at sample 48,000 with the limiter, and the output kept the source's 144,000 samples.
 * A `2.1` source with a 50 Hz tone at −20 dBFS peak in its low-frequency channel gave silence with FFmpeg's default and with Jellyfin's default, and −23.0 dBFS (−3.0 dB) on each side with the named matrix.
 FFmpeg's default `lfe_mix_level` is 0.

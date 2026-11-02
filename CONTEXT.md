@@ -183,7 +183,7 @@ A copied track in a codec that the server encodes (AAC, AC-3 or E-AC-3) adds ste
 A step keeps a track's 3 or 4 channels only in a layout that the step's codec carries exactly: `3.0` or `4.0` in AAC, and `2.1`, `3.0`, `3.0(back)`, `4.0`, `quad` or `quad(side)` in AC-3 and E-AC-3; any other or unknown layout steps to stereo.
 All of these steps run from the highest bitrate to the lowest.
 The server steps down to fit the 360p tier or a video copy, and takes a lower multichannel step when it lets a larger picture fit.
-The server takes one step for the whole stream session, from the default track, and a step below the session's audio caps every audio rendition (ADR 0050).
+The server takes one step for the whole stream session, from the largest audio rendition, and a step below the session's audio caps every audio rendition (ADR 0050).
 _Avoid_: audio tier, audio quality, audio variant (a rendition is never a variant)
 
 **Quality tier**:

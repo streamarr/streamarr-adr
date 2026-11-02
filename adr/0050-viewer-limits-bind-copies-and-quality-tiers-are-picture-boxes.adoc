@@ -19,6 +19,9 @@ The layout comes from probe version 7 (link:0032-media-file-probe-results-are-pe
 Another amendment replaces FFmpeg's default downmix with a named matrix and a limiter (<<decision-downmix>>).
 Dialogue keeps ITU-R BS.775's −3 dB in every codec, a `2.1` or `3.1` track keeps its low-frequency channel, and no downmix goes over full scale.
 
+The same amendment takes the audio step from the largest audio rendition instead of the default track (<<decision-audio-steps>>).
+The stream session's audio bitrate already counts that rendition under link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc[ADR 0054], so no other track can take the stream over the viewer's maximum bitrate.
+
 NOTE: link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052] changes what this decision says about an encode in Original.
 Every encode that Original reaches now plays in Auto, and the client tells the viewer that the playback choice changed.
 That encode is Auto's encoded quality ladder, not one variant without a label.
@@ -128,9 +131,9 @@ When the probe knows the copied video's bitrate but not a copied audio track's, 
 
 When the probe does not know the copied video's bitrate, the container bitrate stands in for the video.
 The container bitrate is the bitrate that the probe reports for the whole source file.
-When the session copies its audio track from the source, the video copy costs the container bitrate alone.
+When the largest audio rendition is a copy of a source track, the video copy costs the container bitrate alone.
 The container already holds that track.
-When the session encodes its audio, the video copy costs the container bitrate plus the encoded audio's bitrate.
+When the largest audio rendition is an encode, the video copy costs the container bitrate plus that encode's bitrate.
 
 When the copy's cost is over the maximum bitrate, the server lowers the audio first (<<decision-audio-steps>>).
 It takes the first audio step at which the copy's cost is at or below the maximum bitrate.
@@ -292,10 +295,9 @@ The viewer already picked the quality, so a label would tell them nothing.
 === The maximum bitrate bounds video plus audio
 
 A variant costs its video bitrate plus the stream session's audio bitrate.
-The audio bitrate is the audio decision's bitrate.
-For a copied audio track, it is the track's bitrate.
-For an encoded audio track, it is the encode's bitrate.
-Every variant shares the same audio rendition (ADR 0043), so every variant adds the same audio bitrate.
+The audio bitrate is the bitrate of the largest audio rendition, which `BANDWIDTH` also counts (link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc[ADR 0054]).
+A copied audio track counts at the track's bitrate, and an encoded audio track at the encode's bitrate.
+Every variant shares the same audio renditions (ADR 0043), so every variant adds the same audio bitrate.
 
 The server offers a tier only when the tier's video bitrate for the chosen codec family plus the audio bitrate is at or below the maximum bitrate.
 
@@ -328,9 +330,12 @@ The server tries the audio steps from the first to the last:
 
 . The stream session's audio, as the audio decision chooses it.
 That audio is a copy at the track's bitrate or an encode at the codec's default bitrate, such as AC-3 5.1 at 640 kb/s, E-AC-3 5.1 at 768 kb/s or AAC 5.1 at 384 kb/s.
+This step costs the largest audio rendition (<<decision-bitrate>>).
+The track of that rendition is the step track.
+When renditions tie, the default track is the step track.
 . The multichannel steps.
-They keep the codec and the channel layout of the encode that the server would choose for the default track.
-When the session copies the default track in AAC, AC-3 or E-AC-3, which the server also encodes, the copy's codec adds its steps too.
+They keep the codec and the channel layout of the step track's encode: the encode that the session delivers for it, or, when the session copies it, the encode that the server would choose for it.
+When the session copies the step track in AAC, AC-3 or E-AC-3, which the server also encodes, the copy's codec adds its steps too.
 Those steps keep the copy's channel count, up to the 5.1 that the server encodes in AC-3 and E-AC-3.
 Those steps use the layouts of the server's own encode: a copy of 5 channels steps in 5.1, and an AAC copy of 7 channels steps in AAC 7.1 and AAC 5.1, never in a 7-channel layout.
 A copy of 3 or 4 channels keeps its channels only in a layout that its codec carries exactly (<<decision-channel-layout>>).
@@ -384,7 +389,8 @@ When the server takes a step below a copy, the copy becomes an encode at that st
 In Original, a video copy ignores the viewer's limits, so an audio copy beside it stays a copy.
 
 The server takes a step only when the client sends a maximum bitrate.
-The server takes one step for the whole stream session, from the default track.
+The server takes one step for the whole stream session, from the step track.
+A lower step costs its own bitrate, because it caps every rendition at that bitrate.
 A step below the session's audio caps every audio rendition: every track is delivered in the step's codec, with no more than the step's channels and bitrate.
 A track that the cap leaves at 3 or 4 channels follows <<decision-channel-layout>>.
 A track that already fits the cap's codec, channels and bitrate keeps its own copy-or-encode decision.
@@ -404,8 +410,9 @@ At an equal bitrate, the step keeps the session's codec.
 384 kb/s is the lowest E-AC-3 step because FFmpeg's E-AC-3 encoder lacks the tools behind Apple's 192 kb/s.
 64 kb/s is the lowest step because AAC-LC degrades quickly below it.
 `BANDWIDTH` counts the largest rendition, so only a cap on every rendition keeps every variant within the maximum.
+The step comes from the largest rendition for the same reason: a step from the default track alone would leave a larger track over the maximum.
 The session's own audio caps nothing, because it can be a copy in a codec that the server does not encode, such as FLAC.
-ADR 0043 keeps one audio codec per stream session, so all tracks follow the default track's step.
+ADR 0043 keeps one audio codec per stream session, so all tracks follow one step.
 Audio renditions switch without restarting the video, and an unchanged step keeps that true.
 
 [[decision-channel-layout]]
@@ -604,7 +611,7 @@ The container bitrate also holds the source's tracks that the session does not d
 When the session encodes its audio, the container bitrate also holds the source track that the encode replaces.
 The server can then lower the audio or encode the video for a source that would fit.
 The over-count lasts until the probe measures each stream's own bitrate.
-* When the probe does not know the copied video's bitrate and the session copies its audio, no audio step lowers the copy's cost.
+* When the probe does not know the copied video's bitrate and the largest audio rendition is a copy, no audio step lowers the copy's cost.
 Every encoded step adds its bitrate to the container bitrate.
 In Auto and in a fixed quality, a copy whose container bitrate is over the maximum bitrate therefore encodes its video, unless the source cannot be encoded or the server has nothing to encode it to.
 * The server learns of a turned window or screen at the next stream session.
@@ -642,7 +649,12 @@ In the synthetic loud scene of <<evidence-downmix>>, the centre fell from −3.0
 * AAC at 64 kb/s can still go slightly over full scale after decoding: 12 of 1.92 million samples in the loud scene.
 * Every job that encodes audio names a layout, and a job that names a 3- or 4-channel layout needs a worker that lists probe version 7 (ADR 0032).
 Until the server stores a file's probe version 7 outcome, that file's 3- and 4-channel tracks step to stereo.
-* When the session keeps its own audio after both audio step rules, another audio track keeps its own decision, so a track larger than the default track can take the stream over the maximum bitrate.
+* A track larger than the default track decides the audio step for the whole stream session.
+A copied AAC stereo default track at 128 kb/s beside a copied AAC 5.1 track at 384 kb/s costs 384 kb/s.
+Under a maximum bitrate of 1,150 kb/s, the 5.1 track encodes at AAC 5.1 at 320 kb/s and the default track keeps its copy.
+Under 1,000 kb/s, both play AAC stereo, the default track still as its copy.
+Before this amendment, that session cost 128 kb/s and took no step, so a variant sized to the maximum went 256 kb/s over it.
+* A step that changes the codec for a larger track encodes the default track too, even when the default track alone would have kept its copy.
 * A fixed quality above the source's size plays the source's size, not the size that its name suggests.
 It encodes at the bitrate of the tier that holds that size.
 * A source wider than 3840 is encoded at 3840 wide, even on a screen that could show more.
@@ -689,6 +701,7 @@ That is 768 kb/s for encoded 5.1 audio and more for a large copied track.
 * Stereo steps below 64 kb/s would need HE-AAC, and FFmpeg's only HE-AAC encoder is non-free.
 * A step for each audio track would mix codecs in one stream session, which ADR 0043 rejects.
 * Capping only the default track would let another rendition push `BANDWIDTH` over the maximum.
+* Taking the step from the default track alone would let a larger rendition take every variant over the maximum, because the stream session's audio bitrate and `BANDWIDTH` count the largest rendition (ADR 0054).
 * Keeping every audio copy would keep the overshoot of a large copied track.
 * Checking every video copy against the container bitrate alone would miss an encoded audio track that is larger than the source's own audio.
 * Adding a copied track's bitrate to the container bitrate would count the track twice.

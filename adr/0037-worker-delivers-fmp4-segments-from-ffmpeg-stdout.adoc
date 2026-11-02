@@ -31,6 +31,16 @@ NOTE: An amendment lets an encode of an interlaced source write one frame per fi
 The encode then runs at twice the output frame rate that the probe outcome stores, when twice that rate is at most 60 frames per second.
 Every other encode runs at the stored output frame rate, as before the amendment.
 
+NOTE: An amendment closes every media segment at its own interval's end, so the segment that holds the last video keyframe never takes in the audio after it (<<decision-early-ends>>).
+Every encode may now hold its last picture and pad its audio with digital silence up to the advertised end.
+That narrows the earlier rejection of padding every attempt's audio.
+A completed attempt reports where each stream ended and whether the source ended early, and the server stores each learned end time beside the probe facts.
+
+NOTE: An amendment settles how merged segment lists ship (<<decision-segment-list>>).
+Each job attempt carries the stream session's segment list, and the segment cap of 128 MiB is a constant of the worker contract.
+The server encodes a source from the start when a measured merged segment would exceed the segment cap, and no duration bound limits a merged segment.
+The interim rule, and its refusal to copy a source with an interval that holds no keyframe, end once the pinned worker image groups on the list.
+
 NOTE: Under link:0013-stream-decision-architecture.adoc#reshape-rpus-starting-samples[ADR 0013], a job attempt that encodes an HEVC Dolby Vision source with no compatible base, such as profile 5, runs two FFmpeg processes when ADR 0013's conditions for moving the source's RPUs hold.
 The first FFmpeg copies the source and the job's audio into fragmented MP4, the worker moves the RPUs and gives each video sample its duration in the source, and the second FFmpeg reads the result on its standard input and writes the fMP4 that this decision describes.
 The first FFmpeg reads the source with the same input flags as a single FFmpeg, including `-start_at_zero` and the start time correction (<<decision-media-time-zero>>), so it places media time zero.
@@ -313,8 +323,10 @@ A stream session with a copied variant builds its segment list from 3 s slots on
 In that segment list, a slot that holds no source keyframe merges into the segment before it.
 A merged segment therefore spans several slots.
 A stream copy advertises each segment's real duration.
-The stream session's encoded variants place their keyframes at the segment list's starts.
-In a stream session with merged segments, the server sends the segment list's starts with each job attempt, so that the worker forces keyframes and groups samples on the server's list.
+A copied segment opens at the first source keyframe in its first slot, and segment 0 also holds the media before its keyframe.
+The stream session's encoded variants force their keyframes at the segment list's starts.
+A keyframe that an encoder places inside a merged segment stays inside that segment, so a player can switch variants at every segment boundary.
+Audio and subtitle renditions use the stream session's segment list as well (link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043]).
 Once merged segment lists arrive, every stream session therefore uses 3 s slots.
 The period is a stream session's slot length: 3 s, or 6 s in a stream session that keeps 6 s segments under the interim rule below.
 On a plain grid, segment `N` starts at `N × period`.
@@ -326,18 +338,39 @@ If the merge gate fails, further research chooses the segment length.
 The server offers a stream copy only once it knows the source's keyframe positions (ADR 0032), and the server encodes the video until then.
 A stream copy uses those keyframe positions for its segment boundaries, its playlist durations and its seeks.
 
-Merged segment lists arrive with issue https://github.com/streamarr/streamarr-server/issues/512[streamarr/streamarr-server#512].
-Until then, an interim rule chooses each stream session's segments:
+Each `EXTINF` gives a segment's real duration, and `EXT-X-TARGETDURATION` covers the longest merged segment, as RFC 8216 requires.
+Everything that counts segments reads the segment list: the advertised media segment count, the resume and relocation offsets, the forward-relocation gap, a copy's segment sizes and peak segment bitrate (link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc[ADR 0054]), and the end of a short copy (link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052]).
+
+The server and the worker share one segment list, because each job attempt carries it in `TranscodeExecution.segment_start_slots`.
+The field lists each segment's start, counted in slots of the stream session's segment length (https://github.com/streamarr/streamarr-server/pull/723[streamarr/streamarr-server#723]).
+A job without a list uses the plain grid, so a stream session whose variants all encode sends none.
+A non-empty list holds one entry for each advertised media segment, starts at 0 and strictly increases.
+The worker refuses any other list with `JOB_ATTEMPT_FAILURE_INVALID_SPECIFICATION`.
+The worker forces encoded keyframes at the listed starts, and groups fragments and audio samples on the listed intervals.
+A merged segment is expected and never fails an attempt by itself.
+A keyframe that skips a listed segment still fails the attempt with `SKIPPED_SEGMENT_NUMBER`, because the server and the worker then disagree about the source's keyframes.
+Streamarr has no production instances, so the change makes no provision for workers of different versions.
+
+The segment cap, 128 MiB, is a constant of the worker contract that the server and the worker each fix in code, and no worker configures it.
+A merged segment can be long, so the server decides up front whether it fits.
+When ADR 0054's measurements give a merged segment's size, the server adds the segment's framing and compares the total with the segment cap when it creates the stream session.
+When a merged segment would exceed the segment cap, the server encodes the source from the start instead of copying it.
+When no measurement exists, a merged segment that grows past the segment cap fails the copy attempt with the named reason `EXCEEDS_SEGMENT_CAP`, and ADR 0052's fallback moves playback to an encode.
+No duration bound limits a merged segment.
+
+Until the server sends the segment list and the pinned worker image groups on it, an interim rule chooses each stream session's segments:
 
 * A stream session whose every variant is a stream copy keeps 6 s segments on the plain 6 s grid.
 * A stream session with any encoded variant uses the plain 3 s grid.
 * The server offers a stream copy only when every interval of the stream session's grid holds a source keyframe, except the final interval.
-Otherwise the server encodes that variant instead.
+Otherwise the server refuses stream copy with the reason `interval_without_keyframe` and encodes that variant instead.
 In a stream session with an encoded variant, the server therefore encodes the copied variant when the source's keyframes do not fit the 3 s grid.
 * When the grid's final interval holds no source keyframe, that interval joins the segment before it in every variant of the stream session.
 The stream session then advertises one segment fewer than the grid holds, and its last segment runs to the end of the media.
 That last segment can last up to twice the period: 12 s on the 6 s grid and 6 s on the 3 s grid.
 The playlist's target duration covers that segment, as RFC 8216 requires.
+
+Once the segment list ships, the server stops refusing stream copy with `interval_without_keyframe`, and its other stream copy refusals stay.
 
 *Why:* 3 s segments let a player start and seek sooner, because the producer encodes half as much media before the segment that the player waits for is complete.
 With 1080p libx264 at the `faster` preset, the decode-only early-start seek (<<decision-seek>>), the pinned FFmpeg 8.1.2 and 1 s fragments, a seek completed its first segment 1.28 s after FFmpeg started at 3 s segments, against 1.95 s at 6 s segments.
@@ -358,6 +391,21 @@ That file's final 6 s grid interval runs from 36 s to 36.023 s and holds no keyf
 Without the exemption, the server would encode that file although every full interval holds a keyframe.
 Streamarr adopts the exemption to learn how players handle the longer last segment, and will revisit it if players mishandle that segment.
 Evidence: https://github.com/streamarr/streamarr-server/issues/504[streamarr/streamarr-server#504], https://github.com/streamarr/streamarr-server/issues/512[streamarr/streamarr-server#512], https://github.com/streamarr/streamarr-server/pull/534[streamarr/streamarr-server#534].
+
+*Why the segment cap is checked up front, with no duration bound:* The interim refusal is common.
+libx264 and libx265 place a keyframe at least every 250 frames by default, which lasts 10.4 s at 23.976 frames per second.
+A static scene in an encode made with the default settings can therefore leave a 6 s interval without a keyframe, and leaves more 3 s intervals without one.
+Each refused source spends encoder capacity, and the viewer sees an encoded picture instead of the source's own.
+A copy that fails on the segment cap fails at the merged segment, which can lie deep into playback, and the viewer then sees a stall followed by a drop to an encode.
+Wherever ADR 0054's measurements give the merged segment's size, the server avoids that stall by encoding from the start.
+The worker's segment cap failure and ADR 0052's fallback catch a merged segment that no measurement covers.
+A duration bound would encode every source with long gaps between keyframes, although each such source copies bit for bit while its merged segments fit the segment cap.
+The server needs the worker's cap to decide up front, and a cap that each worker set would let a worker disagree with the server's own upload limit, which already decides what the server accepts.
+Jellyfin builds a copy's segments from the source's keyframes only for files whose extension its settings list, by default only `mkv`.
+Every other Jellyfin copy advertises equal-length segments, which differ from the segments that a copy cuts at the source's keyframes.
+Plex's transcoder has an option to cut a segment at a frame that is not a keyframe, and such a segment does not open at a keyframe.
+When Plex uses that option was not determined.
+Evidence: https://github.com/streamarr/streamarr-server/issues/512[streamarr/streamarr-server#512], https://github.com/streamarr/streamarr-server/pull/723[streamarr/streamarr-server#723], <<evidence-rivals>>.
 
 === Every encoder forces the boundary keyframes from a list
 
@@ -629,7 +677,9 @@ Multiplexed variant segments keep that audio.
 In a multiplexed variant, an attempt whose start sequence number is 0 therefore keeps the AAC priming frame in segment 0.
 link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043] states both rules in the same words.
 In every other attempt, an audio sample below the start sequence number is preroll, and the producer discards it.
-When the output ends, the last segment also takes every audio sample after its interval.
+No segment takes in an audio sample that starts after its interval, not even when the output ends.
+The segment that holds the last video keyframe therefore closes at its own interval's end and never takes in the audio after it.
+The producer delivers no audio sample that starts after the last segment it closes, and the attempt's report names each stream that still had media there (<<decision-early-ends>>).
 A late audio sample is one that arrives after the producer has closed its segment.
 The producer drops a late audio sample, counts it and continues the attempt.
 It never moves a late sample into a later segment.
@@ -669,7 +719,7 @@ A dropped late sample or a preroll sample does not count.
 The 1 s margin covers the remaining interleaving lag and one fragmentation target.
 Once the audio stops, the muxer holds the video for up to the 10 s interleave bound while it waits for audio.
 The worker's 1 s margin follows that wait.
-The 1 s margin is a safety net, because every stream that the probe shows ending early is padded (<<decision-early-ends>>).
+The 1 s margin is a safety net, because every stream that the probe shows ending early is padded, and every encode may carry the padding (<<decision-early-ends>>).
 The fragmentation target measurably shortens the lag before the closing keyframe arrives, but it is a target, not a guarantee.
 
 *Why:* Placing audio by the fragment that carried it made a stream-copy replacement attempt from an MPEG-TS source repeat ten AAC frames (213 ms) that the previous segment already held.
@@ -789,7 +839,7 @@ An attempt completes only when four facts hold, in whatever order they arrive:
 
 The producer fails the attempt when FFmpeg exits with a non-zero status, or when the server has not acknowledged every closed segment.
 It also fails the attempt when the <<decision-waits,exit wait>> expires.
-If FFmpeg exits with status 0 but produces no media segment, the attempt also fails, as it did with the previous worker.
+If FFmpeg exits with status 0 but produces no media segment, the attempt also fails, as it did with the previous worker, unless the attempt started after every source sample and reports that the source ended early (<<decision-early-ends>>).
 A completed attempt means that FFmpeg finished cleanly and the server accepted everything FFmpeg produced.
 The worker uses the media segment count to refuse a job that asks for no advertised segment, to end its list of forced keyframes, and to check whether the source ended before the last advertised segment.
 When an encoded variant's source ends early, the worker pads the remaining advertised segments and reports the early end (<<decision-early-ends>>).
@@ -800,31 +850,62 @@ The same rules apply when rounding the probed duration caused the playlist to ad
 [[decision-early-ends]]
 === Encoded output plays to the advertised end when a stream or the source ends early
 
-These rules apply to a stream that the probe shows ending at least one segment before another stream of the same source.
+A stream ends early when its end time falls at least one segment before another stream of the same source ends.
+The server reads each stream's end time from the probe, where the container header states it (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]).
+The probe never estimates an end time.
+When the header states none, the server learns the end time from the first job attempt that reads the stream's last sample.
+Every completed attempt reports the observed end of each chosen stream whose last sample it read: that sample's presentation time plus its duration.
+The server stores each learned end time beside the file's probe facts, apart from the probe outcome.
+A learned end time never rewrites a probe outcome, and a new probe outcome for the same source snapshot never discards it.
 
-* When an audio track ends at least one segment before the video, that audio track is encoded and padded with silence to the video's end.
-The track is encoded even when the stream session copies the video.
-An attempt that starts after the audio track's end encodes generated silence for that track.
+These rules apply to a stream that ends early:
+
+* When an audio stream ends at least one segment before the video, that audio stream is encoded and padded with silence up to the advertised end.
+The stream is encoded even when the stream session copies the video.
+An attempt that starts after the audio stream's end encodes generated silence for that stream.
 Every attempt therefore carries the same tracks, and no playlist needs `EXT-X-GAP`.
 An attempt that carries only generated silence writes the same initialization segment as the variant's other attempts, because the server's comparison stays strict.
-* When the video ends at least one segment before the audio, the video is encoded and holds its last frame until the audio ends.
+* When the video ends at least one segment before the audio, the video is encoded and holds its last picture up to the advertised end.
 The video is encoded even when the stream session would otherwise copy it.
+The held picture is the last picture that the video filters make from the source, after deinterlacing and scaling, repeated at the output frame rate.
+No repeated picture passes through the deinterlacer again.
+The encoder forces a keyframe at every segment start, so every segment after the video's end opens at a keyframe.
 
-Padding every encoded attempt's audio stays rejected under Rejected Alternatives.
+Every encode may carry the filters that hold the last picture and pad the audio, trimmed at the advertised end, whether or not the probe shows a stream ending early.
+A source that is shorter than its probe says, or whose header states no end time, is therefore padded inside the attempt that finds the early end, with no second attempt.
+No padded picture or audio frame starts at or after the advertised end.
+The last padded picture and the last padded audio frame keep their full durations, so a padded stream can end less than one frame after the advertised end.
+
+Padding is digital silence: samples of value zero in the encoder's input format, rate and layout, appended only after the stream's last source sample.
+Padding changes no sample that the source feeds the encoder.
+It adds no resampling, gain, dither, fade or crossfade, and it truncates nothing.
+Up to the source's real end, the encoder's input is identical to its input without padding.
+A lossless encode therefore decodes to the same samples as the encode without padding.
+A lossy encoder can code its last frames before the real end differently, because its lookahead sees silence instead of the end of its input.
+That change to the last decoded frames is the one loss that padding can cause.
+A copied stream stays bit-identical to the source and is never padded.
+
+Every media segment closes at its own interval's end (<<decision-audio>>).
+In an encode, the held picture's keyframes keep opening segments after the video's end, so each interval's audio goes into that interval's segment.
+Each segment's audio therefore stays within one interval, well inside the segment cap, however long the tail.
+No segment ever closes without a keyframe as an audio-only segment.
 
 A source can also end before the media segments that the playlist advertises, for example when the file is shorter than its probe says.
-When that happens, the worker fills an encoded variant's advertised segments past the real end with the last frame and silence.
+When that happens, the worker fills an encoded variant's advertised segments past the real end with the held picture and silence.
 Every advertised segment is served, and the player ends at the advertised end.
-For an encoded variant, "source ended early" is a typed report, not a failure.
-The attempt delivers every advertised segment, padded past the real end, and the report names the last segment that holds source frames.
-The server never starts an attempt past that segment.
+"Source ended early" is a typed report on a completed attempt, not a failure.
+The report names the last segment that holds source media, and it lists each stream that still had media that no delivered segment carries.
+The server spends no replacement attempt on an attempt that reports an early end, never treats it as a stall, and never starts an attempt past the last segment that holds source media.
 A padded segment answers a request past the real end.
-When no padded segment is stored yet, the server starts an attempt at the last segment that holds source frames, and that attempt pads forward.
+When no padded segment is stored yet, the server starts an attempt at the last segment that holds source media, and that attempt pads forward.
+An attempt that starts after every source sample anyway completes with the report, and never fails for want of a media segment.
 
 Padding past a source's real end applies to encoded variants only.
 A stream copy cannot be padded in its own codec.
 An encoded tail cannot join a stream copy either, because the server refuses an attempt whose initialization segment differs.
-A copied variant that runs short is therefore a format error when some source stream still has media after the copy's last segment.
+A copy's last segment closes at its interval's end, and the copy's report says whether a source stream still had media after that segment.
+That report settles the short-copy rule where the probe has no end time for the stream.
+A copied variant that runs short is a format error when some source stream still has media after the copy's last segment.
 When the whole source has ended by the copy's last segment, playback ends normally at the real end, with no encode and no format attempt (link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052]).
 The server tells the client where the real end is, and the client ends playback there.
 In Auto, the format recovery of https://github.com/streamarr/streamarr-server/issues/401[streamarr/streamarr-server#401] moves playback to an encoded stream session, which pads.
@@ -834,6 +915,8 @@ In each case, the encoded stream session pads.
 ADR 0032 trusts a container index only when the probe can read the last keyframe that the index lists.
 That check keeps a copy playlist from advertising past the real end, so this rule is a backstop.
 
+The job's instructions to hold the last picture and to pad the audio, the advertised end, and both reports are fields of the worker contract (https://github.com/streamarr/streamarr-server/pull/722[streamarr/streamarr-server#722]).
+
 *Why:* Matroska and MP4 let each track end on its own, and a muxer ends each track where that track's input ends.
 So an audio track can end a segment or more before the video, and the video can end a segment or more before the audio.
 Without padding, AVPlayer ended playback where the multiplexed audio ended in 12 of 12 runs, and WebKit's native player did so in 8 of 8 runs.
@@ -842,7 +925,33 @@ In a 64 s video with 84 s of audio, no keyframe opened the segments after the vi
 Answering 404 for those segments broke hls.js, AVPlayer and WebKit's native player.
 With a padded source standing in for the worker, a held last frame played to 84 s in hls.js in four browsers, in WebKit's native player and in AVPlayer, with two runs each.
 With audio renditions, AVPlayer played to the end with silence padding and with `EXT-X-GAP`, in 3 runs each, but `EXT-X-GAP` left hls.js stuck on the iPhone.
-Evidence: https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511].
+
+*Why every segment closes at its own interval's end:* When the segment that holds the last keyframe took in the audio after it, that segment held 24 s of audio in the 64 s case and the segments after it never arrived, although the attempt completed.
+With 1,764 s of 6-channel audio, that one segment held 1,704 s of audio and arrived after 44.7 s, past the 22 s that the server waits for a replacement attempt's first segment.
+A longer or richer tail exceeds the segment cap instead: 768 kb/s for 1,400 s is about 134 MB.
+
+*Why every encode may pad:* A source that ends before its probe says, or whose header states no end time, reveals its early end only while an attempt runs.
+Padding inside that attempt delivers every advertised segment without a second attempt.
+The padding is safe on every encode because it changes no sample that the source feeds the encoder.
+In the pinned worker image, a 20 s pink-noise source padded to 30 s fed the encoder 960,000 samples per channel identical to the source's, then only zeros.
+Its FLAC encode decoded to the same samples as the encode without padding and as the source, and AC-3 and E-AC-3 encodes decoded identically up to the real end.
+The AAC encode differed only in its last 32 ms before the real end, by at most 704 of 32,768.
+The held picture of a 64 s video scaled before the hold repeated its last scaled picture 144 times up to a 70 s advertised end, and the 1,536 pictures before it were identical to the encode without the hold.
+
+*Why an end time is learned, and kept apart from the probe outcome:* The probe reads a stream's end time only where the container header states it, and a job attempt that reaches a stream's end observes it at no extra cost.
+A learned end time is an observation of playback, not a probe fact, so it must not rewrite a probe outcome or vanish when a probe runs again.
+
+*Why padding also fixes an initialization segment:* Without padding, an attempt that copied or encoded AC-3 or E-AC-3 audio and started after the source audio's end wrote an `moov` box of size zero, because the mp4 muxer cannot write that sample entry without a packet.
+FFmpeg exited 0, and ffprobe could not read the result.
+The worker already refuses that output and fails the attempt (https://github.com/streamarr/streamarr-transcode-worker/pull/131[streamarr/streamarr-transcode-worker#131]).
+An attempt that encodes generated silence has a packet to describe, so its initialization segment is readable.
+
+*Why Jellyfin and Plex fall short:* Jellyfin never pads a stream that ends early, and its encoder arguments carry no `apad` or `tpad` filter.
+Jellyfin cuts segments with FFmpeg's HLS muxer, which splits a segment only at a video keyframe when the output has video.
+After a seek past the video's end, that FFmpeg writes at most one segment, which holds the whole remaining audio, and exits.
+Jellyfin answers a request for any later segment with the missing file, so playback after such a seek fails.
+Neither filter's name appears in the Plex Media Server binary's strings.
+Evidence: https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511], <<evidence-early-audio>>, <<evidence-rivals>>.
 
 === A stop ends the attempt for good
 
@@ -1104,6 +1213,11 @@ With the previous producer, that segment lost 2 s of video, and Chromium, WebKit
 With rebuilt segments, none of them lost a frame there.
 * A source whose audio or video ends at least one segment early plays to its end in every player, because the early-ending stream is encoded and padded.
 A stream session that copies such a source's video still encodes an early-ending audio track, and it encodes early-ending video.
+* A lossy encode that carries the padding can code its last frames before the source's real end differently, so its last decoded frame can differ from the encode without padding.
+A lossless encode decodes to the same samples, and a copy is never padded.
+* No segment holds more than its own interval's media, so the segment that holds the last keyframe arrives on time whatever the tail's length.
+* The server stores a learned end time for each stream whose header states none, beside the probe facts and apart from the probe outcome.
+* An attempt that reports an early end costs no replacement attempt, and an attempt that starts after every source sample completes instead of failing.
 * An encoded variant delivers every advertised segment, even past a source's real end, and a copied variant that runs short becomes a format error, unless the whole source has ended, in which case playback ends normally at the real end (ADR 0052).
 * A source whose audio ends before its video delivers every segment at the pace of its video.
 When the attempt encodes that audio, the producer drops the frames FFmpeg flushes after their segment was delivered.
@@ -1125,6 +1239,8 @@ The frame-count GOP and the output rate therefore cannot disagree.
 At 3 s segments the server must hold every segment request for less than 3 s, because macOS AVPlayer abandons a request after one target duration without a byte.
 * Until merged segment lists arrive, a stream session that only copies keeps 6 s segments, and a copied variant in a stream session that also encodes is encoded when its keyframes do not fit the 3 s grid.
 Once merged segment lists arrive, every stream session uses 3 s slots, and a stream copy's playlist advertises segments of different lengths.
+* A source whose keyframes lie further apart than one segment is copied instead of encoded, unless a measured merged segment would exceed the segment cap.
+Before ADR 0054's measurements exist, a copy whose merged segment exceeds the segment cap fails at that segment and falls back to an encode under ADR 0052.
 * In a stream session with a copied variant, every variant's last segment can last up to twice the period when the grid's final interval holds no source keyframe.
 * The server encodes a source until it knows the source's keyframe positions, so a file without a usable container index is encoded until its keyframe scan finishes.
 * A keyframe-verified encoder's segments hold one keyframe instead of the two that most segments hold under the floored GOP.
@@ -1141,7 +1257,8 @@ Tests check the recordings to catch that regression when FFmpeg is updated under
 A junction between two attempts at any listed boundary after a replacement attempt's first junction therefore neither drops nor repeats a frame.
 The expression had put shared boundaries one or two frames apart, and the floored GOP's extra keyframe had hidden that difference.
 * The worker contract gains `TranscodeExecution.media_segment_count`, the advertised count.
-When merged segment lists arrive with https://github.com/streamarr/streamarr-server/issues/512[streamarr/streamarr-server#512], the worker contract also gains the segment list's starts.
+It also gains the segment list's starts, `TranscodeExecution.segment_start_slots` (https://github.com/streamarr/streamarr-server/issues/512[streamarr/streamarr-server#512]), and it states the segment cap, 128 MiB, as a constant.
+For streams that end early, it gains the instructions to hold the last picture and to pad the audio, the advertised end, and the reports of each stream's end and of a source that ended early (https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511]).
 The server still handles requests for advertised segments that the worker did not produce, under ADR 0019.
 * An FFmpeg command line carries its keyframe times in one argument, up to Linux's per-argument limit, and FFmpeg parses that argument in no measurable time.
 * SVT-AV1 attempts in the pinned runtime still fail under CPU contention, as the study found.
@@ -1225,10 +1342,17 @@ Those held segments then outgrow the producer's budget, and a replacement attemp
 `delay_moov` writes nothing until every track has a sample, so a stream copy whose encoded audio starts at the seek point puts that keyframe mid-fragment.
 * Failing the attempt on a late audio sample fails every attempt that encodes audio ending long before its video.
 Each replacement attempt meets the same flush at the end of its input, so none could complete.
-* Padding the audio to the video's length and stopping at the shortest stream would change every encoded attempt's audio.
+* Padding the audio to the video's length and stopping at the shortest stream would tie the output's end to the video's end instead of the advertised end, and would drop audio that outlasts the video.
 It cannot apply to copied audio, and FFmpeg still gives no signal that a stream has ended.
-This rejection covers padding every attempt's audio.
-An audio track that the probe shows ending at least one segment early is still encoded and padded (<<decision-early-ends>>).
+This rejection once covered padding every attempt's audio.
+It now covers only stopping at the shortest stream: every encode may carry padding trimmed at the advertised end, because padding changes no sample that the source feeds the encoder (<<decision-early-ends>>).
+* Padding only the streams that the probe shows ending early leaves a source that ends before its probe says, or whose header states no end time, without padded segments.
+The server would need a second attempt to pad what the first attempt found.
+* Letting the segment that holds the last video keyframe take in every later audio sample held 1,704 s of audio in one segment, which arrived after 44.7 s.
+The server replaced the attempt before that segment arrived, and a longer or richer tail exceeds the segment cap.
+* Leaving streams unpadded, as Jellyfin does, left the segments after the video's end undelivered, and playback after a seek past the video's end failed.
+* Storing a learned end time in the probe outcome would rewrite a probe fact with an observation of playback, and the next probe of the same source would discard it.
+* Reading each file to its end in the probe to find every stream's end would read the whole file for a fact that the first attempt past the end observes at no extra cost.
 * Marking the segments after an audio track's end with `EXT-X-GAP` left hls.js stuck on the iPhone.
 * Padding a copied audio track with silence in its own codec, without encoding the track, would join encoder-made silence to copied frames.
 An attempt that starts after the track's end would carry only that silence, and its initialization segment would differ from the copied one, which the server refuses.
@@ -1276,6 +1400,15 @@ WebKit kept 1080p in only 4 of 15 sessions, and hls.js in Chromium held 1080p fo
 At equal VMAF, 2 s segments needed 6.0 to 16.4 % more bitrate than 6 s segments, against 2.9 to 7.7 % more for 3 s segments.
 * Measuring the library's keyframe spacing before choosing a stream copy's segment length would delay a choice that the spacing no longer decides.
 Merged segment lists let every stream session use 3 s slots without encoding more sources, whatever the spacing is.
+* Bounding a merged segment's duration would encode every source with long gaps between keyframes, although each such source copies bit for bit while its merged segments fit the segment cap.
+* Checking a merged segment against the segment cap only in the worker, even when a measurement gives its size, would fail the copy at that segment, deep into playback, with a stall and a drop to an encode.
+* Letting each worker set and register its own segment cap would let a worker disagree with the server's upload limit, which already decides what the server accepts.
+Every worker would report the same constant.
+* Cutting a copy's segment at a frame that is not a keyframe, as Plex's transcoder can, breaks the rule that every segment's video opens at a keyframe.
+* Advertising equal-length segments for a copy, as Jellyfin does for every file outside its `mkv` default, advertises durations that differ from the segments that the copy cuts at the source's keyframes.
+* Giving each variant or rendition its own segment list would stop a player from switching variants or renditions at every segment boundary.
+* Supporting workers of different versions in one fleet adds a rule for a fleet that does not exist, because Streamarr has no production instances.
+* Keeping the refusal `interval_without_keyframe` encodes every source whose keyframes lie further apart than one segment, which libx264's and libx265's default settings make common.
 * Requiring a source keyframe in the grid's final interval as well, the interim rule that this decision first accepted, would encode ordinary sources.
 AAC priming makes a container run about 23 ms past its video.
 A source whose video ends on a period boundary therefore leaves a final interval of about 23 ms, and that interval holds no keyframe.
@@ -1787,6 +1920,41 @@ The only samples left out were the dropped late audio.
 * The player runs on these streams were paused after 1 of 24 planned runs.
 That run, the previous producer's copy in Chromium with hls.js, played to the end at 84.08 s without a stall.
 
+[[evidence-padding]]
+=== Padding and the segment that holds the last keyframe
+
+* A synthetic source carried H.264 at 64x36 and 24 fps with a keyframe every 2 s, 64 s of video and 84 s of pink-noise AAC, cut into 6 s segments under FFmpeg n9.0.2.
+An encode from segment 0 delivered segments 0 to 9 normally.
+Segment 10 held 96 video packets, 60 to 64 s, and 1,125 audio packets, 60 to 84 s.
+Segments 11 to 13 never arrived, yet the attempt reported that it completed.
+* An encode from segment 10 delivered only the same oversized segment 10, and an encode from segment 11 failed after 0.6 s for want of a media segment.
+A copy from segment 10 delivered the same oversized segment 10.
+* With 1,764 s of 6-channel audio at 384 kb/s, an encode from segment 10 delivered segment 10 after 44.7 s, holding 79,875 audio packets from 60 to 1,764 s.
+* In the pinned worker image, FFmpeg 8.1.3 padded a 20 s stereo pink-noise source at 48 kHz with `apad` and trimmed it at a 30 s advertised end with `atrim`.
+The encoder's input held the source's 960,000 samples per channel unchanged, followed only by zeros.
+* FLAC with and without padding decoded to the same samples up to the real end, and both matched the source.
+AC-3 and E-AC-3 decoded to the same samples up to the real end, with and without padding.
+AAC differed in 2,988 sample values across its two channels, all within the last 32 ms before the real end, by at most 704 of 32,768.
+* After the real end, the lossy decodes rang for less than 10 ms and then held within one least significant bit of zero at 16 bits.
+The FLAC decode held exact zeros.
+* A 64 s, 24 fps video scaled to 160x90 and held with `tpad` in clone mode, trimmed at a 70 s advertised end, gave 1,680 pictures.
+The first 1,536 matched the scaled video without the hold, and the other 144 repeated its last picture.
+* With the pinned FFmpeg 8.1.3, an attempt that encoded or copied AC-3 or E-AC-3 audio and started after the source audio's end wrote an `moov` box of size zero and exited 0.
+A TrueHD, DTS or FLAC copy stayed readable.
+The worker refuses the unsized `moov` and fails the attempt, and nothing is uploaded (https://github.com/streamarr/streamarr-transcode-worker/pull/131[streamarr/streamarr-transcode-worker#131]).
+
+[[evidence-rivals]]
+=== Jellyfin and Plex
+
+* Jellyfin at commit `ed211765c2` builds a copy's segments from keyframes only when the file's extension is in `AllowOnDemandMetadataBasedKeyframeExtractionForExtensions`, whose default is `mkv` (`EncodingOptions.cs`, `DynamicHlsPlaylistGenerator.CreateMainPlaylist` and `IsExtractionAllowedForFile`).
+It reads those keyframes only with its Matroska extractor, and every other playlist advertises equal-length segments (`ComputeEqualLengthSegments`).
+* No Jellyfin encoder argument carries `apad` or `tpad`.
+Jellyfin runs FFmpeg's HLS muxer without `split_by_time`, and that muxer splits a segment only at a video keyframe when the output has video (`hlsenc.c`).
+When the FFmpeg it started has exited without writing the requested segment, Jellyfin serves the missing path (`DynamicHlsController.GetSegmentResult`).
+* FFmpeg's segment muxer has the option `break_non_keyframes`, which ends a segment at a frame that is not a keyframe, and Plex Media Server 1.43.5's FFmpeg fork adds the same option to its DASH muxer (`segment.c`, `dashenc.c`).
+The server binary's strings name `-break_non_keyframes`, but when the server passes it was not determined.
+Neither `apad` nor `tpad` appears in the server binary's strings.
+
 == References
 
 * Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/36[#36], worker PR https://github.com/streamarr/streamarr-transcode-worker/pull/38[#38], worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/1[#1] (transferred from streamarr-server issue https://github.com/streamarr/streamarr-server/issues/253[#253]).
@@ -1809,6 +1977,11 @@ The Node recorder that made them (`src/test/fmp4-recorder`) runs in CI without F
 * Issue https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511], which pads streams and sources that end early and reports an early end.
 * Issue https://github.com/streamarr/streamarr-server/issues/504[streamarr/streamarr-server#504], which moves encoded variants to 3 s segments behind the Apple TV merge gate.
 * Issue https://github.com/streamarr/streamarr-server/issues/512[streamarr/streamarr-server#512], which builds each stream session's segment list from 3 s slots and merges slots without a source keyframe.
+* Pull request https://github.com/streamarr/streamarr-server/pull/722[streamarr/streamarr-server#722], which publishes the instructions to hold the last picture and to pad the audio, the advertised end, and the reports of each stream's end and of a source that ended early.
+* Pull request https://github.com/streamarr/streamarr-server/pull/723[streamarr/streamarr-server#723], which publishes the job's segment list and states the segment cap as a contract constant.
+* Worker pull request https://github.com/streamarr/streamarr-transcode-worker/pull/131[streamarr/streamarr-transcode-worker#131], whose smoke test pins the failure of an AC-3 or E-AC-3 attempt that starts after the audio's end.
+* Jellyfin at commit https://github.com/jellyfin/jellyfin/tree/ed211765c2[`ed211765c2`]: `src/Jellyfin.MediaEncoding.Hls/Playlist/DynamicHlsPlaylistGenerator.cs`, `MediaBrowser.Model/Configuration/EncodingOptions.cs` and `Jellyfin.Api/Controllers/DynamicHlsController.cs`.
+* The Plex Media Server 1.43.5 transcoder source release and the strings of its server binary.
 * Pull request https://github.com/streamarr/streamarr-server/pull/534[streamarr/streamarr-server#534], which advertises each stream copy segment's real duration and joins a final grid interval without a source keyframe to the segment before it.
 * Issue https://github.com/streamarr/streamarr-server/issues/446[streamarr/streamarr-server#446], which has the server refuse a stream session that would encode video without a usable frame rate.
 * Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/24[streamarr/streamarr-transcode-worker#24], which reports probe version 4 and runs the frame-rate rule in the probe job.

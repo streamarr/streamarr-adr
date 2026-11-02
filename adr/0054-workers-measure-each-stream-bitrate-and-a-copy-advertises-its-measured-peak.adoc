@@ -14,6 +14,7 @@ This decision adds Matroska statistics tags to the probe facts, so the probe ver
 This decision amends link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] (<<amends-0037>>).
 The layout of a delivered media segment becomes part of the worker contract.
 A video copy keeps the source's length-prefixed samples unless the source can keep its parameter sets in its samples or the source's record header disagrees with its parameter sets.
+An amendment has the same scan measure what a FLAC encode of each audio track writes, for a file with a lossless audio track (<<lossless-audio-measurement>>).
 
 == Context
 
@@ -160,7 +161,7 @@ Rejecting fresh tags costs only time, while trusting stale tags costs a wrong co
 
 A bitrate scan is a durable background step, like ADR 0032's keyframe packet scan.
 The worker runs every process of a bitrate scan at the lowest CPU priority.
-The worker reads packets with ffprobe and decodes no frame.
+The worker reads packets with ffprobe and decodes no video frame.
 
 A bitrate scan uses the keyframe packet scan capacity.
 That capacity is 0 while the worker runs any job attempt (ADR 0032).
@@ -206,12 +207,31 @@ A whole-file scan also needs an idle gap as long as the whole read.
 On a busy server, a large file could wait for such a gap forever.
 A chunk needs an idle gap of a few seconds only.
 
-The bitrate scan runs only for a file whose chosen video stream the server could copy for some client.
-Such a file has known keyframe positions and a codec family that fMP4 HLS carries.
+The bitrate scan runs only for a file whose chosen video stream the server could copy for some client, or that holds a lossless audio track (<<lossless-audio-measurement>>).
+A file whose video the server could copy has known keyframe positions and a codec family that fMP4 HLS carries.
 The server sends the bitrate scans of files whose chosen video stream has no probed bitrate first.
 The server sends the bitrate scans of files whose chosen video stream has a probed bitrate, such as one from trusted statistics tags, after those files.
 A file with a usable measurement gets no bitrate scan.
 A file whose measurement is unavailable gets no bitrate scan until the file's source changes or the measurement version rises.
+
+[[lossless-audio-measurement]]
+=== A bitrate scan also measures the FLAC encode of each audio track of a file with a lossless track
+
+For a file that holds a lossless audio track, the bitrate scan also measures what a FLAC encode of each of the file's audio tracks writes (link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043]).
+A lossless track is TrueHD, DTS-HD MA, PCM, FLAC or ALAC.
+In each chunk, the worker decodes each audio track and encodes it to FLAC as a job attempt would, at the depth, sample rate and layout that ADR 0043 gives, and keeps none of the output.
+It reports the FLAC bytes and frames of each keyframe interval, as it does for a copied audio stream.
+The server then counts a FLAC encode's average and peak from those bytes, as it counts a copied audio rendition, and an ALAC encode at 5 % more.
+Without that measurement, a FLAC or ALAC encode counts 65 % of its PCM bitrate and peaks at the full rate, as ADR 0043 decides.
+The audio measurement runs even when the file's video cannot be copied, because a FLAC encode's count bounds encoded variants too.
+
+*Why:* A FLAC encode of lossy audio follows the decoded audio, not the PCM bitrate.
+FLAC of a 128 kb/s AAC commentary counts 998 kb/s at 65 % of its 16-bit PCM bitrate, but wrote 193 kb/s.
+Beside a copied 644 kb/s FLAC default track, that count makes the commentary the step track of ADR 0050.
+With the 360p tier's 800 kb/s, a maximum bitrate from 1,444 to 1,798 kb/s then takes AAC stereo at 128 kb/s, where the measured bytes keep the lossless default track.
+A file without a lossless track never gets a FLAC encode, because only a lossless default track, or a FLAC or ALAC copy, makes FLAC or ALAC the session's codec.
+Decoding and encoding to FLAC cost 0.28 s of CPU per 30 s of AC-3 5.1 and 1.13 s per 30 s of TrueHD 5.1, about 110 and 27 times real time on one core.
+ALAC wrote 2 to 5 % more than FLAC of the same audio (ADR 0043).
 
 [[keyframe-packet-scan-measures]]
 === A keyframe packet scan also measures the file
@@ -314,7 +334,7 @@ A copied audio rendition counts the rendition's average segment bit rate.
 An encoded audio rendition counts the encoded audio's bitrate plus the encoded audio's framing, which <<segment-framing>> counts as for a copied audio track.
 The number of encoded frames is the media playlist's duration × the sample rate, plus the encoder's priming samples, divided by the frame size and rounded up.
 The encoded audio's bitrate stays an estimate of the encoded audio's bytes.
-A FLAC or ALAC encode has no target bitrate, so its bitrate is 65 % of its output's PCM bitrate (link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043]).
+A FLAC or ALAC encode has no target bitrate, so its bitrate is its measured bitrate (<<lossless-audio-measurement>>), or 65 % of its output's PCM bitrate without a measurement (link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043]).
 The viewer's maximum bitrate bounds that cost.
 `AVERAGE-BANDWIDTH` advertises that cost.
 
@@ -326,7 +346,8 @@ An audio sample joins the segment whose interval holds the sample's start, in a 
 So a segment's audio follows the segment's interval, not the keyframe intervals that the segment's video spans.
 The server bounds a segment's audio bytes and audio samples by the keyframe intervals that overlap the segment's interval, widened by one audio frame on each side.
 An encoded audio rendition's segment holds the encoded audio of the segment's interval at 1.2 × the encoded audio's bitrate, plus its framing, and its peak follows the same rule.
-A FLAC or ALAC rendition's segment instead holds the segment's interval, widened by one encoded frame, at the full PCM bitrate, because the PCM bitrate is the only bound on a lossless frame (ADR 0043).
+A FLAC or ALAC rendition with a measurement follows its measured bytes like a copied audio rendition.
+Without a measurement, its segment holds the segment's interval, widened by one encoded frame, at the full PCM bitrate, because the PCM bitrate is the only bound on a lossless frame (ADR 0043).
 Each peak, like each average, counts the segment framing that the delivered segments carry.
 
 Until the server holds a measurement, a video copy costs the unmeasured cost.
@@ -334,7 +355,7 @@ The unmeasured cost is the copied video's probed bitrate plus the stream session
 Without a probed bitrate, the unmeasured cost is the container-based cost that ADR 0050 gives.
 A copy without a peak advertises `BANDWIDTH` as 1.2 × `AVERAGE-BANDWIDTH`, as ADR 0044 does for encoded variants.
 When any audio rendition of the stream session is a FLAC or ALAC encode, such a `BANDWIDTH` instead adds the largest peak among the audio renditions to 1.2 × the rest of `AVERAGE-BANDWIDTH`, in a copy without a peak and in an encoded variant alike (ADR 0043).
-There a FLAC or ALAC encode peaks at its full PCM bitrate, a copied rendition at its measured peak when the server holds one, and every other rendition at 1.2 × its counted bitrate.
+There a FLAC or ALAC encode peaks at its measured peak, or at its full PCM bitrate without a measurement, a copied rendition at its measured peak when the server holds one, and every other rendition at 1.2 × its counted bitrate.
 
 *Why:* An encoded variant's bitrate is a cap that the encoder holds, so the encoded variant's average stays close to that bitrate.
 A video copy's peak can be several times the copy's average.

@@ -921,10 +921,21 @@ A learned end time never rewrites a probe outcome, and a new probe outcome for t
 A changed source snapshot discards it, with the stored outcome and its stream rows, because the server can't tell a re-mux from a tag edit.
 
 An attempt that starts after a stream's unknown end reads no sample of that stream, so it learns no end time this way.
-When such an attempt fails because a chosen stream delivered no packet, such as the AC-3 or E-AC-3 attempt whose initialization segment comes out empty (<<evidence-padding>>), its typed failure names that stream and the time from which the attempt read.
-The server stores that time as the stream's learned end bound, under the same snapshot fence as a learned end time, and every later attempt that starts at or after the bound encodes generated silence for the stream.
-When the stream session copies that stream, generated silence can't join the copy, so the server moves playback to a stream session that encodes the stream, by the format recovery that a copied variant that runs short takes (link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052]).
-The tests of https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511] resume a source with an AC-3 track whose header states no end at a point past that track's end, and check that playback continues with silence after at most one failed attempt.
+It reports instead that the stream delivered no sample from the position where it began reading, and names the stream and that position.
+The server stores that position as the stream's learned end bound, under the same snapshot fence as a learned end time.
+An audio stream whose learned end bound lies at least one segment before the video's end ends early under the rules below.
+An encode that pads the stream stands in for it.
+Its audio carries generated silence from the attempt's first segment, with the same initialization segment as the variant's other attempts, so the attempt completes and carries the report.
+An attempt that can't stand in for the stream fails with a typed failure that carries the same report.
+A copy of the stream can't stand in for it, because generated silence or a held picture can't join a copy.
+That includes the AC-3 or E-AC-3 copy whose initialization segment comes out empty (<<evidence-padding>>).
+An encode of the stream without padding can't stand in for it either.
+After that failure, the server starts an attempt that pads the stream.
+When the stream session encodes the stream, the replacement attempt pads it.
+When the stream session copies the stream, the server moves playback to a stream session that encodes and pads it, by the format recovery that a copied variant that runs short takes (link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052]).
+The tests of https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511] resume a source with an AC-3 track whose header states no end at a point past that track's end.
+In a stream session that encodes the track, playback continues with silence and no failed attempt.
+In one that copies the track, playback continues with silence after one failed attempt.
 
 A learned end time belongs to the source snapshot that the attempt read.
 Each job attempt carries the source snapshot of the probe outcome that its stream session was built from (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]).
@@ -948,6 +959,10 @@ No repeated picture passes through the deinterlacer again.
 The encoder forces a keyframe at every segment start, so every segment after the video's end opens at a keyframe.
 An attempt that starts after segment 0 in a held encode seeks to the last stored source keyframe at or before 0.5 s ahead of the earlier of its first segment's start and the video's last keyframe, the shape that a copy's seek already has.
 So an attempt that starts past the video's end still decodes the last picture, even in a source with no index, such as MPEG-TS, or one that is cut short.
+Until an index-less source's keyframe scan finishes, the server stores no keyframe for it and sends the fixed read-back instead (<<decision-seek>>).
+A held encode whose read-back lies past the video's last frame decodes no picture to hold, so it can't stand in for the video.
+It fails with the typed failure above, and the server stores the video's end bound.
+A replacement attempt reads from the same read-back and fails the same way until the scan publishes keyframe positions.
 
 Every encode may carry the filters that hold the last picture and pad the audio, trimmed at the advertised end, whether or not the probe shows a stream ending early.
 A source that is shorter than its probe says, or whose header states no end time, is therefore padded inside the attempt that finds the early end, with no second attempt.
@@ -993,7 +1008,7 @@ In each case, the encoded stream session pads.
 ADR 0032 trusts a container index only when the probe can read the last keyframe that the index lists.
 That check keeps a copy playlist from advertising past the real end, so this rule is a backstop.
 
-The job's instructions to hold the last picture and to pad the audio, the advertised end, and both reports are fields of the worker contract (https://github.com/streamarr/streamarr-server/pull/722[streamarr/streamarr-server#722]).
+The job's instructions to hold the last picture and to pad the audio, the advertised end, both reports on a completed attempt, the report of a stream that delivered no sample and its typed failure are fields of the worker contract (https://github.com/streamarr/streamarr-server/pull/722[streamarr/streamarr-server#722]).
 
 *Why:* Matroska and MP4 let each track end on its own, and a muxer ends each track where that track's input ends.
 So an audio track can end a segment or more before the video, and the video can end a segment or more before the audio.
@@ -1443,6 +1458,8 @@ The server replaced the attempt before that segment arrived, and a longer or ric
 * Storing a learned end time in the probe outcome would rewrite a probe fact with an observation of playback, and the next probe of the same source would discard it.
 * Discarding learned end times on a snapshot change without checking each report's snapshot at the write would let a late report from the replaced file write its ends onto the new file.
 * Reading each file to its end in the probe to find every stream's end would read the whole file for a fact that the first attempt past the end observes at no extra cost.
+* Failing every attempt whose chosen stream delivered no sample, an encode that pads the stream included, would spend a failed attempt where the worker can already generate the silence that the next attempt would carry.
+* Reporting a stream that delivered no sample as a plain transcode failure leaves the server without the stream and the read position, so each replacement attempt repeats the same read and the server never learns that it must pad.
 * Marking the segments after an audio track's end with `EXT-X-GAP` left hls.js stuck on the iPhone.
 * Padding a copied audio track with silence in its own codec, without encoding the track, would join encoder-made silence to copied frames.
 An attempt that starts after the track's end would carry only that silence, and its initialization segment would differ from the copied one, which the server refuses.

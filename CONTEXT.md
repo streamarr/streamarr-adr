@@ -177,9 +177,9 @@ Outside Original, a video copy costs its video plus the session's audio, and the
 _Avoid_: client capabilities (what the player can decode), quality cap
 
 **Audio step**:
-One audio codec, channel layout and bitrate that the server can deliver in place of the stream session's audio under the viewer's maximum bitrate: the session's own audio first, then multichannel steps at lower bitrates, then AAC stereo at 128, 96 and 64 kb/s, or AAC mono at 64 kb/s for a mono track or when no AAC entry for HLS accepts more than one channel.
+One audio codec, channel layout and bitrate that the server can deliver in place of the stream session's audio under the viewer's maximum bitrate: the session's own audio first, then a lower-rate step for a FLAC or ALAC rendition above 48 kHz (ADR 0043), then multichannel steps at lower bitrates, then AAC stereo at 128, 96 and 64 kb/s, or AAC mono at 64 kb/s for a mono track or when no AAC entry for HLS accepts more than one channel.
 Multichannel steps keep the codec and channel layout of the step track's encode, or of the E-AC-3, AC-3 or AAC encode that the server would choose when that encode is FLAC, ALAC or Opus.
-A copied track in a codec with steps of its own (AAC, AC-3 or E-AC-3) adds steps in its own codec, up to 5.1; a copied AAC track above 5.1 steps through AAC 5.1 at 320 kb/s, because an AAC encode has at most six channels.
+A copied track in a codec with multichannel steps of its own (AAC, AC-3 or E-AC-3) adds steps in its own codec, up to 5.1; a copied AAC track above 5.1 steps through AAC 5.1 at 320 kb/s, because an AAC encode has at most six channels.
 A step keeps a track's 3 or 4 channels only in a layout that the step's codec carries exactly: `3.0` or `4.0` in AAC, and `2.1`, `3.0`, `4.0` or the one 2/2 mode of `quad` and `quad(side)` in AC-3 and E-AC-3; any other or unknown layout steps to stereo.
 All of these steps run from the highest bitrate to the lowest.
 The server steps down to fit the 360p tier or a video copy, and takes a lower multichannel step when it lets a larger picture fit.

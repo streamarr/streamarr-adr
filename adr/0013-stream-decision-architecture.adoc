@@ -43,6 +43,17 @@ FFmpeg's HEVC decoder ignores such RPUs, so before this amendment the encode of 
 The worker moves them in a fragmented MP4 copy of the source, as probe version 5's RPU placement directs.
 The worker moves the RPUs only when the probe saw a presentation time on every one of the source's first packets (<<reshape-rpus-starting-samples>>).
 
+A third amendment decides the video decision for HDR output.
+Issue https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396] delivers the third amendment, and the interim copy rule ends when it ships.
+Every copy then plans an output range, and a copy of an untagged source plans SDR (<<copy-planned-range>>).
+The server copies PQ, HLG and Dolby Vision only to a client that declares them, and it picks one output for each client and format attempt (<<hdr-copies>>).
+The decision sets the Dolby Vision level of every Dolby Vision copy (<<dolby-vision-level>>).
+A profile 5 copy needs a genuine `dvh1` output, and the server encodes profile 10.0 for now (<<no-compatible-base-copies>>).
+An HDR copy whose frame rate is unknown announces its range without `FRAME-RATE` (<<hdr-frame-rate>>).
+The viewer chooses HDR or SDR in a fixed quality, and Original always plays the source's range (<<hdr-choice>>).
+The decision names why the server did not copy (<<copy-refusals>>).
+link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] records the bitstream rewrites that a copy can carry.
+
 == Context
 
 Streaming negotiates source media (ffprobe) against client capabilities (StreamingOptions).
@@ -367,7 +378,8 @@ Every video copy runs with FFmpeg's `-strict unofficial` option.
 The `-strict unofficial` option keeps the Dolby Vision configuration record wherever the pinned FFmpeg build allows the record.
 The pinned build drops the record from every 10-bit Dolby Vision profile 8.2 copy.
 The pinned build also drops the record from every Dolby Vision profile 5 copy whose sample-entry tag is `hev1`.
-Streamarr accepts both losses.
+Streamarr accepts the profile 8.2 loss.
+For profile 5, the worker writes the record itself, and the server copies profile 5 only as a genuine `dvh1` output (<<no-compatible-base-copies>>).
 
 *Why:* The constant strings matched the produced media in 6 of 59 video copies.
 Strings computed from the decoder configuration record matched 54 of 59 video copies and 42 of 42 audio copies.
@@ -441,16 +453,24 @@ Original and a fixed quality are manual choices, and the server never silently r
 In both, the client tells the viewer about the replacement, so the replacement is visible (ADR 0052).
 In Original, the client also shows Auto as the selected choice.
 
-=== A stream copy carries no planned output range yet
+[[copy-planned-range]]
+=== A stream copy plans its output range, and a copy of an untagged source plans SDR
 
-At first, only an encode's planned output holds a dynamic range.
-A copy's planned output holds no dynamic range until https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396] settles one.
-link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] forbids `UNSPECIFIED` in a planned output.
-For a copy of an untagged source, `UNSPECIFIED` is the only honest value.
-The produced copy still passes the source's HDR features through unchanged, as link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] requires.
-The playlist entry of a Dolby Vision copy with an SDR compatible base still declares `VIDEO-RANGE=SDR`.
-The playlist takes that `SDR` value from the source's compatible base.
-The copy's planned output still holds no dynamic range.
+Every copy's planned output holds a dynamic range.
+A copy plans the range that it produces.
+That range is the source's compatible base, with Dolby Vision and HDR10+ as the copy keeps or strips them (link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc#decision-bitstream-rewrites[ADR 0036]).
+A copy of a source whose compatible base is `UNSPECIFIED` plans `SDR`.
+The playlist entry of that copy still announces no `VIDEO-RANGE`, and HLS reads a missing `VIDEO-RANGE` as SDR.
+link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] forbids `UNSPECIFIED` in a planned output, and the server keeps checking that rule once copies plan a range.
+A copy's planned output also holds the typed codec profile and level that probe version 5 reports, beside the codec string.
+The decision also carries the viewer's HDR choice (<<hdr-choice>>), the output bit depth and the chroma subsampling.
+
+Until https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396] ships, only an encode's planned output holds a dynamic range.
+Until then, the playlist entry of a Dolby Vision copy with an SDR compatible base takes its `VIDEO-RANGE=SDR` from the source's compatible base.
+
+*Why:* link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc#decision-unknown-values[ADR 0049] already lets an `UNSPECIFIED` compatible base fit a capability entry that accepts `SDR`.
+Players show an untagged stream as BT.709.
+Untagged files therefore keep playing as copies, as they do under the interim copy rule.
 
 === Until the playlist can describe HDR copies, only SDR sources are copied
 
@@ -532,22 +552,158 @@ When the playlist declared the variant PQ or HLG, AVPlayer without an HDR displa
 WebKit's native player timed out on that variant.
 Evidence: <<evidence-copies>>.
 
+[[hdr-copies]]
+=== Once the playlist describes HDR copies, the server copies the best picture that the client declares
+
+Issue https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396] ends the interim copy rule.
+From then on, the server plans a PQ, HLG or Dolby Vision copy only for a client with one capability entry that accepts that output (link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc#decision-playlist[ADR 0049]).
+The playlist builds `VIDEO-RANGE` and `SUPPLEMENTAL-CODECS` from the decision.
+A client that declares no dynamic range never receives `VIDEO-RANGE=PQ`, `VIDEO-RANGE=HLG` or `SUPPLEMENTAL-CODECS`.
+A variant's `CODECS` attribute always follows the sample entry that the output actually carries.
+No copy rule overrides a `MediaFileProbePropertyIssue` that rules out a copy (link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc#decision-property-issues[ADR 0036]).
+The server still encodes every HEVC or H.264 stream whose RPU placement is `STARTS_SAMPLE`.
+
+The server always delivers the best picture that the client declares.
+No user setting chooses between Dolby Vision and its HDR base, so the decision carries no Dolby Vision choice.
+The server picks one output for each client and format attempt.
+The playlist never lists the copy with Dolby Vision stripped as a second variant beside the Dolby Vision copy.
+A client may declare the base range but not the copy's Dolby Vision profile at the copy's Dolby Vision level.
+For that client, the copy with Dolby Vision stripped is the first format attempt.
+After a failed Dolby Vision copy, the copy with Dolby Vision stripped is a later format attempt in every playback choice (link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc#decision-dolby-vision[ADR 0052]).
+
+Each kind of Dolby Vision source plays as follows:
+
+* A profile 8.1 copy has a PQ base.
+For a client that declares profile 8.1, it carries `SUPPLEMENTAL-CODECS="dvh1.08.LL/db1p"`.
+* A profile 8.4 copy has an HLG base.
+For a client that declares profile 8.4, it carries `SUPPLEMENTAL-CODECS="dvh1.08.LL/db4h"`.
+* Profile 8.1 and 8.4 copies keep `CODECS` from the `hvc1` base sample entry.
+`LL` is the copy's two-digit Dolby Vision level (<<dolby-vision-level>>).
+* A profile 8 stream with compatibility identifier 6 has a PQ base, as on Ultra HD Blu-ray discs.
+The server treats such a stream as profile 8.1.
+* Profile 10.1 and 10.4 copies follow the profile 8.1 and 8.4 rules.
+They carry `SUPPLEMENTAL-CODECS="dav1.10.LL/db1p"` and `SUPPLEMENTAL-CODECS="dav1.10.LL/db4h"`, and they keep `CODECS` from the `av01` base sample entry.
+* Profile 8.2 and profile 9 copies keep the rules of <<dolby-vision-copy-tags>> for every client.
+Each such copy keeps its RPUs, takes `CODECS` from its base sample entry, declares `VIDEO-RANGE=SDR` and carries no `SUPPLEMENTAL-CODECS`.
+* A single-track profile 7 copy reaches clients as profile 8.1 (https://github.com/streamarr/streamarr-server/issues/651[streamarr/streamarr-server#651]).
+* A dual-track profile 7 source and a profile 6 source play their HDR10 base.
+A client that declares PQ receives a copy of the base layer alone, with no RPU.
+Every other client receives an encode.
+* A Dolby Vision stream whose profile is unknown plays without Dolby Vision (link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc#decision-unknown-profile[ADR 0049]).
+* Profiles 5 and 10.0 follow <<no-compatible-base-copies>>.
+
+The playlist carries `SUPPLEMENTAL-CODECS` for no other Dolby Vision copy.
+link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc#decision-bitstream-rewrites[ADR 0036] decides how a copy strips Dolby Vision or HDR10+.
+
+[[dolby-vision-level]]
+=== The decision sets the Dolby Vision level of every Dolby Vision copy
+
+The decision sets the Dolby Vision level of every copy that the playlist describes as Dolby Vision.
+These are copies of profiles 5, 8.1, 8.4, 10.0, 10.1 and 10.4, and the converted profile 7 copy.
+The level appears in the configuration record and in the playlist's codec string.
+A client declares each Dolby Vision profile with a maximum Dolby Vision level (ADR 0049).
+A copy above that maximum counts as undeclared.
+
+* The server takes the level from the probed configuration record when the record names one.
+* Otherwise, the server derives the level from the stored width, the stored height and the stored maximum frame rate (https://github.com/streamarr/streamarr-server/issues/652[streamarr/streamarr-server#652]), with Dolby's level table.
+The maximum frame rate is the highest rate anywhere in the file, so a later section at a higher rate raises the level.
+The derivation never uses an encode's output frame rate, an average rate, or the rate in a copy's `FRAME-RATE` attribute.
+The same stored facts always give the same level.
+* The level never comes from the RPU's `vdr_rpu_level` field.
+* When the width, the height or the maximum frame rate is unknown, the Dolby Vision copy is ineligible.
+The server then chooses the permitted fallback.
+That fallback is the copy with Dolby Vision stripped for a profile with a compatible base, and an encode for profiles 5 and 10.0.
+Until https://github.com/streamarr/streamarr-server/issues/652[streamarr/streamarr-server#652] stores the maximum frame rate, every Dolby Vision stream without a configuration record that names a level takes that fallback.
+
+*Why:* A level derived from a lower rate than the file's highest rate understates the decoder's work in the faster section.
+A player could then accept a copy that it cannot decode in time.
+
+[[no-compatible-base-copies]]
+=== A profile 5 copy needs a genuine `dvh1` output, and the server encodes profile 10.0 for now
+
+Dolby Vision profiles 5 and 10.0 have no compatible base.
+A capability entry accepts such an output through its Dolby Vision profile and level alone (ADR 0049).
+The server never strips Dolby Vision from either profile, because the stripped picture has no base that a player could show.
+
+A client that declares profile 5 at or above the copy's level receives the profile 5 copy.
+That copy carries `CODECS="dvh1.05.LL"` and `VIDEO-RANGE=PQ`.
+Profile 5 has no compatible base, so the copy carries no `SUPPLEMENTAL-CODECS`.
+The worker writes a genuine `dvh1` output.
+The parameter sets sit in the decoder configuration record, and the Dolby Vision configuration record is present.
+The pinned build drops that record from an `hev1` profile 5 copy, so the worker writes the record itself (ADR 0036).
+The pinned build's MP4 muxer writes no `dvhe` sample entry, so a profile 5 copy never carries `dvhe`.
+The server never offers a profile 5 copy under a plain HEVC sample entry, because a player that ignores the RPUs shows teal colors.
+When the worker cannot write the `dvh1` output, the server encodes the stream.
+Every client that does not declare profile 5 receives an encode, in every playback choice.
+In Original, that encode plays in Auto (ADR 0052).
+
+A profile 10.0 copy needs a `dav1` sample entry, and the pinned build's MP4 muxer writes none.
+For now, the server encodes profile 10.0 for every client, in every playback choice.
+The route to a `dav1` output is a worker rewrite of the initialization segment.
+The worker will rename the `av01` sample entry to `dav1` and add the Dolby Vision configuration record, in the stage that applies the other bitstream rewrites (ADR 0036).
+Once the worker produces a verified `dav1` output, a client that declares profile 10.0 receives the copy.
+That copy carries `CODECS="dav1.10.LL"` and `VIDEO-RANGE=PQ`.
+
+*Why:* A profile 5 copy without its Dolby Vision configuration record plays teal, because the record is the only Dolby Vision signal in the copy's initialization segment.
+The epic's test material holds no real AV1 Dolby Vision source, and a constructed source tests only the plumbing of a `dav1` rewrite.
+
+[[hdr-frame-rate]]
+=== An HDR copy whose frame rate is unknown announces its range without `FRAME-RATE`
+
+Every copy with a known frame rate carries `FRAME-RATE` (https://github.com/streamarr/streamarr-server/issues/683[streamarr/streamarr-server#683]), and HDR copies keep that attribute.
+When an HDR copy's frame rate is unknown, its playlist entry still announces `VIDEO-RANGE=PQ`, `VIDEO-RANGE=HLG` or `SUPPLEMENTAL-CODECS`, without `FRAME-RATE`.
+The server cannot encode such a stream either (https://github.com/streamarr/streamarr-server/issues/446[streamarr/streamarr-server#446]).
+When a player refuses the entry, the client reports a format error (https://github.com/streamarr/streamarr-server/issues/401[streamarr/streamarr-server#401]).
+Recovery then tries the copy with Dolby Vision stripped when it is eligible, in every playback choice.
+Auto also tries any other eligible format.
+When no format remains, playback ends with the typed terminal error (ADR 0052).
+
+*Why:* Players other than AVPlayer may play such an entry.
+Whether AVPlayer refuses a PQ or HLG entry without `FRAME-RATE` is unmeasured.
+A refused copy would stop the file on every player.
+
+[[hdr-choice]]
+=== The viewer chooses HDR or SDR in a fixed quality, and Original always plays the source's range
+
+A stream session request carries an optional HDR choice, `HDR` or `SDR`.
+In the GraphQL contract, the choice is an optional `dynamicRange` field on `StreamingOptionsInput`.
+Without a choice, the playback choice decides: the output keeps the source's HDR range when the client declares that range.
+
+Original always plays the source's dynamic range.
+In Original, the client shows the HDR toggle disabled, with an explanation.
+SDR is a choice in a fixed quality only.
+Auto hides the HDR toggle (ADR 0052).
+
+A copy keeps the source's range, so SDR for an HDR source needs an encode.
+Until https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397] adds HDR encodes, every encode is SDR.
+Until then, a fixed quality whose tier needs an encode of an HDR source encodes SDR, even when the viewer chose HDR.
+The server names SDR as the output range in its answer.
+The client then shows SDR in its HDR toggle, with a notice.
+
+*Why:* Original promises the source's own picture, and a copy keeps the source's range.
+This rule needs no change to ADR 0052, which plays every encode that Original reaches in Auto.
+The SDR encode in a fixed quality mirrors ADR 0052's fixed-quality fallback, which already shows SDR after a failed HDR copy.
+The server names the SDR output, so the replacement is not silent.
+
+[[copy-refusals]]
+=== The decision names why the server did not copy
+
+The server may encode a stream, or copy a stream that the client could not play directly.
+The decision then lists the properties that each capability entry of the source's codec family did not accept.
+When no capability entry names the source's codec family, the decision names the codec family.
+The decision also names each property issue that rules out a copy.
+For now, the list stays in the server: the server logs it and counts it in a metric tagged by property.
+
 [[explicitly-deferred]]
 === Explicitly deferred
 
-* The HDR output choice (https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396], https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397] and https://github.com/streamarr/streamarr-transcode-worker/issues/27[streamarr/streamarr-transcode-worker#27]).
-This choice covers the Original quality option, the user's HDR choice, and 10-bit or HDR encodes.
-* A copy's typed codec profile and level, and a copy's planned output range (https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396]).
+* 10-bit and HDR encodes (https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397] and https://github.com/streamarr/streamarr-transcode-worker/issues/27[streamarr/streamarr-transcode-worker#27]).
+<<hdr-choice>> decides the viewer's HDR choice until then.
 * Client-declared dynamic ranges (https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395]).
 Client-declared dynamic ranges alone do not bring back HDR copies.
-* HDR copies, including HDR copies to the Apple TV app, once the playlist's HDR attributes are truthful (https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396]).
-HDR copies end the interim copy rule.
-* Dolby Vision copies with a PQ or HLG compatible base, and the playlist attributes of those copies, including `SUPPLEMENTAL-CODECS`.
-Issue https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] decides when such a copy carries those attributes.
-Issue https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396] builds those attributes.
-* Copies of a Dolby Vision profile 5 source under `hev1` for clients that declare Dolby Vision (https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395]).
-Such a copy becomes a `dvhe` copy once a measurement shows that the `dvhe` copy plays.
-Otherwise the server encodes such a source.
+* Profile 10.0 copies, until the worker's `dav1` rewrite is verified (<<no-compatible-base-copies>>).
+* Showing the list of refused properties to clients, such as on a media information screen (<<copy-refusals>>).
+The field can arrive when a client builds that screen.
 * Choosing the HEVC sample-entry tag of every copy, and copying sources whose sample-entry tag is `dvhe` or `dvav` (https://github.com/streamarr/streamarr-transcode-worker/issues/18[streamarr/streamarr-transcode-worker#18]).
 
 == Consequences
@@ -611,11 +767,23 @@ In the measured players, the lost record changed nothing.
 * A Dolby Vision profile 5 copy under `hev1` also loses its configuration record under the pinned FFmpeg build.
 The record is the only Dolby Vision signal in such a copy's initialization segment.
 Without the record, such a copy plays teal.
-* A source whose compatible base is PQ, HLG or none plays as SDR on every client until the deferred HDR output choice is built.
+The server therefore copies profile 5 only as a genuine `dvh1` output (<<no-compatible-base-copies>>).
+* A source whose compatible base is PQ, HLG or none plays as SDR on every client until https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396] ships.
+After that, such a source plays in HDR only on a client that declares its range.
 * A source whose codec profile is `UNSPECIFIED` always plays through an encode.
 A source of a codec family whose codec profiles the worker contract does not name always has an `UNSPECIFIED` codec profile.
 * The playlist advertises a copy's codec string before any job attempt runs.
 A failed copy therefore costs the player one switch to a new playlist.
+* A copy of an untagged source keeps playing as an SDR copy on every client that accepts SDR.
+* A profile 10.0 source plays as an encode on every client.
+That encode is SDR until https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397] adds HDR encodes.
+* A Dolby Vision stream without a configuration record that names a level gets no Dolby Vision copy until https://github.com/streamarr/streamarr-server/issues/652[streamarr/streamarr-server#652] stores each file's maximum frame rate.
+Until then, such a stream plays as the copy with Dolby Vision stripped where the client declares its base, and otherwise as an encode.
+* An HDR copy whose frame rate is unknown may start and then fail on a player that needs `FRAME-RATE`.
+The viewer then waits through a failed start before the next format attempt or the typed terminal error.
+* In Original, a viewer who wants SDR must pick a fixed quality.
+* Until https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397], a viewer who picks a fixed quality below the size of an HDR source sees SDR and a notice.
+* Only whoever runs the server can see why a file was encoded, through the logs and the metric.
 
 == Rejected Alternatives
 
@@ -725,6 +893,17 @@ After a Matroska seek with B-frames, the leading packets carried different times
 * Seeking in the second FFmpeg with an output `-ss` option: FFmpeg subtracts that time from every output timestamp, so the attempt's timeline would no longer match a single FFmpeg's timeline.
 The second FFmpeg trims instead.
 An input seek cannot run on a pipe.
+* A planned value of its own for a copy of an untagged source, such as "SDR, assumed": it adds a value to ADR 0036's vocabulary, and the playlist would still describe the copy as SDR.
+* Encoding untagged sources for clients that declare HDR: it spends encoder capacity on the most common untagged files, old SDR files, which play as copies today.
+* Refusing an HDR copy whose frame rate is unknown: the file would then play on no player, although players other than AVPlayer may play the entry.
+AVPlayer's refusal of such an entry is unmeasured.
+* Copying profile 10.0 once an FFmpeg pin update writes `dav1`: no prebuilt FFmpeg release is known to write `dav1`, and ADR 0029 pins prebuilt releases.
+* A boolean `preferSdr` on the stream session request: it names only one of the two values that the HDR toggle shows.
+* Playing an SDR encode at the source's size in Original when the viewer picks SDR, with Original kept: Original would then play an encode under the Original label, which ADR 0052 rules out.
+* Changing Original to Auto, with ADR 0052's notice, when the viewer picks SDR in Original: a tap on SDR would also change the quality mode, which may surprise the viewer.
+* Refusing a fixed quality's HDR request with a typed error when the tier needs an encode before https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397]: the viewer would get an error instead of a picture that can play.
+* Offering only the fixed qualities that a copy covers while HDR is on: the viewer could not pick a smaller fixed quality of an HDR source until https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397].
+* Showing the list of refused properties on the stream session in GraphQL now: no client has a media information screen yet, and a pre-production contract can add the field later without a new version.
 
 == Evidence
 

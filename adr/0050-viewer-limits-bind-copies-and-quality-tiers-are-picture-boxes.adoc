@@ -26,6 +26,10 @@ A downmix that FLAC or ALAC writes uses an oversampled true-peak limiter.
 The stereo and mono matrix of an AC-3 or E-AC-3 track uses the mix levels that the track signals.
 An AAC encode has at most six channels, and the rule names each encoder's own layouts of 5 to 8 channels (<<decision-channel-layout>>).
 
+A further amendment settles a `7.0` track in Opus.
+When the Opus capability entry accepts 8 or more channels, the encode pads the track to `7.1` with a silent low-frequency channel, and every channel keeps its place.
+Under a lower Opus maximum, the track encodes in 5.0 (<<decision-channel-layout>>).
+
 The same amendment takes the audio step from the largest audio rendition instead of the default track (<<decision-audio-steps>>).
 The stream session's audio bitrate already counts that rendition under link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc[ADR 0054], so no other track can take the stream over the viewer's maximum bitrate.
 
@@ -449,7 +453,11 @@ An encode of 5 to 8 channels names the encoder's own layout for that count:
 
 A side pair and a back pair count as one surround pair, so a `5.1(side)` track keeps its layout in AAC's `5.1` (<<decision-downmix>>).
 An encode names a 7-channel layout only for a track whose layout that 7-channel layout carries, such as a `6.1` track in FLAC or Opus.
-In Opus, any other 7-channel track, such as `7.0`, encodes in 5.1, and an 8-channel track keeps Opus's `7.1` within the channel maximum.
+An Opus encode of a `7.0` track pads the track to `7.1` with a silent low-frequency channel when the Opus capability entry's channel maximum is 8 or more.
+The pad keeps all seven channels in place.
+Under a lower Opus maximum, an Opus encode of a `7.0` track is 5.0.
+The 5.0 encode folds the track's four surrounds into one pair and adds no low-frequency channel (<<decision-downmix>>).
+In Opus, any other 7-channel track encodes in 5.1, and an 8-channel track keeps Opus's `7.1` within the channel maximum.
 An AAC encode has at most six channels.
 A track of 7 or more channels therefore encodes as AAC 5.1, and a copied AAC 7.1 track stays a copy.
 AC-3 and E-AC-3 encode at most 5.1.
@@ -484,6 +492,7 @@ A 5.1 track under an AAC channel maximum of 4 therefore encodes AAC stereo, not 
 * An encode that a channel maximum of 5 or 7 caps.
 Under a maximum of 5, a track of more channels encodes in the encoder's 5.0 layout, which AAC carries as channel configuration 5 and AC-3 and E-AC-3 carry as mode 3/2.
 Under a maximum of 7, a track of 8 channels encodes in 5.1, and a `6.1` track keeps its layout in FLAC, Opus and ALAC.
+* An Opus encode of a `7.0` track under an Opus channel maximum of 6 or 7 is 5.0, because that maximum leaves no room for the pad to `7.1`.
 
 The server's own encode of a 3- or 4-channel track, outside these cases, stays stereo, as before this amendment.
 
@@ -505,6 +514,9 @@ Its 8-channel AAC layout, `7.1`, wrote channel configuration 7, which ISO/IEC 14
 AVFoundation played that file's side surrounds from the left and right speakers and its front pair from the front-of-centre positions.
 FFmpeg's own decoder reads configuration 7 as `7.1`, so a check with FFmpeg alone misses the error.
 Of the 7- and 8-channel layouts, FFmpeg's Opus and ALAC encoders accepted only those in the table.
+`libopus` refused a `7.0` input outright, so an Opus encode of a `7.0` track must pad it or fold it.
+Padded to `7.1`, a synthetic `7.0` track kept each of its seven channels in place at the source's level, and it played that way in Chromium and Firefox (<<evidence-seven-zero>>).
+The 5.0 fold under a lower maximum invents no channel, where a 5.1 encode would add a low-frequency channel that the track lacks.
 FFmpeg's FLAC encoder wrote every layout, but only the table's layouts follow FLAC's own channel order (ADR 0043).
 A downmix of a 5.1 track to AAC's 4-channel default, `4.0`, merges its surround pair into one back channel in the same way.
 ADR 0032's evidence holds the measurements (link:0032-media-file-probe-results-are-persisted.adoc#evidence-channel-layout[ADR 0032]).
@@ -516,11 +528,15 @@ A downmix is an audio encode whose output layout lacks a channel of the source t
 A side pair and a back pair are one surround pair.
 An encode that only renames that pair, such as `5.1(side)` to `5.1` or `6.1` to `6.1(back)`, is not a downmix.
 It writes each channel unchanged, with no matrix and no limiter.
+An Opus encode that pads a `7.0` track to `7.1` is not a downmix either.
+It loses no channel.
+The pad keeps every source channel in place and adds a silent low-frequency channel, so it runs no downmix matrix and no limiter.
+Like ADR 0043's FLAC and ALAC pads, it uses `pan` with a gain of 0 for the added channel.
 An encode that writes every decoded sample unchanged runs no filter except sample-format packing.
 
 Every downmix uses the matrix below instead of FFmpeg's default.
 That includes the stereo and mono steps, the stereo encode of a 3- or 4-channel layout that the target codec cannot carry, and every encode that a channel maximum caps.
-It also includes an encode to 5.1 of a 7.1 or `6.1` track, such as AC-3 or E-AC-3 5.1 or the AAC 5.1 step, an encode to 5.0 under a channel maximum of 5, and an encode of the same channel count that changes the layout, such as `6.0` to 5.1.
+It also includes an encode to 5.1 of a 7.1 or `6.1` track, such as AC-3 or E-AC-3 5.1 or the AAC 5.1 step, an encode to 5.0 under a channel maximum of 5, an Opus encode of a `7.0` track to 5.0, and an encode of the same channel count that changes the layout, such as `6.0` to 5.1.
 The worker converts the decoded audio to floating point (`aformat=sample_fmts=fltp`), applies the matrix with FFmpeg's `pan` filter, and then limits the channels that the matrix sums, before the encoder.
 A downmix of an AC-3 or E-AC-3 track mixes the samples of ADR 0043's decode, which applies no dynamic range compression and applies the track's dialogue normalization, as a hardware decoder does for the copy.
 
@@ -542,7 +558,7 @@ FFmpeg's decoder exports them as downmix side data on every decoded frame, so th
 The worker reads them from the track's first frame, so every job attempt of a stream session uses the same matrix.
 The stereo is always Lo/Ro, never Lt/Rt, even when the track names Lt/Rt as its preferred downmix.
 
-A downmix to 5.1 or 5.0, such as 7.1 to 5.1, 5.1 to 5.0 or `6.0` to 5.1, keeps the front channels and the centre, and its surround pair is LS and RS as defined above, whichever pair the output layout names.
+A downmix to 5.1 or 5.0, such as 7.1 to 5.1, `7.0` to 5.0, 5.1 to 5.0 or `6.0` to 5.1, keeps the front channels and the centre, and its surround pair is LS and RS as defined above, whichever pair the output layout names.
 A downmix to 5.1 keeps the low-frequency channel, and a downmix to 5.0 leaves it out.
 A downmix to 7.1, such as `7.1(wide)` to 7.1, keeps each source channel that 7.1 has.
 
@@ -559,7 +575,7 @@ The sum stays in floating point until the limiter, so a 16-bit or 24-bit source 
 A downmix that only leaves channels out, such as 5.1 to 5.0, has no limiter.
 In every other downmix, the limiter acts only on the output channels that sum two or more source channels, and every other channel passes through unchanged.
 It links the two channels of a left-right pair, so the pair keeps its image, and it limits a centre or mono output on its own.
-A 7.1 to 5.1 downmix therefore limits only its surround pair, and a stereo downmix limits its pair.
+A 7.1 to 5.1 or `7.0` to 5.0 downmix therefore limits only its surround pair, and a stereo downmix limits its pair.
 The worker splits the summed channels out with FFmpeg's `channelsplit`, limits them, and joins them back with `join`.
 
 The ceiling depends on the codec that writes the downmix:
@@ -755,6 +771,9 @@ A 40 Hz line at −1 dBFS in a stereo downmix put sidebands at −39.6 dBc aroun
 * A lossy encode can still go slightly over full scale after decoding.
 AAC at 64 kb/s did so in 12 of 1.92 million samples of the synthetic loud scene, and AAC 5.1 at 320 kb/s in 4 samples of the folded surround pair of a worst-case 7.1 to 5.1 downmix.
 * An AAC encode of a track of 7 or more channels plays 5.1, so the track's second surround pair folds into the first.
+* An Opus encode of a `7.0` track plays as 7.1 with a silent low-frequency channel when the Opus capability entry accepts 8 or more channels, and the player shows 7.1.
+It costs Opus's 7.1 rate of 640 kb/s, where a 5.0 encode costs 448 kb/s (ADR 0043).
+Under a lower Opus maximum, the track plays 5.0, and each side's two surrounds share one channel.
 * A copied AC-3 or E-AC-3 `3.0(back)` or `3.1` track steps to stereo, and an encode of such a track is stereo, until a check on hardware passes.
 * Every job that encodes audio names a layout, and a job that names a layout of 3, 4, 7 or 8 channels needs a worker that lists probe version 7 (ADR 0032).
 Until the server stores a file's probe version 7 outcome, that file's 3- and 4-channel tracks step to stereo.
@@ -847,6 +866,8 @@ That choice belongs to the deferred viewer setting.
 * A/52's default levels for every AC-3 or E-AC-3 track override the centre and surround levels that the track's mixer chose.
 * An Lt/Rt stereo downmix encodes the surrounds in opposite phase, which cancels in mono and needs a matrix decoder to play as intended.
 * Encoding AAC 7.1 writes channel configuration 7, which AVFoundation plays as front-wide 7.1, with the side surrounds from the front speakers.
+* Encoding a `7.0` track in Opus 5.1 folds its four surrounds into one pair and adds a low-frequency channel that the track lacks.
+Opus 7.1 with a silent low-frequency channel keeps all seven channels in place, and Opus 5.0 invents no channel.
 * Carrying AC-3 and E-AC-3 `3.0(back)` and `3.1` now would misplace their channels on AVFoundation.
 
 [[evidence-downmix]]
@@ -954,6 +975,23 @@ Opus ran with `-mapping_family 1`.
 ** `eac3/csi_miami_5.1_256_spx_small.eac3`: centre 0.707, surround 0.707, preferred downmix Lt/Rt;
 ** `ac3/millers_crossing_4.0.ac3`: centre 0.707, surround 0.707.
 * Decoded with `-drc_scale 0`, `-target_level -31` lowered the overall RMS level of Miller's Crossing's AC-3 by 4.0 dB and CSI Miami's E-AC-3 by 5.0 dB, and left The Great Wall's E-AC-3 unchanged.
+
+[[evidence-seven-zero]]
+== Evidence: a `7.0` track in Opus
+
+These measurements ran on 2026-11-03 against FFmpeg 8.1.3 in the pinned worker image.
+The source was a synthetic 48 kHz `7.0` file that the same FFmpeg built.
+Each of its seven channels carried its own tone, between 300 and 1,900 Hz, at −20 dBFS peak.
+Each level below is relative to the source channel's own level.
+
+* `libopus` refused the `7.0` layout, with and without `-mapping_family 1`.
+* Padded to `7.1` with `pan`, which gave the added low-frequency channel a gain of 0, the Opus encode decoded with each of the seven tones at 0.0 dB in its own channel.
+The low-frequency channel decoded as silence.
+* Folded to 5.0, with each side's back and side surrounds at 0.7071, the Opus encode kept the front channels and the centre at 0.0 dB.
+Each surround tone came out at −3.0 to −3.1 dB in its own side's surround channel.
+* hls.js 1.7.3 in Chromium 156 and Firefox 157 played the padded `7.1` Opus encode as fragmented MP4 with `-mapping_family 1`, through HLS and through plain MSE.
+Every channel came out in its RFC 7845 position, within 0.6 dB of the source's level, and the low-frequency channel stayed silent.
+* In the same players, the 5.0 encode put every channel in its RFC 7845 position, and each surround tone came out within 0.6 dB of the fold's −3 dB.
 
 == References
 

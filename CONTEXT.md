@@ -176,6 +176,10 @@ When the audio leaves no room for the 360p tier under the maximum bitrate, the s
 Outside Original, a video copy costs its video plus the session's audio, and the server lowers the audio before it encodes the video.
 _Avoid_: client capabilities (what the player can decode), quality cap
 
+**Language override**:
+A Profile's choice of audio or subtitle language for one episode or movie, one season or one series. The most specific override comes first, then the Profile's preferred language, then the file's own default. A language that the viewer switches to during playback becomes the Profile's override for that series (ADR 0043).
+_Avoid_: track preference, per-title track, default track (the file's flag)
+
 **Audio step**:
 One audio codec, channel count and bitrate that the server can deliver in place of the stream session's audio under the viewer's maximum bitrate: the session's own audio first, then multichannel steps at lower bitrates, then AAC stereo at 128, 96 and 64 kb/s, or AAC mono at 64 kb/s for a mono track or when no AAC entry for HLS accepts more than one channel.
 Multichannel steps keep the codec and channels of the encode that the server would choose, and AAC above 5.1 also steps through AAC 5.1 at 320 kb/s.
@@ -216,6 +220,10 @@ _Avoid_: chunk, part
 **Rendition**:
 An alternate HLS track, such as one audio language or one text subtitle track. The multivariant playlist lists each rendition in an `EXT-X-MEDIA` tag. Each rendition has its own media playlist. A viewer switches renditions without leaving the variant. A variant is the quality-ladder option that an `EXT-X-STREAM-INF` tag lists. A rendition is never a variant (ADR 0043).
 _Avoid_: variant, audio variant, alternate stream, track (unqualified)
+
+**Subtitle layer**:
+A client's own view above the platform's player that draws subtitles from the original subtitle data that the server sends: text, ASS and SSA with their styling, and PGS images. A client without one gets WebVTT renditions and burned-in image subtitles (ADR 0043).
+_Avoid_: overlay (unqualified), subtitle renderer, burn-in (the server's fallback)
 
 **Audio frame grid**:
 The start times of an encoded audio rendition's frames, at its encoder's frame length and sample rate, counted from the default track's first sample: the copy's own first sample when the session copies the default track, and the track's probed start when the session encodes it. Every job attempt puts each audio encode's frames on that rendition's grid, allowing for the encoder's fixed delay, so consecutive job attempts meet without a gap or an overlap. A copied track keeps its own frames, and the producer never moves it (ADR 0043).

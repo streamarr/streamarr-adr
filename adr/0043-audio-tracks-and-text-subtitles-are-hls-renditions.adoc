@@ -32,6 +32,15 @@ A title marks a commentary or an audio description track when no flag does (<<de
 ADR 0054's bitrate scan measures the FLAC encodes that a stream session can deliver.
 Mac browser checks gate the tickets, and the TV checks run once at the end of the epic (<<decision-device-checks>>).
 
+A later amendment settles languages and how clients draw subtitles.
+Each Profile has a preferred audio language and a preferred subtitle language, and the Profile's overrides for an episode or movie, a season or a series come first (<<decision-languages>>).
+A language that the viewer switches to during playback becomes the Profile's override for that series.
+Clients draw subtitles in a layer above the platform's player, from the original subtitle data that the server sends (<<decision-subtitle-layer>>).
+Burn-in and WebVTT renditions stay the fallback for a client without that layer.
+A subtitle file beside the source file is a subtitle track of that media file.
+Streamarr does not download subtitles.
+A night mode and a dialogue boost stay deferred, because the viewer's platform already offers them (<<explicitly-deferred>>).
+
 == Context
 
 This section describes the system before this decision.
@@ -516,6 +525,66 @@ A Matroska file without statistics tags and an MPEG-TS file state no track durat
 In normal output, audio trails video by at most 0.16 s, so the 1 s margin never closes a segment while the segment's audio is still on the way.
 Evidence: <<evidence-audio-cases>>.
 
+[[decision-languages]]
+=== The Profile's language preferences choose the default audio language and the subtitles that start on
+
+Each Profile has a preferred audio language and a preferred subtitle language.
+link:0024-identity-authority-by-relationship.adoc[ADR 0024] keeps a Profile's preferences with the Profile.
+A Profile can also override either language for one episode or movie, for one season or for one series.
+Each override belongs to one Profile.
+An override names a language, never one track of a file.
+An override is user-authored data, so it attaches to the title's catalog entry (link:0039-catalog-entries-hold-metadata-edits-and-user-data.adoc[ADR 0039]).
+
+When a stream session starts, the stream decision takes the audio language from the first of these that applies:
+
+. the Profile's override for the episode or movie;
+. the Profile's override for the season;
+. the Profile's override for the series;
+. the Profile's preferred audio language;
+. the language of the default track that <<decision-audio-renditions>> chooses from the file's own flags.
+
+A language applies only when the file holds a track in that language that can be the default.
+The ranking of <<decision-sibling-ranking>> then chooses the default track among the tracks of that language.
+The subtitle language follows the same order, with the Profile's subtitle overrides and preferred subtitle language.
+The last step for subtitles is the subtitle track that the file marks as default, or no subtitle when the file marks none.
+The client turns on the subtitle track that the stream decision names.
+The rules of <<decision-subtitle-selection>> for forced tracks still apply while subtitles are off.
+
+When the viewer switches the audio language or the subtitle language during playback, the server stores the new language as the Profile's override for the series.
+For a movie, the switch becomes the Profile's override for that movie.
+
+*Why:* A viewer who prefers one language wants it in every file without choosing it each time.
+A viewer can watch one series in its original language and another series dubbed, so overrides exist at each level.
+The most specific override describes the viewer's narrowest choice, so it comes first.
+Viewers in one Household can prefer different languages, so each override belongs to one Profile.
+Each episode's file can list its tracks in a different order, so an override names a language rather than a track.
+A viewer who switches language in one episode usually wants that language in the next episode, so the switch applies to the series.
+
+[[decision-subtitle-layer]]
+=== Clients draw subtitles in a layer above the platform's player, and burn-in is the fallback
+
+A client draws subtitles in its own layer above the platform's player.
+The layer draws text subtitles, ASS and SSA subtitles with their styling and positions through libass, and PGS image subtitles.
+The server sends the layer each selected subtitle track's original data, without converting it.
+A client declares that it has the layer and the subtitle formats that the layer draws.
+https://github.com/streamarr/streamarr-server/issues/506[streamarr/streamarr-server#506] decides how the declaration spells them.
+
+For a client with the layer, the server never burns in a subtitle that the layer draws.
+Such a subtitle never makes the stream session encode its video.
+link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045] counts a subtitle that the layer draws as covered for direct play.
+For a client without the layer, or for a format that the client's layer does not draw, the earlier rules stay.
+Text subtitle tracks become WebVTT renditions (<<decision-subtitles>>), and a selected image subtitle is burned into the video (<<decision-image-subtitles>>).
+
+A subtitle file that sits beside the source file, such as a `.srt` file with the same base name, is a subtitle track of that media file.
+The server treats such a track like a text subtitle track inside the file.
+Streamarr does not download subtitles from an online subtitle database.
+
+*Why:* WebVTT drops ASS styling and positions, which signs and typesetting need.
+Burning in a subtitle forces an encode of the video, costs worker capacity, and replaces the stream session on every subtitle change.
+A layer above the platform's player keeps that player for video and audio (ADR 0045) and draws each format the same way over HLS and direct play.
+Subtitle files beside the source are a common way for a library to carry subtitles.
+An online subtitle database needs an account with an outside service and learns which files the library holds.
+
 [[decision-subtitles]]
 === Text subtitles are WebVTT renditions extracted once per media file
 
@@ -735,8 +804,9 @@ The audio dispositions are `comment`, `visual_impaired`, `descriptions`, `origin
 Until the server stores a file's probe version 7 outcome, the file's names carry only the flags that titles mark, its audio names show channel counts instead of layouts, its encodes take their bit depth from the source's codec, and no Apple client gets a copy of its FLAC tracks.
 
 [[decision-image-subtitles]]
-=== An image subtitle that the viewer selects is burned into the video
+=== For a client without a subtitle layer, an image subtitle that the viewer selects is burned into the video
 
+This section applies to a client without a subtitle layer, and to an image format that the client's layer does not draw (<<decision-subtitle-layer>>).
 An image subtitle track is a PGS, VobSub or DVB track, whose lines are pictures rather than text.
 An image subtitle track is burned into the video when the viewer selects the track.
 To burn in a subtitle is to draw the subtitle's pictures into the video frames while the worker encodes the video.
@@ -810,7 +880,6 @@ The acceptance tests of https://github.com/streamarr/streamarr-server/issues/503
 
 * Deliver image subtitles as renditions.
 * Deliver teletext subtitles, which come from DVB broadcast recordings.
-* Deliver external subtitle files that sit beside the source, in a follow-on to https://github.com/streamarr/streamarr-server/issues/60[streamarr/streamarr-server#60].
 * Declare more than 6 channels from the web client.
 The web client's declaration (https://github.com/streamarr/streamarr-web/pull/130[streamarr/streamarr-web#130]) always carries an AAC capability entry for HLS.
 It adds AC-3, E-AC-3, Opus, FLAC and ALAC entries only when the browser's `decodingInfo()` confirms them.
@@ -819,8 +888,10 @@ Lifting the 6-channel cap waits for the speaker-free test of https://github.com/
 Real speakers only confirm that test.
 Firefox plays 7.1 AAC in AAC's own channel order and plays 5.1 AAC in WAVE order.
 * Mix a dependent narration track into the main track, so that a viewer who needs audio description hears both.
-* Normalise loudness or boost dialogue at the viewer's request.
-A later background scan measures each track's integrated loudness, loudness range and true peak for that setting (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032]).
+* A night mode, a dialogue boost or a loudness normalisation that the viewer turns on.
+The viewer's platform already offers such a mode, for example tvOS's Reduce Loud Sounds.
+The server's audio work ends at a bit-perfect copy or a correct downmix (link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc[ADR 0050]), and such a mode would change the mix after that.
+A later decision that adds one would read each track's integrated loudness, loudness range and true peak from a background scan (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032]).
 * Measure the FLAC encodes of a file without a lossless track in ADR 0054's bitrate scan.
 * Allow more than one audio codec per stream session for Apple clients.
 Apple clients get that exception only if a check shows that their switches between codecs stay in sync.
@@ -832,7 +903,7 @@ Issue https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamar
 == Consequences
 
 * A viewer switches audio language and text subtitles, and the video does not restart.
-Choosing an image subtitle track, or leaving one, replaces the stream session, because the job attempts burn that track into the video.
+On a client without a subtitle layer, choosing an image subtitle track, or leaving one, replaces the stream session, because the job attempts burn that track into the video.
 Playback then resumes at the viewer's position.
 * Every stream session with a burned-in subtitle encodes its video, which uses worker capacity.
 Automatic burn-in applies only while subtitles are off, to a file with a forced image track in the selected audio's language.
@@ -941,10 +1012,21 @@ After the extraction, a viewer who wants subtitles gets a new stream session at 
 From an MP4 file, the extraction job reads only the subtitle samples.
 On network storage, subtitle extraction from a large Matroska file takes minutes.
 The durable job does that work before playback.
-* WebVTT drops ASS styling.
+* For a client without a subtitle layer, WebVTT drops ASS styling.
+* Every client needs a subtitle layer, with libass for ASS and SSA and a PGS decoder, to show every subtitle without burn-in.
+* On a client with the layer, a subtitle choice never replaces the stream session and never keeps a file off direct play.
+* The server sends original subtitle data, so a client that has the layer parses SubRip, ASS, SSA and PGS itself.
+* A Profile's language overrides grow with each series, season and title that the viewer changes.
 * The web and Apple clients gain audio and subtitle menus.
 
 == Rejected Alternatives
+
+* An override that names one track fails on the next episode, whose file can list its tracks in another order.
+* Overrides shared by every Profile of a Household force one viewer's language on another.
+* Remembering a switch only for the episode makes the viewer switch again in every episode.
+* Converting ASS and SSA to WebVTT for every client loses their styling and positions.
+* Burning in every image subtitle for every client encodes the video whenever a viewer turns on a PGS track.
+* Downloading missing subtitles from an online subtitle database needs an account with an outside service and tells that service which files the library holds, so it is out of scope.
 
 * Audio that stays multiplexed into every variant forces new job attempts for every variant when the viewer changes language.
 The video then restarts.

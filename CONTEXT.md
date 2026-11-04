@@ -203,6 +203,12 @@ The media that the worker actually produces and that the playlist must describe.
 Under fragmented MP4 delivery, the initialization segment describes it on its own.
 _Avoid_: actual output, transcoded output
 
+**Bitstream rewrite**:
+A change that the worker makes to a copied video stream without decoding it, such as stripping Dolby Vision or HDR10+, converting Dolby Vision profile 7 to profile 8.1, or normalizing the Dolby Vision configuration record.
+The decision lists every bitstream rewrite of a stream copy, and the worker applies exactly the listed rewrites to the fragmented MP4 that FFmpeg writes.
+A stream copy passes the source video through unchanged apart from its listed bitstream rewrites (ADR 0036).
+_Avoid_: bitstream filter (an FFmpeg component), transform, conversion (unqualified), remux
+
 ### Segment delivery
 
 **Producer**:

@@ -23,6 +23,8 @@ Every video capability entry that lists a source container also lists the sample
 The declaration names eight source containers, and the M4V and 3GP brands and a file without an `ftyp` box count as MP4 (<<decision-mp4-and-mov>>).
 Playback and library scans never follow a soft link, and the server serves each direct-play response from the file that it opened without following links (<<decision-no-soft-links>>).
 On a worker, FFmpeg runs in a sandbox that limits it to the media root (link:0033-transcode-worker-is-a-separate-service.adoc#decision-ffmpeg-sandbox[ADR 0033]).
+The server reports three direct-play metrics (<<decision-metrics>>).
+The web client direct-plays MP4 and WebM files in the browser's own video element (<<decision-web>>).
 
 NOTE: link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052] adds further fallbacks in Original.
 After a format error during the HLS copy, the server falls back to an encode, and the playback choice changes to Auto.
@@ -164,6 +166,19 @@ Refusing every soft link is simpler than deciding which link targets are safe, b
 A scan that skipped no soft link would list files that playback then refuses.
 The item result tells the ServerAdmin why a file is missing from the library.
 
+[[decision-metrics]]
+=== The server reports open direct-play responses, the bytes that they serve and their answers
+
+The server reports three metrics for direct play:
+
+* a gauge of the direct-play responses that are open;
+* a counter of the bytes that direct play serves;
+* a counter of direct-play requests by their answer: `200`, `206`, `404` and `416`.
+
+*Why:* Direct play starts no job attempt, so no worker metric shows its load.
+The open responses and the bytes show the load that direct play puts on the server's storage and network.
+The answers show refused paths and range requests that the server could not satisfy.
+
 [[decision-source-facts]]
 === Probe version 7 reports the sample entry of the file's video stream and the file's major brand
 
@@ -295,7 +310,7 @@ Each client uses its platform's own player.
 The Apple client uses AVPlayer.
 The Android TV client uses Media3 ExoPlayer.
 ExoPlayer uses OkHttp as its HTTP stack.
-The web client uses hls.js with the hold-aware controller.
+The web client uses hls.js with the hold-aware controller for HLS, and the browser's own `<video>` element for direct play (<<decision-web>>).
 The hold-aware controller is the web client's quality controller for hls.js.
 The hold-aware controller accounts for held segment requests.
 
@@ -306,10 +321,23 @@ Every hls.js upgrade runs the hold-aware controller's tests before the upgrade m
 No client uses libmpv as its main playback engine.
 libmpv may return only as an opt-in second engine for direct play.
 
+[[decision-web]]
+=== The web client direct-plays MP4 and WebM in the browser's own video element
+
+The web client direct-plays a covered file in the browser's own `<video>` element.
+It declares the `MP4` and `MATROSKA` source containers, the second for WebM, only where the browser plays them.
+It asks the browser about each codec, container and sample entry before it declares them (<<decision-sample-entries>>).
+The web client keeps hls.js for every stream that plays over HLS.
+Issue https://github.com/streamarr/streamarr-server/issues/59[streamarr/streamarr-server#59] builds the web client's direct play beside the Apple client's.
+
+*Why:* Browsers open MP4 and WebM files in their own video element with byte-range requests, so direct play needs no player library.
+A covered file then starts and seeks without waiting for a producer, as on the TV clients.
+
 [[decision-safari]]
 === Safari keeps hls.js and offers AirPlay
 
-In Safari, the web client keeps hls.js.
+In Safari, the web client keeps hls.js for HLS.
+Direct play in Safari uses the browser's own `<video>` element, as in every browser (<<decision-web>>).
 The web client uses Safari's native HLS player only where hls.js cannot run.
 ManagedMediaSource is the media-source API that hls.js uses in Safari.
 The web player offers AirPlay by giving ManagedMediaSource the HLS URL as an alternate source.
@@ -331,7 +359,6 @@ When no preparing-or-ready events arrive, the hold-aware controller falls back t
 https://github.com/streamarr/streamarr-server/issues/506[streamarr/streamarr-server#506], which adds subtitle selection, decides that question.
 * Sample entries in audio capability entries.
 The probe reports only the video stream's sample entry, so an audio capability entry lists none.
-* Direct play on the web client.
 * libmpv as an opt-in second engine for direct play.
 * Quality selection from the preparing-or-ready events on the TV clients, until a device test shows a need.
 ADR 0019 records this deferral.
@@ -368,6 +395,8 @@ An HLS media segment, by contrast, lasts about 3 s.
 * An HEVC file tagged `hev1` plays over HLS on the Apple client, as a copy that the worker writes as `hvc1`.
 * A client that adds a sample entry must first play a real test file with it, so a new sample entry reaches direct play only after that check.
 * An old QuickTime file without an `ftyp` box is served as `video/mp4`.
+* Browsers differ in the files that they open.
+The web client declares `MATROSKA` for WebM, so a browser that opens WebM but refuses another Matroska file with the same codecs spends a format attempt on that file and falls back to HLS.
 * A library that reaches its files through soft links loses those files at its next scan.
 The ServerAdmin must mount the real folders instead, for example with a bind mount.
 

@@ -149,6 +149,10 @@ _Avoid_: target frame rate, frame rate (unqualified) for the encode's rate
 The logical span of one viewing of a media title, which survives replacement stream sessions and holds the format-failure history and the format-attempt budget.
 _Avoid_: playback (ADR 0018's token and request surface), app session, stream session (one server-side run inside it)
 
+**Decision reason**:
+A typed value that the stream decision records for why a stream session plays the file directly, copies a stream or encodes it, such as a codec that the client does not declare. The playback session keeps the reasons. A viewer sees them in the playback-data panel for that viewer's own playback, and a ServerAdmin sees every active stream session's reasons in the active-streams view (ADR 0013).
+_Avoid_: transcode reason (it also explains copies and direct play), log message
+
 **Source description**:
 The record of one media track as the probe found it.
 It never changes when the server chooses a playback output.

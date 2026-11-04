@@ -41,7 +41,8 @@ Transcoding and probing both run on workers.
 Remove the server's local transcode executor, engine wiring, FFmpeg health indicator, and `streaming.remote.enabled` switch.
 Retain `TranscodeExecutorHealthIndicator` to report worker connectivity.
 It reports `DOWN` when no workers are connected and continues to affect `/actuator/health`.
-Every playback needs a worker, including compatible media that FFmpeg remuxes into HLS (link:0007-transcode-first-with-smart-remux.adoc[ADR 0007]).
+Every HLS playback needs a worker, including compatible media that FFmpeg remuxes into HLS (link:0007-transcode-first-with-smart-remux.adoc[ADR 0007]).
+Direct play, which link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045] adds later, needs no worker.
 
 The file-processing pipeline requests probes over the worker session, outside the playback path, as defined in link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032].
 The worker resolves the source through the same `MediaSourceRef` and mount mapping used for transcoding.
@@ -60,6 +61,26 @@ Local mount paths may differ.
 Multi-node installations require storage that supports concurrent reads from every eligible worker node.
 Workers mount source media read-only.
 Each worker uses separate writable storage for temporary transcode output.
+
+[[decision-ffmpeg-sandbox]]
+==== FFmpeg runs in a sandbox limited to the media root
+
+The worker refuses a source path that holds a soft link below its media root, as the server refuses one for direct play (link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc#decision-no-soft-links[ADR 0045]).
+The media root is the folder that the worker's source namespace mapping names.
+
+On Linux, the worker runs every FFmpeg process under Landlock, the kernel's sandbox for unprivileged processes.
+Landlock lets FFmpeg read the media root and the system files that FFmpeg needs, such as its libraries and fonts.
+Landlock lets FFmpeg open the GPU devices that its decoders and encoders need for reading and writing, such as `/dev/dri` and NVIDIA's device nodes.
+Landlock lets FFmpeg write regular files only in the worker's temporary folder.
+A worker whose kernel lacks Landlock refuses to start, and its health check reports why.
+Linux added Landlock in 5.13, and a container profile can also block it.
+A macOS worker (https://github.com/streamarr/streamarr-transcode-worker/issues/54[streamarr/streamarr-transcode-worker#54]) runs FFmpeg inside Seatbelt, macOS's sandbox, limited to the media and temporary folders.
+A future native Windows worker serves each source file to FFmpeg over a local address instead of a sandbox.
+
+*Why:* FFmpeg opens the source by its name.
+The worker's own check cannot stop a soft link that someone swaps in between that check and FFmpeg's open.
+A sandbox makes the kernel refuse every file outside the media root, whatever path FFmpeg opens.
+A worker that started without the sandbox would lose that protection without anyone noticing, so it refuses to start instead.
 
 The deployment chooses the storage backend.
 Worker scaling remains bounded by available storage and network throughput.
@@ -188,6 +209,7 @@ Explicitly deferred:
 * Direct access to object-storage backends, including S3-compatible services.
 Issue https://github.com/streamarr/streamarr-server/issues/77[#77] explores Apache OpenDAL as a possible implementation.
 * A worker-free delivery path for compatible media, such as serving the file as-is.
+link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045] later takes this up as direct play.
 * Multiple control-plane replicas, as already deferred in ADR 0018.
 * Worker-to-client or object-store segment delivery.
 * An in-process worker mode inside the server.
@@ -201,6 +223,13 @@ The Kubernetes example uses a separate worker Deployment.
 Local development needs a running worker for playback and scans.
 That worker runs in a container, or natively on macOS under link:0029-pin-jellyfin-ffmpeg-releases.adoc[ADR 0029].
 * All installations use the same worker execution path, so single-node use also exercises remote dispatch and recovery.
+* Landlock keeps FFmpeg inside the media root, but it does not stop FFmpeg from following a soft link to another file inside that root.
+Someone who can write to the library can still swap in such a link after the worker's check.
+FFmpeg then reads a different file from the same media root.
+A media root that holds files which some viewers may not see is exposed to that swap.
+* A Linux worker needs a kernel with Landlock, and its container profile must allow Landlock.
+Docker Desktop on Windows runs containers on Microsoft's WSL2 kernel, which enables Landlock.
+Whether Docker's default seccomp profile allows the Landlock system calls is not yet checked.
 * Changes to FFmpeg handling are released with the worker.
 * Cross-repository changes require coordinating contract publication, capability support, and the worker image used by server tests.
 * The server's in-process worker tests become container tests, and a scripted `ffmpeg` replaces the fake process manager.
@@ -215,6 +244,9 @@ ADR 0035 decides how those sessions are secured.
 The local FFmpeg contributor is removed, while worker connectivity continues to affect aggregate health.
 
 == Rejected Alternatives
+
+* Running FFmpeg without a sandbox and relying on the worker's own path check leaves the window between that check and FFmpeg's open.
+* Starting a worker without Landlock, with a warning, lets the protection vanish on an old kernel or under a strict container profile.
 
 * A Maven reactor in the server repository, as issue https://github.com/streamarr/streamarr-server/issues/248[#248] proposed — separates the jars but retains a shared engine that would need its own publication process after a repository split.
 * Publishing the engine and contract as Maven artifacts on Maven Central, GitHub Packages, or JitPack — adds artifact publication and dependency coordination.

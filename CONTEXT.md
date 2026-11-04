@@ -193,7 +193,7 @@ Outside Original, a video copy costs its video plus the session's audio, and the
 _Avoid_: client capabilities (what the player can decode), quality cap
 
 **Language override**:
-A Profile's choice of audio language, subtitle language or subtitle mode for one episode or movie, one season or one series. An empty choice comes from the next wider level. The choice that the client sends when it starts a stream session comes first, then the most specific override, then the Profile's preferences, then the file's own default. A switch of audio or subtitles during playback becomes the Profile's override for that series, or for that movie; turning on a full subtitle stores its language with the mode `ALWAYS` (ADR 0043).
+A Profile's choice of audio language, subtitle language or subtitle mode for one episode or movie, one season or one series. An empty choice comes from the next wider level. The choice that the client sends when it starts a stream session comes first, then the most specific override, then the Profile's preferences, then the file's own default. A switch of audio or subtitles in the player becomes the Profile's override for that episode or movie only, and never carries to the next episode; turning on a full subtitle stores its language with the mode `ALWAYS`. A change on a settings screen outside the player stores the override of that screen's episode, movie, season or series (ADR 0043).
 _Avoid_: track preference, per-title track, per-track override, default track (the file's flag)
 
 **Preferred audio languages**:
@@ -201,8 +201,8 @@ A Profile's ordered list of at most five audio languages. A stream session plays
 _Avoid_: preferred language (unqualified), language code (for the enum value)
 
 **Subtitle mode**:
-A Profile's rule for when a subtitle track starts on: `OFF` starts none, not even a forced track; `FORCED`, the default, starts only a forced track in the selected audio's language; `ALWAYS` starts the track in the Profile's default subtitle language; `FOREIGN_AUDIO` starts that track when the selected audio is in none of the Profile's preferred audio languages, and otherwise acts like `FORCED` (ADR 0043).
-_Avoid_: subtitle preference, subtitles on or off (for the stored setting), auto subtitles
+A Profile's rule for when a subtitle track starts on: `OFF` starts none, not even a forced track; `FORCED`, the default, starts only a forced track in the selected audio's language; `ALWAYS` starts the track in the Profile's default subtitle language (ADR 0043).
+_Avoid_: subtitle preference, subtitles on or off (for the stored setting), auto subtitles, foreign audio (no such mode)
 
 **Audio step**:
 One audio codec, channel layout and bitrate that the server can deliver in place of the stream session's audio under the viewer's maximum bitrate: the session's own audio first, then a lower-rate step for a FLAC or ALAC rendition above 48 kHz (ADR 0043), then multichannel steps at lower bitrates, then AAC stereo at 128 and 96 kb/s, or AAC mono at 96 kb/s for a mono track or when no AAC entry for HLS accepts more than one channel.
@@ -442,7 +442,7 @@ One output format that the server chooses within a playback session. Each format
 _Avoid_: fallback stream, replacement (unqualified)
 
 **Encoder backend**:
-An encoder that a worker runs for a codec family, together with whether it is hardware or software. A worker can run a hardware and a software backend for the same codec family, so the variants of one codec family can come from two backends at once (ADR 0044). When a connected worker has a hardware backend for the chosen codec family, the server dispatches each variant to a worker with that hardware backend first, and to a software backend only when no such worker has a free playback slot (ADR 0009). Every replacement attempt for a variant must use the backend of the job attempt that produced the variant's initialization segment (ADR 0037). When a hardware backend fails during a stream, playback continues on a new variant from the software backend of the same codec family, and the worker stops offering the failed backend until it passes its check again (ADR 0044).
+An encoder that a worker runs for a codec family, together with whether it is hardware or software. A worker can run a hardware and a software backend for the same codec family, so the variants of one codec family can come from two backends at once (ADR 0044). When a connected worker has a hardware backend for the chosen codec family, the server dispatches each variant to a worker with that hardware backend first, and to a software backend only when no such worker has a free playback slot (ADR 0009). Every replacement attempt for a variant must use the backend of the job attempt that produced the variant's initialization segment (ADR 0037). When a hardware backend fails during a stream, playback continues on a new variant from the software backend of the same codec family on any worker with room, the failed worker first, and the worker stops offering the failed backend until it passes its check again (ADR 0044).
 _Avoid_: encoder capability, codec
 
 **Completed attempt**:
@@ -480,7 +480,7 @@ The number of items of one kind that a worker accepts at once. Each worker grant
 _Avoid_: limit (unqualified), quota, concurrency
 
 **Playback slots**:
-The capacity for job attempts that encode video. A worker setting fixes it until encoder headroom replaces it. A job attempt that copies the video takes no playback slot, even when it encodes audio, and the server's transcode limit leaves it out too (ADR 0044). Probes never use a playback slot.
+The capacity for job attempts that encode video. A worker setting fixes it until encoder headroom replaces it. A job attempt that copies the video takes no playback slot, even when it encodes audio, and the server's transcode limit leaves it out too (ADR 0044). A worker bounds its copies by a copy cap that it sizes from its container's memory limit instead (ADR 0037). Probes never use a playback slot.
 _Avoid_: slots for probes, shared slots, free slots (as encoder headroom)
 
 **Playback probe**:

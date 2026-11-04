@@ -21,10 +21,11 @@ An image subtitle track that the viewer selects is burned into the video for a c
 Another amendment settles languages and how clients draw subtitles.
 Languages come from one server table, which the schema exposes as an enum.
 Each Profile has an ordered list of at most five audio languages, one default subtitle language and a subtitle mode (<<decision-languages>>).
-The subtitle mode is `OFF`, `FORCED`, `ALWAYS` or `FOREIGN_AUDIO`, and `FORCED` is the default.
+The subtitle mode is `OFF`, `FORCED` or `ALWAYS`, and `FORCED` is the default.
 The language that the client picks when it starts the stream session comes first.
 The Profile's overrides for the episode or movie, the season and the series come next, then the Profile's preferences, then the file's default.
-A language that the viewer switches to during playback becomes the Profile's override for that series.
+A switch in the player becomes the Profile's override for that episode or movie only, and never carries to the next episode.
+A change on a settings screen outside the player sets the override at that screen's level, or the Profile's preferences.
 Clients draw subtitles in a layer above the platform's player, from the original subtitle data that the server sends (<<decision-subtitle-layer>>).
 Burn-in and WebVTT renditions stay the fallback for a client without that layer.
 A subtitle file beside the source file is a subtitle track of that media file.
@@ -554,14 +555,12 @@ Each Profile holds three language preferences:
 
 link:0024-identity-authority-by-relationship.adoc[ADR 0024] keeps a Profile's preferences with the Profile.
 
-The subtitle mode has four values:
+The subtitle mode has three values:
 
 * `OFF` starts no subtitle track, not even a forced track.
 * `FORCED` starts only a forced track whose language matches the selected audio (<<decision-subtitle-selection>>).
 `FORCED` is the default.
 * `ALWAYS` starts the track in the subtitle language, whatever the audio.
-* `FOREIGN_AUDIO` starts the track in the subtitle language when the selected audio is in none of the languages of the Profile's audio list.
-Otherwise it acts like `FORCED`.
 
 A Profile can override the audio language, the subtitle language or the subtitle mode for one episode or movie, one season or one series.
 Each override belongs to one Profile.
@@ -605,15 +604,23 @@ The client turns on the subtitle track that the stream decision names.
 Direct play follows the same choices (link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045]).
 After the player opens the file, the client selects the audio track and the subtitle track that the stream decision names.
 A client's declaration states whether its direct-play player can select an audio track.
-When it cannot, the stream decision chooses direct play only for a file with one audio track, and otherwise plays the file over HLS.
-Such a player picks a track by its own rule, which differs between engines and can ignore the file's default flag.
-`FOREIGN_AUDIO` then compares the Profile's audio list with the track that actually plays.
+AVPlayer and Safari's player can, so they direct-play a file with several audio tracks and switch its audio in place.
+A browser player such as Chromium's cannot.
+For such a player, the stream decision chooses direct play only for a file with one audio track.
+It plays a file with several audio tracks over HLS from the start.
+An audio switch is then a switch between audio renditions (<<decision-audio-renditions>>), which never restarts the video and never falls back to another format.
+A player that cannot select a track picks one by its own rule, which differs between engines and can ignore the file's default flag.
 
-When the viewer switches the audio language or the subtitles during playback, the server stores the change as the Profile's override for the series.
-For a movie, the switch becomes the Profile's override for that movie.
+When the viewer switches the audio language or the subtitles in the player, the server stores the change as the Profile's override for that episode, or for that movie.
+The switch never changes the override of the season or the series, so the next episode starts from the wider levels again.
 An audio switch stores the new audio language.
-Turning on a full subtitle stores its language and the mode `ALWAYS`, so the next episode starts with it.
-Turning full subtitles off stores the mode `FORCED`, or `OFF` when the Profile's own mode is `OFF`.
+Turning on a full subtitle stores its language and the mode `ALWAYS`, so resuming the same episode or movie starts with it.
+Turning full subtitles off stores the mode `FORCED`, or `OFF` when the wider levels give the episode or movie the mode `OFF`.
+
+A change made outside the player persists at the level where the viewer makes it.
+The settings screen of an episode or a movie stores that episode's or movie's override.
+The settings screen of a season or a series stores that season's or series' override.
+The Profile's settings screen changes the Profile's preferences.
 
 *Why:* A viewer who prefers one language wants it in every file without choosing it each time.
 A viewer who understands several languages ranks them.
@@ -625,17 +632,18 @@ Clients then show and send an enum value and never parse the codes in files.
 A forced track carries lines that every viewer needs, so `FORCED` is the default.
 `FORCED` starts no full subtitle that the viewer did not ask for.
 `OFF` serves a viewer who wants nothing over the picture.
-`FOREIGN_AUDIO` serves a viewer who reads English and watches one series in its Japanese original and another series in an English dub.
-That viewer needs subtitles on the Japanese audio and none on the dub.
-`ALWAYS` shows subtitles on the dub, and `FORCED` shows none on the Japanese audio.
-Without `FOREIGN_AUDIO`, that viewer needs an override for each title.
+`ALWAYS` serves a viewer who reads along with every title.
+Three modes keep the setting simple.
+A viewer who wants subtitles on one series and none on another sets a series override on that series' settings screen.
 
 The client's pick at the start of a stream session is the viewer's choice for this playback, so it comes first.
 A viewer can watch one series in its original language and another series dubbed, so overrides exist at each level.
 The most specific override describes the viewer's narrowest choice, so it comes first.
 Viewers in one Household can prefer different languages, so each override belongs to one Profile.
 Each episode's file can list its tracks in a different order, so an override names a language rather than a track.
-A viewer who switches language in one episode usually wants that language in the next episode, so the switch applies to the series.
+A switch in the player often serves one moment, such as a commentary language or subtitles for one scene, so it stays with that episode or movie.
+Resuming that episode or movie keeps the switch, because the override stays stored.
+A viewer who wants a change for a whole season or series makes it on that season's or series' settings screen, where the level is explicit.
 
 [[decision-subtitle-layer]]
 === Clients draw subtitles in a layer above the platform's player, and burn-in is the fallback
@@ -1102,21 +1110,24 @@ The durable job does that work before playback.
 * Every client needs a subtitle layer, with libass for ASS and SSA and a PGS decoder, to show every subtitle without burn-in.
 * On a client with the layer, a subtitle choice never replaces the stream session and never keeps a file off direct play.
 * The server sends original subtitle data, so a client that has the layer parses SubRip, ASS, SSA and PGS itself.
-* A Profile's language overrides grow with each series, season and title that the viewer changes.
+* A Profile's language overrides grow with each episode, movie, season and series that the viewer changes, and every switch in the player adds or changes one episode's or movie's override.
 * A track whose language code the server's table does not map never matches a viewer's language.
 Adding a language or a regional variant changes that table and the `Language` enum together.
-* Under `FOREIGN_AUDIO`, a viewer who lists a language in the audio list gets no full subtitle on audio in that language.
+* A viewer who wants a switch for every episode of a series makes it on the series' settings screen, not in the player.
+* A client whose player cannot select an audio track plays a file with several audio tracks over HLS, which needs a stream session and a worker even when the file's codecs need no conversion.
 * The web and Apple clients gain audio and subtitle menus.
 
 == Rejected Alternatives
 
 * One preferred audio language per Profile: when a file lacks that language, a viewer who understands a second language gets the file's default, which can be a third language.
 * Storing the codes that files carry in the preferences: one language would need each of its codes, such as `fr`, `fre` and `fra`, and every client would match them itself.
-* A fifth subtitle mode that turns subtitles on for every title whose original language differs from the viewer's, in the style of "always for foreign films": it reads the original language from metadata, which can be missing or wrong.
-`FOREIGN_AUDIO` decides from the audio that actually plays.
+* A subtitle mode that starts subtitles when the audio is in none of the Profile's audio languages: three modes keep the setting simple, and a series override covers a viewer who wants subtitles on one series and not another.
+* A subtitle mode that turns subtitles on for every title whose original language differs from the viewer's, in the style of "always for foreign films": it reads the original language from metadata, which can be missing or wrong.
 * A per-track override, which names one track of a file, fails on the next episode, whose file can list its tracks in another order.
 * Overrides shared by every Profile of a Household force one viewer's language on another.
-* Remembering a switch only for the episode makes the viewer switch again in every episode.
+* Storing a switch in the player as the override for the series: a switch for one moment, such as a commentary language or subtitles for one scene, would change every later episode.
+* Not storing a switch in the player: resuming the same episode or movie would lose the viewer's choice.
+* Direct play of a file with several audio tracks on a player that cannot select a track, with a fall back to HLS when the viewer switches audio: the switch would restart the video, and the player could start on a track other than the one that the stream decision names.
 * Converting ASS and SSA to WebVTT for every client loses their styling and positions.
 * Burning in every image subtitle for every client encodes the video whenever a viewer turns on a PGS track.
 * Downloading missing subtitles from an online subtitle database needs an account with an outside service and tells that service which files the library holds, so it is out of scope.

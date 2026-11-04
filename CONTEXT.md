@@ -177,8 +177,16 @@ Outside Original, a video copy costs its video plus the session's audio, and the
 _Avoid_: client capabilities (what the player can decode), quality cap
 
 **Language override**:
-A Profile's choice of audio or subtitle language for one episode or movie, one season or one series. The most specific override comes first, then the Profile's preferred language, then the file's own default. A language that the viewer switches to during playback becomes the Profile's override for that series (ADR 0043).
-_Avoid_: track preference, per-title track, default track (the file's flag)
+A Profile's choice of audio language, subtitle language or subtitle mode for one episode or movie, one season or one series. An empty choice comes from the next wider level. The language that the client picks when it starts a stream session comes first, then the most specific override, then the Profile's preferences, then the file's own default. A language that the viewer switches to during playback becomes the Profile's override for that series, or for that movie (ADR 0043).
+_Avoid_: track preference, per-title track, per-track override, default track (the file's flag)
+
+**Preferred audio languages**:
+A Profile's ordered list of at most five audio languages. A stream session plays the first language in the list that the file holds in a track that can be the default. Each language is a value of the server's language table, which the schema exposes as the `Language` enum and which maps each value to the codes that files carry (ADR 0043).
+_Avoid_: preferred language (unqualified), language code (for the enum value)
+
+**Subtitle mode**:
+A Profile's rule for when a subtitle track starts on: `OFF` starts none, not even a forced track; `FORCED`, the default, starts only a forced track in the selected audio's language; `ALWAYS` starts the track in the Profile's default subtitle language; `FOREIGN_AUDIO` starts that track when the selected audio is in none of the Profile's preferred audio languages, and otherwise acts like `FORCED` (ADR 0043).
+_Avoid_: subtitle preference, subtitles on or off (for the stored setting), auto subtitles
 
 **Audio step**:
 One audio codec, channel count and bitrate that the server can deliver in place of the stream session's audio under the viewer's maximum bitrate: the session's own audio first, then multichannel steps at lower bitrates, then AAC stereo at 128, 96 and 64 kb/s, or AAC mono at 64 kb/s for a mono track or when no AAC entry for HLS accepts more than one channel.

@@ -19,7 +19,11 @@ Each audio track keeps its own copy-or-encode decision inside one audio codec pe
 An image subtitle track that the viewer selects is burned into the video for a client without a subtitle layer.
 
 Another amendment settles languages and how clients draw subtitles.
-Each Profile has a preferred audio language and a preferred subtitle language, and the Profile's overrides for an episode or movie, a season or a series come first (<<decision-languages>>).
+Languages come from one server table, which the schema exposes as an enum.
+Each Profile has an ordered list of at most five audio languages, one default subtitle language and a subtitle mode (<<decision-languages>>).
+The subtitle mode is `OFF`, `FORCED`, `ALWAYS` or `FOREIGN_AUDIO`, and `FORCED` is the default.
+The language that the client picks when it starts the stream session comes first.
+The Profile's overrides for the episode or movie, the season and the series come next, then the Profile's preferences, then the file's default.
 A language that the viewer switches to during playback becomes the Profile's override for that series.
 Clients draw subtitles in a layer above the platform's player, from the original subtitle data that the server sends (<<decision-subtitle-layer>>).
 Burn-in and WebVTT renditions stay the fallback for a client without that layer.
@@ -526,34 +530,80 @@ In normal output, audio trails video by at most 0.16 s, so the 1 s margin never 
 Evidence: <<evidence-audio-cases>>.
 
 [[decision-languages]]
-=== The Profile's language preferences choose the default audio language and the subtitles that start on
+=== The Profile's language preferences and overrides choose the audio language and the subtitles that start on
 
-Each Profile has a preferred audio language and a preferred subtitle language.
+Languages come from one server table.
+The table lists two-letter language codes and the regional variants that viewers need, such as Brazilian Portuguese and Traditional Chinese.
+The GraphQL schema exposes the table as a `Language` enum, with values such as `EN`, `FR`, `PT_BR`, `ES_419`, `ZH_HANS` and `ZH_HANT`.
+The table maps each value to the codes that files carry, such as `fr`, `fre` and `fra` for `FR`.
+A track whose code the table does not map has no language for these rules.
+
+Each Profile holds three language preferences:
+
+* an ordered list of at most five audio languages;
+* one default subtitle language;
+* a subtitle mode, which decides when a subtitle track starts on.
+
 link:0024-identity-authority-by-relationship.adoc[ADR 0024] keeps a Profile's preferences with the Profile.
-A Profile can also override either language for one episode or movie, for one season or for one series.
+
+The subtitle mode has four values:
+
+* `OFF` starts no subtitle track, not even a forced track.
+* `FORCED` starts only a forced track whose language matches the selected audio (<<decision-subtitle-selection>>).
+`FORCED` is the default.
+* `ALWAYS` starts the track in the subtitle language, whatever the audio.
+* `FOREIGN_AUDIO` starts the track in the subtitle language when the selected audio is in none of the languages of the Profile's audio list.
+Otherwise it acts like `FORCED`.
+
+A Profile can override the audio language, the subtitle language or the subtitle mode for one episode or movie, one season or one series.
 Each override belongs to one Profile.
+An override can leave any of the three empty, and the next wider level then supplies it.
 An override names a language, never one track of a file.
-An override is user-authored data, so it attaches to the title's catalog entry (link:0039-catalog-entries-hold-metadata-edits-and-user-data.adoc[ADR 0039]).
+An override is user-authored data, so it attaches to the catalog entry of its episode, movie, season or series (link:0039-catalog-entries-hold-metadata-edits-and-user-data.adoc[ADR 0039]).
 
-When a stream session starts, the stream decision takes the audio language from the first of these that applies:
+When a stream session starts, the stream decision takes each language and the subtitle mode from the first of these that sets it:
 
+. the language that the client picks when it starts the stream session;
 . the Profile's override for the episode or movie;
 . the Profile's override for the season;
 . the Profile's override for the series;
-. the Profile's preferred audio language;
-. the language of the default track that <<decision-audio-renditions>> chooses from the file's own flags.
+. the Profile's preferences;
+. the file's own default.
 
-A language applies only when the file holds a track in that language that can be the default.
-The ranking of <<decision-sibling-ranking>> then chooses the default track among the tracks of that language.
-The subtitle language follows the same order, with the Profile's subtitle overrides and preferred subtitle language.
-The last step for subtitles is the subtitle track that the file marks as default, or no subtitle when the file marks none.
+The client's pick names an audio language, a subtitle language or both, never a mode.
+A subtitle language that the client picks turns that subtitle on.
+
+For audio, a language applies only when the file holds a track in that language that can be the default.
+Otherwise the next step applies.
+At the Profile's step, the first language in the audio list that applies wins.
+The file's own default is the default track that <<decision-audio-renditions>> chooses from the file's flags.
+The ranking of <<decision-sibling-ranking>> then chooses the default track among the tracks of the chosen language.
+
+For subtitles, the file's own default is the language of the subtitle track that the file marks as default.
+The subtitle mode then decides whether a track in that language starts on.
+When the file holds no full track in that language, no full subtitle starts.
+The rules of <<decision-subtitle-selection>> for forced tracks still apply, except under `OFF`.
 The client turns on the subtitle track that the stream decision names.
-The rules of <<decision-subtitle-selection>> for forced tracks still apply while subtitles are off.
 
 When the viewer switches the audio language or the subtitle language during playback, the server stores the new language as the Profile's override for the series.
 For a movie, the switch becomes the Profile's override for that movie.
 
 *Why:* A viewer who prefers one language wants it in every file without choosing it each time.
+A viewer who understands several languages ranks them.
+When a file lacks the first language, the second plays instead of the file's default.
+Five languages cover a viewer who speaks many, and keep the list short to edit.
+Files name one language in several ways, so one table maps those codes.
+Clients then show and send an enum value and never parse the codes in files.
+
+A forced track carries lines that every viewer needs, so `FORCED` is the default.
+`FORCED` starts no full subtitle that the viewer did not ask for.
+`OFF` serves a viewer who wants nothing over the picture.
+`FOREIGN_AUDIO` serves a viewer who reads English and watches one series in its Japanese original and another series in an English dub.
+That viewer needs subtitles on the Japanese audio and none on the dub.
+`ALWAYS` shows subtitles on the dub, and `FORCED` shows none on the Japanese audio.
+Without `FOREIGN_AUDIO`, that viewer needs an override for each title.
+
+The client's pick at the start of a stream session is the viewer's choice for this playback, so it comes first.
 A viewer can watch one series in its original language and another series dubbed, so overrides exist at each level.
 The most specific override describes the viewer's narrowest choice, so it comes first.
 Viewers in one Household can prefer different languages, so each override belongs to one Profile.
@@ -575,7 +625,7 @@ When those rules need burn-in, the client replaces the stream session inside the
 
 For a client with the layer, the server never burns in a subtitle that the layer draws.
 Such a subtitle never makes the stream session encode its video.
-While subtitles are off, a forced track whose language matches the selected audio still shows, whatever its format.
+While subtitles are off, a forced track whose language matches the selected audio still shows, whatever its format, except under the subtitle mode `OFF`.
 A client with the layer selects that forced track itself, draws it in the layer when the layer draws its format, and selects again when the audio language changes.
 link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045] counts a subtitle that the layer draws as covered for direct play.
 For a client without the layer, or for a format that the client's layer does not draw, the earlier rules stay.
@@ -639,6 +689,7 @@ An SDH track also carries `AUTOSELECT=NO`, although Apple's authoring guide asks
 The Apple and Android clients read the system captions setting and select an SDH track themselves.
 hls.js ignores `FORCED`.
 So the web client selects a forced track itself when subtitles are off and the forced track's language matches the audio language.
+Under the subtitle mode `OFF` (<<decision-languages>>), every client keeps a forced track off.
 
 *Why:* In one test, every subtitle rendition carried `AUTOSELECT=YES`.
 The page turned subtitles off, and then the audio changed language.
@@ -825,7 +876,7 @@ The format-attempt budget limits how many output formats the server chooses in o
 That replacement uses none of the format-attempt budget.
 Under link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033], the server dispatches a job that burns in a subtitle only to a worker that advertises burn-in.
 
-When subtitles are off, a forced image subtitle track whose language matches the selected audio is burned in automatically.
+When subtitles are off, a forced image subtitle track whose language matches the selected audio is burned in automatically, unless the subtitle mode is `OFF`.
 So the stream session encodes its video.
 A forced image track that is burned in automatically counts as a selected subtitle.
 Under link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045], the client plays the source file directly only when the client's declaration covers every selected subtitle.
@@ -1023,11 +1074,18 @@ The durable job does that work before playback.
 * On a client with the layer, a subtitle choice never replaces the stream session and never keeps a file off direct play.
 * The server sends original subtitle data, so a client that has the layer parses SubRip, ASS, SSA and PGS itself.
 * A Profile's language overrides grow with each series, season and title that the viewer changes.
+* A track whose language code the server's table does not map never matches a viewer's language.
+Adding a language or a regional variant changes that table and the `Language` enum together.
+* Under `FOREIGN_AUDIO`, a viewer who lists a language in the audio list gets no full subtitle on audio in that language.
 * The web and Apple clients gain audio and subtitle menus.
 
 == Rejected Alternatives
 
-* An override that names one track fails on the next episode, whose file can list its tracks in another order.
+* One preferred audio language per Profile: when a file lacks that language, a viewer who understands a second language gets the file's default, which can be a third language.
+* Storing the codes that files carry in the preferences: one language would need each of its codes, such as `fr`, `fre` and `fra`, and every client would match them itself.
+* A fifth subtitle mode that turns subtitles on for every title whose original language differs from the viewer's, in the style of "always for foreign films": it reads the original language from metadata, which can be missing or wrong.
+`FOREIGN_AUDIO` decides from the audio that actually plays.
+* A per-track override, which names one track of a file, fails on the next episode, whose file can list its tracks in another order.
 * Overrides shared by every Profile of a Household force one viewer's language on another.
 * Remembering a switch only for the episode makes the viewer switch again in every episode.
 * Converting ASS and SSA to WebVTT for every client loses their styling and positions.

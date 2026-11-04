@@ -24,6 +24,7 @@ The two-segment relocation gap depends on the decode-only early-start seek that 
 With the decode-only early-start seek, a job attempt reads from the source keyframe that the server sends.
 The job attempt then decodes the media before its first segment but does not encode that media.
 An amendment keeps an idle stream session's segments for one hour by default, as a ServerAdmin setting, and ends the longest-idle stream sessions first when the segment disk runs short of space (<<decision-idle-retention>>).
+The same amendment has a left variant that copies the video give up its place under a worker's copy cap (<<decision-requested-variant>>).
 
 === Implementation status
 
@@ -37,6 +38,7 @@ The server still relocates forward when the segment 24 s before the requested se
 https://github.com/streamarr/streamarr-server/issues/550[streamarr/streamarr-server#550] implements <<decision-newest-request>>.
 https://github.com/streamarr/streamarr-server/pull/676[streamarr/streamarr-server#676] implements the current segment as the media segment that the player needs next, and the preroll in the startup budget.
 https://github.com/streamarr/streamarr-server/pull/677[streamarr/streamarr-server#677] keeps the variant that the player leaves running until the switched variant delivers a media segment.
+https://github.com/streamarr/streamarr-server/pull/744[streamarr/streamarr-server#744] takes copies out of the transcode limit and the worker job slots, and stops a left variant that copies the video when a worker refuses a copy.
 The server does not yet publish the preparing-or-ready state (https://github.com/streamarr/streamarr-server/issues/507[streamarr/streamarr-server#507]).
 The worker does not yet pad an encoded variant past a source that ends early (https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511]).
 The server does not yet start extra variants from encoder headroom (https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499]).
@@ -200,12 +202,18 @@ The replacement runs on one worker, so the left variant frees a worker job slot 
 A start that fails for another reason, such as no worker that runs the variant's pinned encoder, leaves the left variant running.
 An initialization request never stops a variant to make room.
 A variant that copies the video starts without checking the limit, even when its job attempt encodes audio.
+* A worker refuses a copy while its copy cap is full (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-memory[ADR 0037]).
+A left variant whose job attempt copies the video holds one place under the copy cap of the worker that runs it.
+The worker's refusal does not say that the copy cap is full, so the server treats every refused copy as a full copy cap of the worker that refused it.
+When a worker refuses to start a variant that copies the video, and the stream session's left variant copies the video on that worker, the server stops the left variant and tries the start once more.
+The same rule holds when a worker refuses the replacement of a dead or stalled job attempt that copies the video.
 * A left variant never keeps another stream session from playing.
 When no configured transcode slot is free, or no worker that can run the start has a free worker job slot, the server stops one other stream session's left variant and tries once more.
+When a worker refuses a copy and runs another stream session's left variant that copies the video, the server stops that left variant and tries the copy once more.
 It does so when a new stream session is refused admission, when a new stream session's first-listed variant cannot start, when a variant cannot start on demand, and when a dead or stalled job attempt cannot be replaced.
 The server stops another stream session's left variant only while the left variant's job attempt runs and the job attempt of that stream session's requested variant runs.
 While the requested variant has no running job attempt, the left variant is the only variant that can serve that stream session's player.
-The server stops only a left variant whose stop frees the slot that the start lacks.
+The server stops only a left variant whose stop frees the slot, or the place under the copy cap, that the start lacks.
 * Apart from the first-listed variant, no variant starts before the player requests one of that variant's segments, unless the headroom model of link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] allows that variant to start early.
 * Until the headroom model is validated, the headroom model allows no variant to start early.
 * The headroom model never starts a lower variant beside a copy in Auto early, and never keeps one running as an extra variant (link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc#decision-lower-variants[ADR 0050]).
@@ -257,6 +265,8 @@ The played variant survives a rapid climb because the player last received media
 A switched variant that has delivered nothing is not a known fallback.
 The left variant must not keep the switched variant from starting, so the left variant gives up its slot when no other slot is free.
 The left variant only insures one player's switch back, so it gives up its slot to any other stream session that finds no free slot.
+A place under a worker's copy cap is a slot for copies, so a left variant that copies the video gives up that place in the same cases.
+The server learns that a copy cap is full only from the worker's refusal, so a refusal triggers the stop.
 Unlike a requested or played variant, stopping it stalls no viewer.
 The left variant only helps while it can serve the player's position.
 After a seek past its relocation gap, its output no longer serves the player.
@@ -508,6 +518,8 @@ While the left variant runs, the switched variant shares the worker's encoder wi
 The switched variant's first media segment therefore takes longer than under the previous rule, which stopped the left variant at once.
 That cost was not measured.
 When another stream session needs the left variant's slot, the player's switch back starts a new job attempt.
+The same holds for a left variant that copies the video when a worker refuses a copy.
+A worker's refusal that has another cause still stops a left variant that copies the video on that worker, so that player's switch back can start a new job attempt that a full copy cap would not have required.
 
 The measured sessions started no variant when the stream session was created.
 Starting the first-listed variant at creation was not measured.
@@ -578,6 +590,8 @@ One player's insurance for a switch back would refuse another viewer's playback 
 * Stopping the first left variant that any other stream session keeps.
 That stream session's requested variant may have failed to start, and the stop would then leave its player with no running variant.
 The stop may also free a slot on a worker that cannot run the start.
+* Letting a left variant that copies the video keep its place under a worker's copy cap would let a left variant refuse another viewer's copy.
+* Stopping a left variant that copies the video only once the worker reports that its copy cap is full would need a refusal reason that the worker contract does not have.
 * Counting the free worker job slots of every worker that can run the stream session's decision when the variant is pinned to one encoder.
 A free slot on a worker without the pinned encoder would hide the shortage, so the start would never stop a left variant on the worker that runs the pinned encoder.
 * Stopping the stream session's own left variant on any worker when the start lacks a worker job slot.

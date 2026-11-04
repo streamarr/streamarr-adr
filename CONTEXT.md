@@ -316,7 +316,7 @@ An encoder is keyframe-verified when recordings under the pinned FFmpeg show tha
 _Avoid_: verified encoder (unqualified), GOP-verified encoder
 
 **Direct play**:
-The delivery in which the server sends the source file itself, and the player reads it with HTTP byte-range requests. Only Original direct-plays, and only a file whose source container, video stream, audio tracks and any selected subtitle the client capability declaration covers. A direct-play stream session starts no job attempt (ADR 0045).
+The delivery in which the server sends the source file itself, and the player reads it with HTTP byte-range requests. Only Original direct-plays, and only a file whose source container, video stream, audio tracks and any selected subtitle the client capability declaration covers. A direct-play stream session starts no job attempt (ADR 0045). A player that cannot select an audio track inside the file, such as Chromium's or Firefox's, direct-plays a file only when the chosen audio track is the file's first audio track; when the viewer switches to another track, the client moves to HLS at the viewer's position (ADR 0043).
 _Avoid_: direct stream, passthrough, stream copy (an HLS delivery)
 
 **Sample entry**:
@@ -442,7 +442,7 @@ One output format that the server chooses within a playback session. Each format
 _Avoid_: fallback stream, replacement (unqualified)
 
 **Encoder backend**:
-An encoder that a worker runs for a codec family, together with whether it is hardware or software. A worker can run a hardware and a software backend for the same codec family, so the variants of one codec family can come from two backends at once (ADR 0044). When a connected worker has a hardware backend for the chosen codec family, the server dispatches each variant to a worker with that hardware backend first, and to a software backend only when no such worker has a free playback slot (ADR 0009). Every replacement attempt for a variant must use the backend of the job attempt that produced the variant's initialization segment (ADR 0037). When a hardware backend fails during a stream, playback continues on a new variant from the software backend of the same codec family on any worker with room, the failed worker first, and the worker stops offering the failed backend until it passes its check again (ADR 0044).
+An encoder that a worker runs for a codec family, together with whether it is hardware or software. A worker can run a hardware and a software backend for the same codec family, so the variants of one codec family can come from two backends at once (ADR 0044). When a connected worker has a hardware backend for the chosen codec family, the server dispatches each variant to a worker with that hardware backend first, and to a software backend only when no such worker has a free playback slot (ADR 0009). Every replacement attempt for a variant must use the backend of the job attempt that produced the variant's initialization segment (ADR 0037). When a hardware backend fails during a stream, playback continues on a new variant from the software backend of the same codec family on any worker with room, the failed worker first, and the worker stops offering the failed backend, and decodes in software, until the backend and the hardware decoder pass their checks again (ADR 0044).
 _Avoid_: encoder capability, codec
 
 **Completed attempt**:

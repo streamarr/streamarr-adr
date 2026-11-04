@@ -21,6 +21,8 @@ The stream session's payload has one GraphQL type for each delivery (<<decision-
 A later amendment for the same issue settles the source container values and the sample entries.
 Every video capability entry that lists a source container also lists the sample entries that the player opens (<<decision-sample-entries>>).
 The declaration names eight source containers, and the M4V and 3GP brands and a file without an `ftyp` box count as MP4 (<<decision-mp4-and-mov>>).
+Playback and library scans never follow a soft link, and the server serves each direct-play response from the file that it opened without following links (<<decision-no-soft-links>>).
+On a worker, FFmpeg runs in a sandbox that limits it to the media root (link:0033-transcode-worker-is-a-separate-service.adoc#decision-ffmpeg-sandbox[ADR 0033]).
 
 NOTE: link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052] adds further fallbacks in Original.
 After a format error during the HLS copy, the server falls back to an encode, and the playback choice changes to Auto.
@@ -137,6 +139,30 @@ After the authority ends, the server denies the next request.
 A response that is already streaming when the authority ends still finishes.
 The server does not check the authority again while a response streams.
 The server only reads the source file.
+
+[[decision-no-soft-links]]
+=== Playback and library scans never follow a soft link
+
+A soft link, or symbolic link, is a file-system entry that points at another path.
+A hard link is another name for the same file, so a hard link is an ordinary file.
+
+The server answers `404 Not Found` to a direct-play request when any component of the file's path below the media root is a soft link.
+The server opens the file by walking from the media root one path component at a time, and it opens each component without following links.
+The server then serves every byte of the response from that open file.
+The server never opens the file again by its name.
+The worker refuses a soft link in the same way before it starts FFmpeg (link:0033-transcode-worker-is-a-separate-service.adoc#decision-ffmpeg-sandbox[ADR 0033]).
+
+The library scan skips every soft link.
+The scan records each skipped soft link in that scan's item results, with the reason "soft link" (link:0027-library-operations-are-durable-jobs.adoc[ADR 0027]).
+A file that a hard link names scans and plays like any other file.
+
+*Why:* A check of a path by its name, followed by an open by the same name, leaves a window between the two.
+In that window, anyone who can write to the library can swap a folder or the file for a soft link to a file outside the media root.
+The server would then serve that file to a viewer.
+An open of each component without following links, and a response from that one open file, leave no such window.
+Refusing every soft link is simpler than deciding which link targets are safe, because a link's target can change after any check.
+A scan that skipped no soft link would list files that playback then refuses.
+The item result tells the ServerAdmin why a file is missing from the library.
 
 [[decision-source-facts]]
 === Probe version 7 reports the sample entry of the file's video stream and the file's major brand
@@ -342,6 +368,8 @@ An HLS media segment, by contrast, lasts about 3 s.
 * An HEVC file tagged `hev1` plays over HLS on the Apple client, as a copy that the worker writes as `hvc1`.
 * A client that adds a sample entry must first play a real test file with it, so a new sample entry reaches direct play only after that check.
 * An old QuickTime file without an `ftyp` box is served as `video/mp4`.
+* A library that reaches its files through soft links loses those files at its next scan.
+The ServerAdmin must mount the real folders instead, for example with a bind mount.
 
 == Rejected Alternatives
 
@@ -385,6 +413,8 @@ The server would also offer an HEVC file tagged `hev1` unchecked, so a player th
 * Withholding MP4 and MOV from the HEVC entry until the declaration lists sample entries would keep every HEVC MP4 or MOV file off direct play.
 * An optional list of sample entries would let a client that omits it accept every sample entry, including those its player refuses.
 * Separate values for M4V and 3GP would name files that every client opens as MP4.
+* Resolving a file's real path, checking that the path lies under the media root and then opening the file by name leaves a window in which a swapped component defeats the check.
+* Following only the soft links whose targets lie under the media root has the same window, because a link's target can change after the check.
 * Counting a file without an `ftyp` box as MOV would follow some old QuickTime files but contradict ISO/IEC 14496-12, which reads such a file as `mp41`.
 
 == Evidence

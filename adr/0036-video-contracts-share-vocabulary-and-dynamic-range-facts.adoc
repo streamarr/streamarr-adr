@@ -42,6 +42,14 @@ The server, worker, and client contracts still need answers to the other open qu
 A later amendment to this ADR answers the remaining architectural questions.
 The implementation issues resolve the contract questions.
 
+A third amendment lets a copy carry typed bitstream rewrites (<<decision-bitstream-rewrites>>).
+Issue https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396] delivers the third amendment.
+The decision lists every bitstream rewrite of a copy, and the worker applies exactly the listed rewrites.
+The worker applies them to the fragmented MP4 that the job attempt's one FFmpeg process writes, before it delivers the segments.
+Each worker declares the bitstream rewrites that it supports.
+The third amendment also has the worker write the probed static HDR metadata into the decoder configuration record of an HEVC copy with a PQ output (<<decision-static-metadata-record>>).
+link:0013-stream-decision-architecture.adoc[ADR 0013] decides when the server lists each rewrite.
+
 == Context
 
 https://github.com/streamarr/streamarr-server/issues/399[The playback capabilities epic] requires the playlist to describe the media that the worker produces.
@@ -159,6 +167,8 @@ In this ADR, video stream means a media track, not the stream session that manag
 Use the same type to describe a source video stream and an output video stream, even when the source and output have different values.
 A planned or produced output never holds `UNSPECIFIED`, because the server chooses every value and the worker asserts every value.
 Validation enforces that rule, because the shared type permits the value.
+One exception applies to a copy that keeps Dolby Vision.
+Its planned output keeps the source's RPU observations, even when they are `UNSPECIFIED`, as link:0013-stream-decision-architecture.adoc#copy-planned-range[ADR 0013] decides.
 
 Use the following agreed structure.
 The TypeScript example shows the fields and values; the example does not choose a wire format or require an implementation language.
@@ -684,16 +694,17 @@ After a failed Dolby Vision copy whose compatible base the client declares, a fi
 After a format error during an HLS copy, a fixed quality falls back to an encode at the same fixed quality (ADR 0052).
 When the rules permit a format attempt, the server explicitly chooses the new output and leaves the source description unchanged.
 The probe recognizes Dolby Vision and HDR10+ in a source.
-A stream copy passes HDR10+ information through unchanged.
-A stream copy also passes the Dolby Vision RPUs through unchanged.
+A stream copy passes HDR10+ information through unchanged, unless the decision lists a bitstream rewrite that strips it (<<decision-bitstream-rewrites>>).
+A stream copy also passes the Dolby Vision RPUs through unchanged, under the same condition.
 An SDR-base Dolby Vision copy is a stream copy of a Dolby Vision source whose `compatibleBase` is `SDR`.
 The worker writes the sample entry of an SDR-base Dolby Vision copy as `hvc1` or `avc1`.
 A stream copy keeps the Dolby Vision configuration record only where the pinned FFmpeg build allows the record, as link:0013-stream-decision-architecture.adoc[ADR 0013] decides.
+When the decision lists the rewrite that normalizes the record, the worker writes the record itself (<<decision-bitstream-rewrites>>).
 The playlist describes an SDR-base Dolby Vision copy by the copy's base layer.
 The playlist entry of an SDR-base Dolby Vision copy takes its `CODECS` attribute from the base sample entry, `hvc1` or `avc1`.
 The same playlist entry declares `VIDEO-RANGE=SDR`.
 The same playlist entry carries no `SUPPLEMENTAL-CODECS` attribute.
-Only the playlist attributes that would announce Dolby Vision on a PQ or HLG base stay deferred.
+link:0013-stream-decision-architecture.adoc#hdr-copies[ADR 0013] decides the playlist attributes that announce Dolby Vision on a PQ or HLG base.
 This ADR defers encoding Dolby Vision or HDR10+ output; it does not defer passing them through.
 <<decision-undeclared-client>> decides which playback paths a Dolby Vision source permits for a client that declares no dynamic range.
 The server never copies a source with no compatible base to a client that declares no Dolby Vision support.
@@ -729,6 +740,84 @@ ADR 0013 records the player evidence for those copies.
 
 *Why:* No playlist can yet describe an HDR copy truthfully to a player that declared nothing.
 ADR 0013 gives the measurements behind this decision.
+
+[[decision-bitstream-rewrites]]
+=== A copy changes the source's video only through the bitstream rewrites that the decision lists
+
+A bitstream rewrite is a change that the worker makes to a copied video stream without decoding it.
+A stream copy passes the source's video through unchanged, apart from the bitstream rewrites that the decision lists.
+The decision lists every bitstream rewrite of a copy.
+The worker applies exactly the listed rewrites and no others.
+The produced-output check confirms each listed rewrite and finds no unlisted change.
+The playlist describes the output after the rewrites.
+Each rewrite lets a copy play where the client would otherwise need an encode.
+
+The decision can list these bitstream rewrites:
+
+* *Strip Dolby Vision.*
+The worker removes every RPU, every enhancement-layer unit and the Dolby Vision configuration record.
+In HEVC, the RPUs are NAL units of type 62.
+A single-track profile 7 stream carries its enhancement layer in NAL units of type 63, and one sample can hold several of them.
+In AV1, the worker removes every metadata OBU that carries an RPU.
+The copy then plays on its PQ or HLG base.
+The server lists this rewrite for a client that declares the base range but not the copy's Dolby Vision profile at the copy's Dolby Vision level.
+The server also lists it for the format attempt after a failed Dolby Vision copy, in every playback choice (link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc#decision-dolby-vision[ADR 0052]).
+The server never strips Dolby Vision from profiles 5, 10.0, 8.2 or 9.
+Profiles 5 and 10.0 have no base to play, and profiles 8.2 and 9 keep their RPUs under their SDR base.
+* *Strip HDR10+.*
+The worker removes the HDR10+ messages.
+The server lists this rewrite for a client that declares the base range but not HDR10+.
+A copy that keeps Dolby Vision also strips the HDR10+ messages by default.
+A measurement on the Apple TV of a source that carries both can change that default.
+A copy that strips Dolby Vision keeps the HDR10+ messages for a client that declares HDR10+.
+* *Convert single-track Dolby Vision profile 7 to profile 8.1.*
+Issue https://github.com/streamarr/streamarr-server/issues/651[streamarr/streamarr-server#651] defines this rewrite.
+* *Normalize the Dolby Vision configuration record.*
+The worker writes the record that the copy's output needs, not the record that the source declares.
+For a profile 5 copy whose source uses `hev1`, the worker writes a genuine `dvh1` output, with the parameter sets in the decoder configuration record (link:0013-stream-decision-architecture.adoc#no-compatible-base-copies[ADR 0013]).
+For a profile 8 stream with compatibility identifier 6, the worker writes compatibility identifier 1, so that the record matches the `db1p` playlist entry.
+For a profile with a compatible base, the worker writes metadata compression 0.
+
+The worker applies every bitstream rewrite to the fragmented MP4 that the job attempt's one FFmpeg process writes to its standard output (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]).
+The worker rewrites the initialization segment and each media segment before it delivers them.
+A copy with rewrites still runs one FFmpeg process for each job attempt.
+Every job attempt of a variant lists the same rewrites, so every job attempt writes the same initialization segment, as ADR 0037 requires.
+
+Each worker declares the bitstream rewrites that it supports.
+The server sends a job that lists a bitstream rewrite only to a worker that declares that rewrite.
+When no connected worker declares a rewrite that a copy needs, the server does not plan that copy, and the client receives an encode instead.
+In Original, that encode plays in Auto (ADR 0052).
+
+*Why:* The pinned build's `hevc_metadata=remove_dovi=1` and `dovi_rpu=strip=1` options examine only the last NAL unit of each sample.
+They miss an RPU elsewhere in the sample, and every NAL unit of type 63 except the last.
+A copy could then keep RPUs that the playlist calls HDR10, and a player could show wrong colors.
+The worker already rewrites the initialization segment of every `hvc1` copy, when it removes the record's SEI arrays (https://github.com/streamarr/streamarr-transcode-worker/pull/80[streamarr/streamarr-transcode-worker#80]).
+The worker also already rewrites sample sizes, track runs and media data when it moves RPUs before an encode (ADR 0013).
+Rewrites in the worker's own code keep ADR 0037's delivery from one FFmpeg's standard output, and tests can drive them without FFmpeg.
+A worker that declares its rewrites never receives a job that it would fail.
+
+[[decision-static-metadata-record]]
+=== An HEVC copy with a PQ output holds the probed static HDR metadata in its decoder configuration record
+
+The static HDR metadata of HDR10 is two SEI messages.
+They are the mastering display color volume message (payload type 137) and the content light level message (payload type 144).
+For an HEVC copy with a PQ output, the worker writes each message whose values the probe holds into the copy's `hvcC` record.
+The worker inserts each message on its own.
+A stream with only the mastering display values gets only message 137.
+A stream with only the content light level gets only message 144.
+A stream that carries neither value stays PQ10, and its record holds neither message.
+The job carries the probed values that probe version 4 defines (<<decision-probe-version-4>>).
+The worker builds each message from those values without conversion, because each value uses the unit of its SEI field.
+The worker never invents a value, and it never copies the messages from the keyframe at which a job attempt starts.
+Every job attempt of the variant therefore writes the same record (ADR 0037).
+The copy also keeps both messages in its samples.
+
+*Why:* Item 1.8 of Apple's HLS Authoring Specification for Apple Devices says: "For HDR10 video, the SEI NAL units (that is, static metadata) SHOULD be in the HEVC Configuration Box ('hvcC') and not in the individual sample data."
+Neither tested FFmpeg build writes an `mdcv` or `clli` box for such a copy.
+A record built from the job attempt's first keyframe would differ between job attempts that start at different keyframes.
+The copy departs from the second half of item 1.8 on purpose.
+Removing the messages from the samples would need an SEI rewrite at every keyframe.
+A player that reads only the messages in the samples keeps working.
 
 === Examples show how to use the shared terms
 
@@ -777,7 +866,8 @@ Count the format attempt against the same playback-session format budget, in whi
 |The user requests a fixed quality and HDR output, but the server cannot provide that output.
 |Keep the source properties unchanged.
 The server cannot silently substitute SDR or another quality.
-The epic tracks the open question of how the client should explain the failure to the user.
+Until https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397] adds HDR encodes, a fixed quality whose tier needs an encode encodes SDR (link:0013-stream-decision-architecture.adoc#hdr-choice[ADR 0013]).
+The server names SDR as the output range, and the client shows SDR in its HDR toggle, with a notice.
 After a format error during a fixed quality's HDR copy, the fallback encode may be SDR, with the notice of link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052].
 The client's HDR toggle then shows SDR.
 
@@ -864,16 +954,15 @@ A stream with such extradata counts as one whose units the probe could not all d
 link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc#decision-direct-play-issues[ADR 0049] decides that every issue that rules out a copy also rules out direct play.
 * Defer showing a `MediaFileProbePropertyIssue` to clients.
 ADR 0032 also defers exposing stream properties in GraphQL.
-* Defer conversion between Dolby Vision profiles, such as Profile 7 to Profile 8.1.
+* Defer conversion between Dolby Vision profiles other than single-track profile 7 to profile 8.1.
+That conversion is a bitstream rewrite that https://github.com/streamarr/streamarr-server/issues/651[streamarr/streamarr-server#651] defines (<<decision-bitstream-rewrites>>).
 * Defer distinguishing a full enhancement layer from a minimal one.
 The configuration record has no flag that tells the two kinds of enhancement layer apart.
 Detection needs the RPUs parsed from frames.
 Probe version 5 keeps only the RPU header fields that tell the Dolby Vision profile.
 Adding the field later is an additive change.
 * Defer pairing a base-layer track with a separate enhancement-layer track; the dynamic-range description covers one track.
-* Defer the playlist attributes that announce a PQ or HLG video range.
-Also defer the playlist attributes that announce Dolby Vision on a PQ or HLG base.
-https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] decides when a copy carries those attributes.
+* Leave the playlist attributes that announce a PQ or HLG video range, or Dolby Vision on a PQ or HLG base, to link:0013-stream-decision-architecture.adoc#hdr-copies[ADR 0013].
 https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396] builds those attributes.
 This ADR fixes the facts that those attributes read.
 This ADR already decides the playlist entry of an SDR-base Dolby Vision copy.
@@ -915,15 +1004,20 @@ The probe takes no static metadata from the SEI messages or OBUs of such a strea
 A worker that derives the base differently stops the file's probe after three such results, as ADR 0032 decides for every contract violation.
 * When the server chooses SDR output, the source description keeps the HDR facts that the probe found.
 The server cannot silently change a manual choice, and the playlist must describe the actual output that the server selected.
-* A stream copy of a Dolby Vision or HDR10+ source delivers the HDR10+ information and the Dolby Vision RPUs unchanged.
+* A stream copy of a Dolby Vision or HDR10+ source delivers the HDR10+ information and the Dolby Vision RPUs unchanged, unless the decision lists a bitstream rewrite that strips them.
 The client's declaration decides whether such a copy is eligible.
 Until clients declare dynamic ranges, <<decision-undeclared-client>> decides whether the copy is eligible.
 An SDR-base Dolby Vision copy still carries the Dolby Vision RPUs.
 The playlist entry of an SDR-base Dolby Vision copy describes only the copy's SDR base layer.
 * This ADR records the accepted terms and structure and lists the questions that remain open.
 It does not claim that the contracts or application behavior already exist.
-* Amend ADR 0013's video-decision section when implementing https://github.com/streamarr/streamarr-server/issues/396[#396].
+* ADR 0013's third amendment decides the video decision for HDR output, which https://github.com/streamarr/streamarr-server/issues/396[#396] implements.
 Continue to follow the existing ADR definitions and the order of work recorded in the epic.
+* A copy that strips Dolby Vision or HDR10+ plays the source's HDR base without an encode, so it costs no encoder capacity.
+* Every bitstream rewrite runs in the worker's own code, so the worker owns the parsing of HEVC NAL units and AV1 OBUs in the samples of every rewritten copy.
+* A worker that does not declare a rewrite receives no job that lists it.
+* While no connected worker declares a rewrite that a copy needs, every client that needs that copy receives an encode, which costs encoder capacity.
+* Every job attempt of an HEVC copy with a PQ output writes the same `hvcC` record, whichever keyframe the attempt starts at.
 
 == Rejected Alternatives
 
@@ -1028,6 +1122,14 @@ When an upgrade needs new probe data, the server queues a re-scan itself, as ADR
 ADR 0013 records that those copies fail in Apple's players when the playlist declares the copies SDR.
 * A narrower interim answer would stop copying only Dolby Vision profile 5 and 10-bit H.264 sources.
 The narrower answer would still copy PQ and HLG sources to a client that declares no dynamic range.
+* Stripping Dolby Vision with the pinned build's bitstream filters, `hevc_metadata=remove_dovi=1`, `dovi_rpu=strip=1` or `av1_metadata=remove_dovi=1`.
+The HEVC options examine only the last NAL unit of each sample, so they miss some RPUs and every NAL unit of type 63 except the last.
+A copy could then keep RPUs that the playlist calls HDR10, and a player could show wrong colors.
+* Rewriting in a pipe between two FFmpeg processes, as the RPU move before an encode does (ADR 0013): every copy with a rewrite would run a second FFmpeg process, which costs more worker CPU and memory than a rewrite of the delivered fragments.
+* Removing the static HDR metadata messages from the samples of an HEVC copy with a PQ output: the samples would need an SEI rewrite at every keyframe.
+A player that reads only the messages in the samples could then lose the HDR metadata, which is unmeasured.
+* Assuming that every connected worker supports every rewrite once the pinned worker image has it: a worker that predates the pin would fail the copy.
+That failure spends a format attempt and drops the viewer to an SDR encode.
 
 == References
 

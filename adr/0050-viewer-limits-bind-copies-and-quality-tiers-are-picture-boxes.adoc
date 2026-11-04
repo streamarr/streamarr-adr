@@ -10,6 +10,41 @@ It decides the questions that a review of https://github.com/streamarr/streamarr
 It also decides when the server lowers the audio under the viewer's maximum bitrate.
 The server lowers it when the audio leaves no room for the smallest quality tier or for a video copy, and when lower multichannel audio lets a larger picture fit.
 
+An amendment makes every audio encode name its output channel layout instead of a bare channel count (<<decision-channel-layout>>).
+A track keeps 3 or 4 channels only in a layout that the target codec carries exactly, and otherwise encodes in stereo.
+The rule covers the lower audio steps that keep a copied track's 3 or 4 channels and the 3- and 4-channel encodes that a capability entry's channel maximum produces.
+https://github.com/streamarr/streamarr-server/pull/711[streamarr/streamarr-server#711] implements the copy side.
+The layout comes from probe version 7 (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032]).
+
+Another amendment replaces FFmpeg's default downmix with a named matrix and a limiter (<<decision-downmix>>).
+Dialogue keeps ITU-R BS.775's −3 dB in every codec, or the level that an AC-3 or E-AC-3 track signals, and a `2.1` or `3.1` track keeps its low-frequency channel.
+A limiter holds the channels that a downmix sums at its ceiling before encoding.
+
+A later amendment follows an audiophile review of these rules.
+An encode that only renames a surround pair is not a downmix, so it writes every sample unchanged.
+A downmix that only drops channels has no limiter, and otherwise the limiter acts only on the channels that the matrix sums.
+Every limited downmix uses a two-stage true-peak limiter at the source's own sample rate: −1 dBTP when FLAC or ALAC writes the downmix, and −3 dBTP for a lossy codec.
+The stereo and mono matrix of an AC-3 or E-AC-3 track uses the mix levels that the track signals.
+An AAC encode has at most six channels, and the rule names each encoder's own layouts of 5 to 8 channels (<<decision-channel-layout>>).
+
+A further amendment settles a `7.0` track.
+When an Opus or FLAC capability entry accepts 8 or more channels, the encode pads the track to `7.1` with a silent low-frequency channel, and every channel keeps its place.
+Wherever the track cannot keep its seven channels, it encodes in 5.0 and invents no low-frequency channel (<<decision-channel-layout>>).
+
+The same amendment takes the audio step from the largest audio rendition instead of the default track (<<decision-audio-steps>>).
+It also raises the mono step to AAC at 96 kb/s and removes the stereo AAC step at 64 kb/s, so the lowest stereo step is 96 kb/s.
+The stream session's audio bitrate already counts that rendition under link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc[ADR 0054], so no other track can take the stream over the viewer's maximum bitrate.
+
+A later amendment keeps the −3 dBTP ceiling for stereo AAC and Opus downmixes after a wider search (<<decision-downmix>>).
+A few synthetic full-scale pink-noise inputs still decode up to +1.43 dBTP between samples.
+The worst of them come in the first AAC frame after an encoder starts.
+No film soundtrack measured decoded above 0 dBTP.
+A stereo track, such as stereo music, needs no downmix, so the limiter never touches it.
+
+The same amendment decides two questions about Auto beside a copy.
+When Auto copies the video, the playlist also lists encoded lower variants, and each lower variant encodes only when the player switches to it (<<decision-lower-variants>>).
+The server does not tell a viewer at home from a viewer away by IP address, and the player's own variant switching adapts each viewer's quality (<<decision-no-network-classes>>).
+
 NOTE: link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052] changes what this decision says about an encode in Original.
 Every encode that Original reaches now plays in Auto, and the client tells the viewer that the playback choice changed.
 That encode is Auto's encoded quality ladder, not one variant without a label.
@@ -119,9 +154,9 @@ When the probe knows the copied video's bitrate but not a copied audio track's, 
 
 When the probe does not know the copied video's bitrate, the container bitrate stands in for the video.
 The container bitrate is the bitrate that the probe reports for the whole source file.
-When the session copies its audio track from the source, the video copy costs the container bitrate alone.
-The container already holds that track.
-When the session encodes its audio, the video copy costs the container bitrate plus the encoded audio's bitrate.
+When every audio rendition is a copy of a source track, the video copy costs the container bitrate alone.
+The container already holds those tracks.
+When any audio rendition is an encode, the video copy costs the container bitrate plus the bitrate of the largest encoded rendition.
 
 When the copy's cost is over the maximum bitrate, the server lowers the audio first (<<decision-audio-steps>>).
 It takes the first audio step at which the copy's cost is at or below the maximum bitrate.
@@ -182,6 +217,42 @@ A connected worker without an encoder for an accepted codec stays broken until i
 Reporting the fault tells whoever runs the server what to fix.
 Which workers are free or connected changes from moment to moment, so a busy or missing worker gets an answer that the client can retry and never trades the viewer's limits for a stream.
 Refusing a copy for an unknown bitrate would encode many files that the client plays as they are.
+
+[[decision-lower-variants]]
+=== In Auto, encoded lower variants sit beside a copy
+
+When the server copies the video in Auto, the multivariant playlist lists the copy and the encoded variants of Auto's ladder below the copy's picture.
+The copy is the first-listed variant, so creating the stream session starts only the copy.
+link:0008-server-generated-hls-playlists.adoc[ADR 0008]'s rule that lists the variant nearest 2000 kb/s first applies to a ladder of encodes.
+Each lower variant encodes only when the player switches to it, as link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019] starts a variant on demand.
+The headroom model of link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] never starts a lower variant beside a copy early, and never keeps one running as an extra variant.
+When the player switches back to the copy, the lower variant that the player leaves stops once the copy delivers a media segment, as ADR 0019 stops a left variant.
+While the player stays on the copy, no lower variant runs.
+Each encoded variant forces its keyframes at the starts of the stream session's shared segment list, as link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] requires for every stream session with a copied variant.
+Every variant therefore lists the same segments, and every segment of every variant starts with a keyframe, so the player can switch between the copy and any lower variant at a segment boundary.
+
+*Why:* A copy alone gives the player no lower variant when the viewer's bandwidth drops, so playback stalls.
+The viewer would then have to pick a fixed quality by hand.
+With lower variants listed, the player's own variant switching moves down and back up by itself.
+A lower variant that the player never requests costs no worker capacity.
+The copy starts without an encoder, so listing it first does not delay the start.
+Variants without the shared segment list would make a switch fall inside a segment.
+
+[[decision-no-network-classes]]
+=== The server does not tell a viewer at home from a viewer away
+
+The server never classifies a viewer as at home or away by the viewer's IP address.
+The server has no separate limits for viewers at home and viewers away.
+The player's own variant switching adapts each viewer's quality to the bandwidth that the viewer's own connection gives (<<decision-lower-variants>>).
+The Apple client caps its own quality when the system reports the network path as expensive or constrained, such as a cellular connection or Low Data Mode (`NWPath.isExpensive` and `NWPath.isConstrained`).
+A ServerAdmin may set a total upload budget for the server.
+That budget is optional and off by default.
+
+*Why:* An IP address does not show how fast a viewer's path is.
+A viewer at home can have weak Wi-Fi, and a viewer away can have a fast fibre connection.
+A VPN, a reverse proxy or carrier-grade NAT also hides where a viewer is.
+Variant switching measures each viewer's own path while the viewer plays.
+Only the device knows that its connection is metered, so the Apple client caps its own quality there.
 
 [[decision-tiers]]
 === Each quality tier is a 16:9 picture box in either orientation
@@ -283,10 +354,9 @@ The viewer already picked the quality, so a label would tell them nothing.
 === The maximum bitrate bounds video plus audio
 
 A variant costs its video bitrate plus the stream session's audio bitrate.
-The audio bitrate is the audio decision's bitrate.
-For a copied audio track, it is the track's bitrate.
-For an encoded audio track, it is the encode's bitrate.
-Every variant shares the same audio rendition (ADR 0043), so every variant adds the same audio bitrate.
+The audio bitrate is the bitrate of the largest audio rendition, as link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc[ADR 0054] counts it.
+A copied audio track counts at the track's bitrate, and an encoded audio track at the encode's bitrate.
+Every variant shares the same audio renditions (ADR 0043), so every variant adds the same audio bitrate.
 
 The server offers a tier only when the tier's video bitrate for the chosen codec family plus the audio bitrate is at or below the maximum bitrate.
 
@@ -314,26 +384,35 @@ An encode never needs more bitrate than the source holds, so the server never as
 [[decision-audio-steps]]
 === When the audio leaves no room for the 360p tier, the server lowers the audio instead of exceeding the maximum bitrate
 
-An audio step is one audio codec, channel count and bitrate that the server can deliver in place of the stream session's audio.
+An audio step is one audio codec, channel layout and bitrate that the server can deliver in place of the stream session's audio.
 The server tries the audio steps from the first to the last:
 
 . The stream session's audio, as the audio decision chooses it.
 That audio is a copy at the track's bitrate or an encode at the codec's default bitrate, such as AC-3 5.1 at 640 kb/s, E-AC-3 5.1 at 768 kb/s or AAC 5.1 at 384 kb/s.
+This step costs the largest audio rendition (<<decision-bitrate>>).
+The track of that rendition is the step track.
+When several renditions tie as the largest, the default track is the step track if its rendition is one of them, and otherwise the first of them in the file's stream order.
+When the bitrate of a copied rendition is unknown, the server cannot rank it, so the default track is the step track, as before this amendment.
+. The step that link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043] adds when a FLAC or ALAC rendition runs above 48 kHz.
 . The multichannel steps.
-They keep the codec and the channel count of the encode that the server would choose for the default track.
-When the session copies the default track in AAC, AC-3 or E-AC-3, which the server also encodes, the copy's codec adds its steps too.
-Those steps keep the copy's channel count, up to the 5.1 that the server encodes in AC-3 and E-AC-3.
-AAC above 5.1, encoded or copied, also steps through AAC 5.1.
+They keep the codec and the channel layout of the step track's encode: the encode that the session delivers for it, or, when the session copies it, the encode that the server would choose for it.
+When that encode is FLAC, ALAC or Opus, which have no multichannel steps of their own, they keep the E-AC-3, AC-3 or AAC encode that the server would choose for the step track without it (ADR 0043).
+When the session copies the step track in AAC, AC-3 or E-AC-3, which have multichannel steps of their own, the copy's codec adds its steps too.
+Those steps keep the copy's channel count, up to the 5.1 that the server encodes in AAC, AC-3 and E-AC-3.
+A copy of 5 channels steps in the encoder's 5.0 layout: `5.0` for AAC and `5.0(side)` for AC-3 and E-AC-3.
+An AAC copy of 7 or 8 channels therefore steps in AAC 5.1, because an AAC encode has at most six channels, and an AAC `7.0` copy steps in AAC 5.0 (<<decision-channel-layout>>).
+A copy of 3 or 4 channels keeps its channels only in a layout that its codec carries exactly (<<decision-channel-layout>>).
+Otherwise the copy's codec adds no step for it.
 The steps of both codecs then run from the highest bitrate to the lowest.
 At an equal bitrate, the copy's codec comes first.
-A copied codec that the server does not encode, such as FLAC, Opus or ALAC, steps through the server's encode only.
+A copied codec without multichannel steps of its own, such as FLAC, Opus or ALAC, steps through the server's encode only.
 A codec adds these steps only when its encode or copy has more than two channels:
 ** E-AC-3 5.1 at 640, 448 and 384 kb/s;
 ** AC-3 5.1 at 448 and 384 kb/s;
-** multichannel AAC at 64 kb/s per full-band channel, which is 448 kb/s for 7.1 and 320 kb/s for 5.1.
-AAC 7.1 takes both steps.
-. The stereo steps: AAC stereo at 128, 96 and 64 kb/s.
-A mono track has one step instead: AAC mono at 64 kb/s.
+** for a copied AC-3 or E-AC-3 track of 3 to 5 channels that keeps a multichannel step, the same bitrates in the layout that the step names;
+** multichannel AAC at 64 kb/s per full-band channel, which is 320 kb/s for 5.1 and 5.0, 256 kb/s for 4.0 and 192 kb/s for 3.0.
+. The stereo steps: AAC stereo at 128 and 96 kb/s.
+A mono track has one step instead: AAC mono at 96 kb/s.
 So does any track when no AAC capability entry for HLS accepts more than one channel.
 
 A step counts only when it is smaller than the steps before it.
@@ -343,9 +422,8 @@ E-AC-3's steps are not smaller than the copy.
 A copied AC-3 5.1 track at 640 kb/s steps to AC-3 5.1 at 448 and 384 kb/s.
 When the server would encode E-AC-3, none of E-AC-3's steps count.
 Its 640 kb/s step is not smaller than the copy, and its 448 and 384 kb/s steps tie with AC-3's.
-A copied AAC 7.1 track at 512 kb/s steps to AAC 7.1 at 448 kb/s, then AAC 5.1 at 320 kb/s, then stereo.
-When the server would encode E-AC-3, E-AC-3 5.1 at 384 kb/s comes between the two AAC steps.
-E-AC-3's 448 kb/s step ties with AAC 7.1's.
+A copied AAC 7.1 track at 512 kb/s steps to AAC 5.1 at 320 kb/s, then stereo.
+When the server would encode E-AC-3, E-AC-3 5.1 at 448 and 384 kb/s come before AAC 5.1.
 
 When the maximum bitrate minus the session's audio bitrate is below the 360p tier's video bitrate, the server takes the first audio step at which the 360p tier's video bitrate fits.
 That step's bitrate plus the 360p tier's video bitrate is at or below the maximum bitrate.
@@ -358,8 +436,8 @@ With 5.1 E-AC-3 at 768 kb/s and the 360p tier's video bitrate of 800 kb/s:
 
 * a maximum bitrate of 1,400 kb/s gives E-AC-3 5.1 at 448 kb/s;
 * a maximum bitrate of 1,000 kb/s gives AAC stereo at 128 kb/s;
-* a maximum bitrate of 600 kb/s gives AAC stereo at 64 kb/s and video at 536 kb/s in the 360p box;
-* a maximum bitrate of 150 kb/s gives AAC stereo at 64 kb/s and video at 145 kb/s, which exceeds the maximum.
+* a maximum bitrate of 600 kb/s gives AAC stereo at 96 kb/s and video at 504 kb/s in the 360p box;
+* a maximum bitrate of 150 kb/s gives AAC stereo at 96 kb/s and video at 145 kb/s, which exceeds the maximum.
 
 A multichannel step keeps the codec of an encode that the server would choose or of the copied track, and no more channels than that encode or track has, so a capability entry already accepts it.
 A stereo or mono step needs AAC.
@@ -371,10 +449,14 @@ When the server takes a step below a copy, the copy becomes an encode at that st
 In Original, a video copy ignores the viewer's limits, so an audio copy beside it stays a copy.
 
 The server takes a step only when the client sends a maximum bitrate.
-The server takes one step for the whole stream session, from the default track.
+The server takes one step for the whole stream session, from the step track.
+A lower step costs its own bitrate, because it caps every rendition at that bitrate.
 A step below the session's audio caps every audio rendition: every track is delivered in the step's codec, with no more than the step's channels and bitrate.
+A track that the cap leaves at 3 or 4 channels follows <<decision-channel-layout>>.
 A track that already fits the cap's codec, channels and bitrate keeps its own copy-or-encode decision.
-A step never raises a track's channel count or bitrate.
+A step never raises a track's channel count.
+It raises a track's bitrate only when the track is below the lowest bitrate that the step's codec encodes for its channels, such as a 16 kb/s mono track under an AC-3 step, whose encoder starts at 32 kb/s.
+That lowest bitrate is below every multichannel step's bitrate, so the cap still holds.
 Switching audio tracks never changes the step.
 Neither the server nor the player interrupts playback with a notice when the server lowers the audio.
 
@@ -385,14 +467,273 @@ AC-3's encoder rounds any other bitrate to its table anyway.
 Surround at 384 kb/s with the 360p tier fits a maximum bitrate of 1,184 kb/s.
 The steps therefore drop to stereo only when surround cannot fit beside the smallest tier or beside a video copy.
 A copied AAC 5.1 track keeps surround one step longer, because AAC's 320 kb/s step is below the lowest E-AC-3 and AC-3 step of 384 kb/s.
-AAC 7.1 steps through AAC 5.1 for the same reason, and AAC 5.1 needs no capability entry beyond the one that accepts AAC 7.1.
+A copied AAC 7.1 track steps through AAC 5.1, because an AAC encode has at most six channels, and AAC 5.1 needs no capability entry beyond the one that accepts AAC 7.1.
 At an equal bitrate, the step keeps the session's codec.
 384 kb/s is the lowest E-AC-3 step because FFmpeg's E-AC-3 encoder lacks the tools behind Apple's 192 kb/s.
-64 kb/s is the lowest step because AAC-LC degrades quickly below it.
+Every AAC step is AAC-LC.
+A Linux worker writes it with FFmpeg's own encoder.
+A macOS worker may write it with `aac_at`, Apple's AAC encoder in AudioToolbox.
+A variant keeps the AAC encoder of its first job attempt for every later job attempt.
+Every running variant writes the same audio renditions (ADR 0043), so every job attempt of one stream session encodes AAC with the same encoder.
+A worker uses `aac_at` only after a check shows that its audio initialization segments and its junctions between job attempts meet ADR 0043's rules, because `aac_at` starts its first frame at a different delay than FFmpeg's encoder.
+No step uses HE-AAC, even on a macOS worker whose `aac_at` writes HE-AAC, so every worker can write every step.
+Streamarr does not depend on `libfdk_aac`, which FFmpeg classes as non-free.
+96 kb/s is the lowest stereo step and the mono step because FFmpeg's AAC encoder at 64 kb/s decoded downmixes limited to −3 dBTP above 0 dBTP (<<evidence-true-peak>>).
+From that ceiling, stereo AAC at 64 kb/s decoded 3 of 32 pink-noise inputs above 0 dBTP, up to +0.37 dBTP.
+Mono AAC at 64 kb/s decoded the loudest 60 s of Tears of Steel's mono downmix at +0.67 dBTP, with 14 samples at full scale, and at 96 kb/s at −1.67 dBTP.
+Stereo AAC at 96 and 128 kb/s still decoded 2 and 1 of the 32 pink-noise inputs above 0 dBTP, and 4 and 5 of 128, as <<decision-downmix>> states.
 `BANDWIDTH` counts the largest rendition, so only a cap on every rendition keeps every variant within the maximum.
-The session's own audio caps nothing, because it can be a copy in a codec that the server does not encode, such as FLAC.
-ADR 0043 keeps one audio codec per stream session, so all tracks follow the default track's step.
+The step comes from the largest rendition for the same reason: a step from the default track alone would leave a larger track over the maximum.
+The session's own audio caps nothing, because it can be a lossless copy, such as FLAC, whose bitrate no encode can match.
+ADR 0043 keeps one audio codec per stream session, so all tracks follow one step.
 Audio renditions switch without restarting the video, and an unchanged step keeps that true.
+
+[[decision-channel-layout]]
+=== An audio encode names its output channel layout, and keeps 3 or 4 channels only in a layout that its codec carries exactly
+
+Every audio encode names its output channel layout, not only a channel count.
+The job carries the layout, and the worker encodes with FFmpeg's `-ch_layout` instead of `-ac`.
+The server reads each source track's layout from probe version 7 (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032]).
+A track whose stored outcome records no layout, or a layout that this section does not name, has an unknown layout.
+
+An encode of 1 or 2 channels names the encoder's mono or stereo layout.
+An encode of 5 to 8 channels names the encoder's own layout for that count:
+
+[cols="2,1,1,1,1"]
+|===
+|Encoder |5 channels |6 channels |7 channels |8 channels
+
+|AAC |`5.0` |`5.1` |– |–
+|AC-3, E-AC-3 |`5.0(side)` |`5.1(side)` |– |–
+|FLAC |`5.0(side)` |`5.1(side)` |`6.1` |`7.1`
+|Opus |`5.0` |`5.1` |`6.1` |`7.1`
+|ALAC |`5.0` |`5.1` |`6.1(back)` |`7.1(wide)`
+|===
+
+A side pair and a back pair count as one surround pair, so a `5.1(side)` track keeps its layout in AAC's `5.1` (<<decision-downmix>>).
+An encode names a 7-channel layout only for a track whose layout that 7-channel layout carries, such as a `6.1` track in FLAC or Opus.
+No encoder's 7-channel layout carries a `7.0` track, which has no low-frequency channel.
+An Opus or FLAC encode of a `7.0` track pads the track to `7.1` with a silent low-frequency channel when that codec's capability entry has a channel maximum of 8 or more.
+The pad keeps all seven channels in place.
+Wherever a `7.0` track cannot keep its seven channels, it encodes in 5.0: in AAC, AC-3, E-AC-3 and ALAC, and in Opus or FLAC under a channel maximum below 8.
+The 5.0 encode folds the track's four surrounds into one pair and adds no low-frequency channel (<<decision-downmix>>).
+In Opus, any other 7-channel track encodes in 5.1, and an 8-channel track keeps Opus's `7.1` within the channel maximum.
+An AAC encode has at most six channels.
+Any other track of 7 or more channels therefore encodes as AAC 5.1, and a copied AAC 7.1 track stays a copy.
+AC-3 and E-AC-3 encode at most 5.1.
+A `6.1` track keeps its layout in FLAC, Opus and ALAC, and encodes as 5.1 in AAC, AC-3 and E-AC-3, with its back centre mixed into each surround at 0.7071 (<<decision-downmix>>).
+ALAC's 8-channel layout, `7.1(wide)`, holds front-of-centre channels instead of a second surround pair, so ALAC does not carry 7.1.
+link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043] decides what a FLAC or ALAC encode does with a layout that its encoder does not write.
+
+An encode keeps a track's own 3 or 4 channels only when the target codec carries the track's layout exactly:
+
+* AAC carries `3.0` and `4.0`;
+* AC-3 and E-AC-3 carry `2.1`, `3.0` and `4.0`, and carry `quad` and `quad(side)` as one 2/2 mode, which decoders report as `quad(side)`;
+* Opus carries `3.0` and `quad`;
+* FLAC carries `3.0` and `quad`, and ALAC carries `3.0` and `4.0`.
+
+AC-3 and E-AC-3 do not carry `3.0(back)` or `3.1` until a check on hardware passes.
+AVFoundation misplaced both: it played a `3.0(back)` track's right channel from the centre surround and lost its back centre, and it left a `3.1` track's centre and low-frequency channels silent.
+Outside FLAC and ALAC, a `4.1` track has 5 channels, so it encodes in the encoder's 5.0 layout like any 5-channel track.
+The encode names the track's own layout when the codec carries it.
+A 3- or 4-channel track in any other layout, or in an unknown layout, encodes in stereo, apart from a FLAC or ALAC encode under ADR 0043.
+
+The rule applies wherever an encode would have 3 or 4 channels:
+
+* A lower audio step that keeps a copied 3- or 4-channel track's channels in the copy's codec (<<decision-audio-steps>>).
+When a copied AAC `4.0` track at 384 kb/s leaves no room, it can step to AAC `4.0` at 256 kb/s.
+A copied AAC `quad` track steps to stereo instead.
+https://github.com/streamarr/streamarr-server/pull/711[streamarr/streamarr-server#711] implements this case.
+* Another audio track that a step caps (<<decision-audio-steps>>).
+When the step changes a 3- or 4-channel track's codec, the track keeps its layout only if the step's codec carries it, and encodes in stereo otherwise.
+* An encode that a capability entry's channel maximum of 3 or 4 caps (link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049]).
+A track with more channels than the maximum has no layout of its own at that count, so it encodes in stereo.
+A 5.1 track under an AAC channel maximum of 4 therefore encodes AAC stereo, not AAC `4.0`.
+* An encode that a channel maximum of 5 or 7 caps.
+Under a maximum of 5, a track of more channels encodes in the encoder's 5.0 layout, which AAC carries as channel configuration 5 and AC-3 and E-AC-3 carry as mode 3/2.
+Under a maximum of 7, a track of 8 channels encodes in 5.1, a `6.1` track keeps its layout in FLAC, Opus and ALAC, and a `7.0` track encodes in 5.0.
+* An Opus or FLAC encode of a `7.0` track under that codec's channel maximum of 6 or 7 is 5.0, because that maximum leaves no room for the pad to `7.1`.
+
+The server's own encode of a 3- or 4-channel track, outside these cases, stays stereo, as before this amendment.
+
+*Why:* With `-ac`, FFmpeg ignores the source's layout and picks the encoder's default layout for the count.
+For 1, 2, 5 and 6 channels, that default is the layout that this rule names anyway, and so is each encoder's layout for 7 and 8 channels in the table.
+For 3 and 4 channels, the default can change what the viewer hears.
+A `quad` source encoded to AAC with `-ac 4` became AAC `4.0`, which mixes the two rear channels into one back channel.
+A rear tone in opposite phase fell from −27.1 dB to −96.8 dB, while the AAC stereo step kept it at −30.1 dB.
+A `3.0` source encoded to AAC with `-ac 3` became AAC `2.1`.
+FFmpeg writes AAC `2.1` and `quad` as channel configuration 0 with a program config element, and Chromium's AAC parser refuses channel configuration 0.
+ISO/IEC 14496-3 gives AAC channel configurations for `3.0` (configuration 3) and `4.0` (configuration 4), and FFmpeg wrote those.
+ATSC A/52's audio coding modes 2/0 with the low-frequency channel, 3/0 and 2/2 hold the 3- and 4-channel AC-3 and E-AC-3 layouts that the rule names.
+A/52 has one 2/2 mode, so FFmpeg's AC-3 and E-AC-3 encoders wrote both `quad` and `quad(side)` as `quad(side)`, and AVFoundation played both from its side surrounds.
+With the source's layout named, AAC `3.0` and AC-3 `quad` kept every channel at the source's level.
+Stereo keeps every full-band channel of the source in the mix, so stereo is the safe output for a layout that the codec cannot carry.
+FFmpeg's default downmix leaves out the low-frequency channel, so <<decision-downmix>> folds that channel into the stereo of a `2.1` track.
+FFmpeg's 5-channel AAC layout, `5.0`, wrote channel configuration 5, but its 7-channel AAC layout wrote channel configuration 0.
+Its 8-channel AAC layout, `7.1`, wrote channel configuration 7, which ISO/IEC 14496-3 defines as front-wide 7.1: centre, left and right of centre, left, right, the surround pair and the low-frequency channel.
+AVFoundation played that file's side surrounds from the left and right speakers and its front pair from the front-of-centre positions.
+FFmpeg's own decoder reads configuration 7 as `7.1`, so a check with FFmpeg alone misses the error.
+Of the 7- and 8-channel layouts, FFmpeg's Opus and ALAC encoders accepted only those in the table.
+`libopus` refused a `7.0` input outright, so an Opus encode of a `7.0` track must pad it or fold it.
+No AAC, AC-3, E-AC-3 or ALAC layout holds a `7.0` track's seven channels either.
+Padded to `7.1`, a synthetic `7.0` track kept each of its seven channels in place at the source's level, and it played that way in Chromium and Firefox (<<evidence-seven-zero>>).
+The 5.0 fold invents no channel, where a 5.1 encode would add a low-frequency channel that the track lacks.
+That holds in every codec, so every encode that cannot keep a `7.0` track's seven channels uses the same fold.
+FFmpeg's FLAC encoder wrote every layout, but only the table's layouts follow FLAC's own channel order (ADR 0043).
+A downmix of a 5.1 track to AAC's 4-channel default, `4.0`, merges its surround pair into one back channel in the same way.
+ADR 0032's evidence holds the measurements (link:0032-media-file-probe-results-are-persisted.adoc#evidence-channel-layout[ADR 0032]).
+
+[[decision-downmix]]
+=== Every downmix uses a named matrix, and a limiter keeps the channels that it sums below their ceiling
+
+A downmix is an audio encode whose output layout lacks a channel of the source track's layout, so that the encode mixes source channels together or leaves one out.
+A side pair and a back pair are one surround pair.
+An encode that only renames that pair, such as `5.1(side)` to `5.1` or `6.1` to `6.1(back)`, is not a downmix.
+It writes each channel unchanged, with no matrix and no limiter.
+An Opus encode that pads a `7.0` track to `7.1` is not a downmix either.
+It loses no channel.
+The pad keeps every source channel in place and adds a silent low-frequency channel, so it runs no downmix matrix and no limiter.
+Like ADR 0043's FLAC and ALAC pads, it uses `pan` with a gain of 0 for the added channel.
+An encode that writes every decoded sample unchanged runs no filter except sample-format packing.
+
+Every downmix uses the matrix below instead of FFmpeg's default.
+That includes the stereo and mono steps, the stereo encode of a 3- or 4-channel layout that the target codec cannot carry, and every encode that a channel maximum caps.
+It also includes an encode to 5.1 of a 7.1 or `6.1` track, such as AC-3 or E-AC-3 5.1 or the AAC 5.1 step, an encode to 5.0 under a channel maximum of 5, an encode of a `7.0` track to 5.0, and an encode of the same channel count that changes the layout, such as `6.0` to 5.1.
+The worker converts the decoded audio to floating point (`aformat=sample_fmts=fltp`), applies the matrix with FFmpeg's `pan` filter, and then limits the channels that the matrix sums, before the encoder.
+A downmix of an AC-3 or E-AC-3 track mixes the samples of ADR 0043's decode, which applies no dynamic range compression and applies the track's dialogue normalization, as a hardware decoder does for the copy.
+
+The stereo matrix follows ITU-R BS.775's 2/0 equations at ATSC A/52's default levels:
+
+* Left = FL + 0.7071 × FC + 0.7071 × LS, and right = FR + 0.7071 × FC + 0.7071 × RS.
+* LS and RS are the source's surrounds on each side.
+A source with one surround pair, side or back, uses that pair.
+A source with both pairs, such as 7.1, mixes each side's two surrounds at 0.7071 each.
+A back centre mixes into LS and RS at 0.7071.
+* The low-frequency channel mixes into left and right at 0.7071 only when the source has no surround channel, as in `2.1` and `3.1`.
+A source with surrounds, such as 5.1 or 7.1, leaves it out.
+* Mono is 0.7071 × (left + right), which is BS.775's mono equation for a 3/2 source.
+
+For an AC-3 or E-AC-3 track, the levels that the track signals for a Lo/Ro downmix replace A/52's defaults in the stereo and mono matrix.
+The signalled centre level replaces 0.7071 on the centre, and the signalled surround level replaces 0.7071 on each surround channel.
+The levels are `lorocmixlev` and `lorosurmixlev` when the track carries them, and otherwise `cmixlev` and `surmixlev`.
+FFmpeg's decoder exports them as downmix side data on every decoded frame, so they need no probe fact.
+The worker reads them from the track's first frame, so every job attempt of a stream session uses the same matrix.
+The stereo is always Lo/Ro, never Lt/Rt, even when the track names Lt/Rt as its preferred downmix.
+
+A downmix to 5.1 or 5.0, such as 7.1 to 5.1, `7.0` to 5.0, 5.1 to 5.0 or `6.0` to 5.1, keeps the front channels and the centre, and its surround pair is LS and RS as defined above, whichever pair the output layout names.
+A downmix to 5.1 keeps the low-frequency channel, and a downmix to 5.0 leaves it out.
+A downmix to 7.1, such as `7.1(wide)` to 7.1, keeps each source channel that 7.1 has.
+
+Every other channel that FFmpeg names folds at 0.7071 into the nearest channel of these rules on its own side.
+A wide, front-of-centre or top-front channel folds into the front channel, and a top-side, top-back or surround-direct channel folds into the surround.
+A channel on the centre line, such as top centre or top back centre, folds into that pair at 0.5 on each side.
+A second low-frequency channel follows the rule for the low-frequency channel.
+Every layout that FFmpeg names therefore counts as a layout that this ADR names for a downmix (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032]).
+FFmpeg reads a stream with an unknown layout, such as PCM in Matroska, as its default layout for the channel count, which is how `-ac` treats it, and the matrix applies to that layout.
+
+The matrix is not normalized.
+The sum stays in floating point until the limiter, so a 16-bit or 24-bit source cannot clip inside `pan`.
+
+A downmix that only leaves channels out, such as 5.1 to 5.0, has no limiter.
+In every other downmix, the limiter acts only on the output channels that sum two or more source channels, and every other channel passes through unchanged.
+It links the two channels of a left-right pair, so the pair keeps its image, and it limits a centre or mono output on its own.
+A 7.1 to 5.1 or `7.0` to 5.0 downmix therefore limits only its surround pair, and a stereo downmix limits its pair.
+The worker splits the summed channels out with FFmpeg's `channelsplit`, limits them, and joins them back with `join`.
+
+The ceiling depends on the codec that writes the downmix.
+Each ceiling is a true peak as the example filter of ITU-R BS.1770-5 Annex 2 reads it, here called the Annex 2 filter:
+
+* FLAC or ALAC: −1 dBTP.
+For a source whose decoded channels stay within full scale, the Annex 2 filter read the output no more than 0.01 dB above −1 dBTP on every test, adversarial searches included (<<evidence-true-peak>>).
+That is a measured result, not a proven bound for every input.
+The tests do not cover a source whose decoded channels exceed full scale, and the worker does not scale or clip the source before the matrix.
+* A lossy codec, in any downmix: −3 dBTP.
+This ceiling is an empirical policy.
+It held on the codecs, bit rates, layouts and materials that <<evidence-true-peak>> lists, and it does not hold for every material.
+After decoding, full-scale white noise read above 0 dBTP at most multichannel steps, and so did some pink-noise inputs in stereo AAC and Opus and some test tones in mono AAC.
+On 128 synthetic full-scale pink-noise inputs, stereo AAC and Opus decoded 2 to 13 inputs per bit rate above 0 dBTP, up to +1.43 dBTP between samples.
+The highest readings came in the first AAC frame after an encoder started.
+A seek into a loud scene starts an encoder in the same way.
+No film soundtrack measured decoded above 0 dBTP at any stereo step.
+The ceiling for stereo AAC and Opus stays at −3 dBTP despite these exceptions.
+
+The worker limits the summed channels in two stages in series.
+Both stages run `alimiter` at the same internal limit: 0.891251 (−1 dBFS) for FLAC and ALAC, and 0.707946 (−3 dBFS) for a lossy codec.
+`alimiter` detects sample peaks only, so each stage passes it the summed channels together with short FIR copies of them at their own sample rate.
+Each copy estimates the waveform at one instant between two samples.
+The first stage has eleven copies: seven 128-tap Kaiser-windowed sinc phases at eighth-sample offsets, and the four phases of the Annex 2 filter.
+The second stage reads the first stage's output through the four Annex 2 phases alone.
+`alimiter` turns the summed channels down when a sample or a copy would pass the internal limit.
+Its output is the summed channels themselves, so no resampler touches the audio that the viewer hears.
+The worker checks the eleven coefficient vectors in as a fixed resource and never computes them at run time.
+
+Every `alimiter` uses attack and release settings of 5 ms and 50 ms, adds no make-up gain (`level=0`) and removes its own delay (`latency=1`).
+The worker trims the copies' delay, so the audio keeps its timing and its sample count.
+While no sample and no copy passes the internal limit, and no earlier peak's attack or release is still in progress, the summed channels come out as the matrix wrote them, sample for sample.
+When one passes, `alimiter` lowers the gain before that instant and raises it again after the last one, so neighbouring samples change too, including samples below the ceiling.
+A weaker peak during a release does not restart the release, and the last step of a release can leave one sample with a gain slightly above 1.
+A worker that does not list probe version 7 downmixes with FFmpeg's default, as before.
+
+*Why:* BS.775 and A/52 both mix the centre at −3 dB into each side.
+Two speakers at −3 dB give the same power as the centre speaker at 0 dB, so dialogue keeps its level against the front channels.
+FFmpeg's default uses the same levels, but its result depends on the sample format.
+FFmpeg normalizes the matrix only when the output or internal sample format is an integer.
+AAC, AC-3 and E-AC-3 take floating-point samples, so their downmix was not normalized and went over full scale in a loud scene.
+FLAC and ALAC take integer samples, so their downmix was normalized, and the centre fell to −10.7 dB from 5.1 and −12.9 dB from 7.1.
+That is A/52's worst-case scaling of 1/2.414, which protects a sum that only a loud scene reaches by turning every scene down.
+Adding `volume=2` to `-ac 2` lifted the centre to +3 dB but put 33 % of a loud scene's samples over full scale.
+An unnormalized matrix keeps dialogue at −3 dB in every codec, and the limiter acts only on the peaks that would go over.
+
+FFmpeg's decoders name the surround pair of TrueHD, DTS-HD MA and AC-3 as a side pair, while the AAC and Opus encoders name a back pair.
+Counting that rename as a downmix ran `pan` and the limiter on every such encode, which a rename does not need.
+On 60 s of Tears of Steel 5.1, a 24-bit master with a back pair that peaks at 0 dBFS, FLAC's `5.1(side)` alone kept every sample, while the limited path changed 4.5 % of them, by up to −19.3 dBFS.
+
+`alimiter` links every channel that it receives.
+With one channel at 0 dBFS and another at −20 dBFS, the second came out at −23 dBFS.
+On Tears of Steel, a 5.1 to 5.0 downmix that sums nothing still drew a linked limiter at −1 dBFS, which turned 239,307 centre samples between −30 and −6 dBFS down by more than 0.5 dB.
+Dialogue then ducked under peaks in other channels.
+Limiting only the summed channels leaves the centre alone in every downmix to more than two channels.
+
+`alimiter` detects sample peaks only, so its −3 dBFS stereo output of Tears of Steel still reached −0.1 dBTP.
+The copies show `alimiter` the instants between samples at the source's own rate, so a true-peak ceiling needs no resampler in the audio that the viewer hears.
+One stage is not enough.
+`alimiter` changes its gain gradually over the attack, and the Annex 2 filter spans twelve samples, so the filter reads the limited output through a gain that changes across its taps.
+After one stage, a bounded 16-sample burst read 0.10 dB over the ceiling, and a burst that a targeted search found read 0.23 dB over at 22.05 kHz (<<evidence-true-peak>>).
+The second stage starts from samples that are already within the limit and removes only the first stage's small excess, so its own gain changes much less.
+After both stages, the Annex 2 filter read no test output more than 0.01 dB above the ceiling.
+The second stage uses the Annex 2 phases alone, because they are the meter that the ceiling names.
+On Tears of Steel's 734 s stereo downmix, the two stages turned the mix down by more than 1 dB for 35.0 s (4.8 %), and the Annex 2 filter read the output at −1.00 dBTP.
+FLAC and ALAC add no coding overshoot, so a downmix that they write needs only a true-peak margin.
+A lossy codec overshoots after decoding, so its ceiling leaves 3 dB for that overshoot.
+At −3 dBTP, the summed channels decoded below full scale on the film, pink-noise and pink-burst inputs in stereo AC-3 and E-AC-3, in every multichannel step measured and in mono AAC at 96 kb/s.
+In stereo AAC and Opus, 1 to 3 of 32 pink-noise inputs decoded above 0 dBTP at each bit rate measured, up to +0.66 dBTP.
+On 128 pink-noise inputs, 2 to 13 did at each bit rate, up to +1.43 dBTP.
+The −3 dBTP ceiling accepts these exceptions.
+They come from synthetic full-scale pink noise, whose waveform these codecs do not reproduce closely.
+At AAC 96 kb/s, the coding error over a 20 s pink-noise input was only 8 dB below the signal.
+A lower ceiling therefore did not reliably lower the decoded peak.
+Film soundtracks kept below 0 dBTP at −3 dBTP, and a lower ceiling limits every film's loud passages for longer.
+A stereo track, such as stereo music, needs no downmix, so the limiter never touches it, and these readings do not apply to it.
+One −3 dBTP ceiling replaces the earlier −3 dBFS for a lossy stereo or mono downmix and −1 dBFS for a lossy downmix to more than two channels.
+A sample-peak ceiling misses the peaks between samples, and at −1 dBFS the folded surround pair of a 7.1 to 5.1 downmix decoded over full scale in AAC 5.1 at 320 kb/s.
+The limiter does not touch the channels that the matrix does not sum, so they keep the source's peaks; on film audio that peaks at 0 dBFS, AAC, AC-3, E-AC-3 and Opus each decoded those channels over full scale on at least one window measured.
+The release stays at 50 ms, so the mix recovers within 50 ms of a peak instead of about half a second; its cost on a loud bass line is in the consequences.
+
+A/52 lets a mixer signal the centre and surround levels of a stereo downmix, and Dolby's hardware decoders apply them.
+FATE's Monsters, Inc. AC-3 sample signals its surrounds at 0.5 (−6 dB), and The Great Wall's E-AC-3 sample signals its centre at 0.595 (−4.5 dB) and its surrounds at 0.5.
+A/52's defaults would play those surrounds 3 dB and that centre 1.5 dB louder than the mixer chose.
+Lo/Ro is the stereo that plays correctly on two speakers and folds safely to mono.
+Lt/Rt encodes the surrounds in opposite phase for a matrix decoder such as Pro Logic, so their content cancels in mono.
+A hardware decoder that receives the copy turns it down by 31 dB less the track's dialogue level, so a downmix of the decoded track would otherwise play louder than the copy, and the level would jump when a step turns the copy into an encode.
+With a side pair and a back pair, FFmpeg's default keeps one pair at 0 dB and mixes the other in at −3 dB, so a sound that pans between them changes level.
+Mixing both at 0.7071 keeps the power of the four surrounds.
+BS.775 says that a two-channel downmix often leaves out the low-frequency channel and that the main channels must carry every essential part of the programme.
+Film codes the low-frequency channel for +10 dB of playback gain (BS.775).
+Folding it in at its coded level would be 10 dB too quiet, and at its playback level it would drive the limiter on every explosion.
+A 5.1 or 7.1 track is most often a film mix, so it follows BS.775 and leaves the channel out.
+Music codes the low-frequency channel for no playback gain (BS.775), and a track without surrounds is more often music or television than a film mix.
+At 0.7071 into each side, that channel keeps its power, and a film's `2.1` track keeps its bass 10 dB below its playback level instead of losing it.
+The measurements are in <<evidence-downmix>>.
 
 [[decision-audio-for-picture]]
 === The server lowers multichannel audio when a lower bitrate lets a larger picture fit
@@ -416,7 +757,7 @@ A maximum bitrate of 5,500 kb/s gives the 1080p tier with 448 kb/s instead of th
 
 *Why:* 5.1 at 448 kb/s is DVD's usual AC-3 rate, and viewers hear little loss from 768 kb/s.
 A larger picture tier is plainly visible.
-Surround stays, so a home theater keeps surround, though AAC 7.1 can become AAC 5.1.
+Surround stays, so a home theater keeps surround.
 A step that gains no tier would lower the audio for nothing, so the server does not take it.
 
 [[decision-fixed-quality]]
@@ -451,11 +792,21 @@ The source's bitrate suits the source's picture, which can be far larger.
 [[explicitly-deferred]]
 === Explicitly deferred
 
-* This ADR does not decide whether Auto offers lower variants beside a copy.
-When the source fits the viewer's limits and the server copies it in Auto, Auto's ladder stays as it is today.
-https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399] keeps that question open.
+* This ADR does not align an encoded variant's keyframes with the copy's own keyframe times.
+Under ADR 0037, a copied segment opens at the first source keyframe in its first 3 s slot, while the encoded segment with the same index starts at the slot's start.
+Their boundaries can therefore lie up to one slot apart, although Apple's HLS authoring specification asks for aligned boundaries.
+* This ADR does not add a quality cap for each viewer or each Profile.
+* This ADR does not decide how the ServerAdmin's total upload budget bounds stream sessions.
+The issue that adds the budget decides that.
 * This ADR does not decide whether a client's playback details show that the server lowered the audio.
 The multivariant playlist already names the delivered audio codec and channel count.
+* This ADR does not add a night mode, a dialogue boost or other dynamic range compression for the viewer to turn on.
+The worker's decode of an AC-3 or E-AC-3 track applies none of the track's own compression (ADR 0043).
+Such a mode is the viewer's choice, not a property of a correct downmix.
+The viewer's platform already offers such a mode, for example tvOS's Reduce Loud Sounds.
+The server's audio work ends at a bit-perfect copy or a correct downmix, and a night mode would change the mix after that.
+link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc#explicitly-deferred[ADR 0043] records the deferral.
+A later decision that adds such a setting, or a loudness normalisation beside it, would read each track's integrated loudness, loudness range and true peak from a background scan like ADR 0054's bitrate scan (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7[ADR 0032]).
 
 == Consequences
 
@@ -478,7 +829,7 @@ The container bitrate also holds the source's tracks that the session does not d
 When the session encodes its audio, the container bitrate also holds the source track that the encode replaces.
 The server can then lower the audio or encode the video for a source that would fit.
 The over-count lasts until the probe measures each stream's own bitrate.
-* When the probe does not know the copied video's bitrate and the session copies its audio, no audio step lowers the copy's cost.
+* When the probe does not know the copied video's bitrate and every audio rendition is a copy, no audio step lowers the copy's cost.
 Every encoded step adds its bitrate to the container bitrate.
 In Auto and in a fixed quality, a copy whose container bitrate is over the maximum bitrate therefore encodes its video, unless the source cannot be encoded or the server has nothing to encode it to.
 * The server learns of a turned window or screen at the next stream session.
@@ -496,15 +847,65 @@ A codec family that the server starts to encode needs its own bitrate for every 
 A copied audio track can become an encode, which costs worker time.
 * Below a maximum bitrate of 1,184 kb/s, a video encode whose 5.1 steps are E-AC-3 or AC-3 plays in stereo.
 Below 1,120 kb/s, one whose steps include 5.1 AAC does.
-An AAC 7.1 encode or copy has that step too.
+An AAC 7.1 copy has that step too.
 A copied AAC 5.1 or 7.1 track has that step even when the server would encode E-AC-3.
 A copied 5.1 or 7.1 track whose bitrate is below those steps keeps surround down to its own bitrate plus the 360p tier's 800 kb/s.
-* Under a maximum bitrate, an encode can play surround at a lower multichannel step, such as 5.1 at 448 kb/s or AAC 5.1 in place of AAC 7.1, in exchange for a higher top tier in Auto or a single variant's full bitrate.
+* Under a maximum bitrate, an encode can play surround at a lower multichannel step, such as 5.1 at 448 kb/s, in exchange for a higher top tier in Auto or a single variant's full bitrate.
 In Auto, every variant of the ladder, the lowest included, carries that lower audio.
-* Below a maximum bitrate of 864 kb/s, the video gets less than the 360p tier's bitrate.
-Below 209 kb/s, the stream exceeds the maximum bitrate rather than not playing at all.
+* Below a maximum bitrate of 896 kb/s, the video gets less than the 360p tier's bitrate.
+Below 241 kb/s, the stream exceeds the maximum bitrate rather than not playing at all.
+* The lowest audio step is 96 kb/s, so a stream under a low maximum bitrate spends 32 kb/s more on audio than a 64 kb/s step would, and its video gets that much less.
 * The server can change the session's audio codec to AAC to meet the maximum bitrate, and every audio rendition then follows.
-* When the session keeps its own audio after both audio step rules, another audio track keeps its own decision, so a track larger than the default track can take the stream over the maximum bitrate.
+* A copied 3- or 4-channel track keeps surround in a lower step only in a layout that its codec carries exactly.
+A copied AAC `quad` or `2.1` track, and any 3- or 4-channel track whose layout the probe does not record, steps to stereo.
+* No AAC output carries channel configuration 0, so Chromium plays every AAC rendition that the server encodes.
+* A track with more channels than a capability entry's channel maximum of 3 or 4 plays in stereo, not in a 3- or 4-channel downmix.
+* A downmix keeps dialogue at −3 dB on each side in every codec, or at the level that an AC-3 or E-AC-3 track signals, and a `2.1` or `3.1` track keeps its low-frequency channel in stereo.
+A 5.1 or 7.1 track still leaves its low-frequency channel out of stereo.
+* An encode that only renames a surround pair keeps every sample, so a TrueHD, DTS-HD MA or AC-3 5.1 track reaches AAC's or Opus's `5.1` without a filter.
+* A downmix that only leaves channels out, such as 5.1 to 5.0, is never limited.
+In a 7.1 to 5.1 downmix, the limiter can briefly turn the surround pair down, which shifts the rear image while the front channels and the centre stay unchanged.
+* When a loud scene's stereo sum passes the ceiling, the limiter lowers both channels, dialogue included.
+In the synthetic loud scene of <<evidence-downmix>>, the centre fell from −3.0 dB to −7.3 dB while the limiter held the peaks.
+* The summed channels of a lossy downmix peak 3 dB below full scale, so they play up to 3 dB quieter than an unlimited mix in their loudest moments.
+* A downmix that FLAC or ALAC writes has a ceiling 2 dB higher than a lossy downmix of the same track, so it plays louder in loud passages.
+An audio step from a FLAC downmix to a lossy codec therefore lowers the level of those passages.
+With the earlier limiters, the gap was about 1 dB on Tears of Steel (−14.5 against −15.4 LUFS); the two-stage limiter's gap is not measured.
+* The true-peak measurements cover FFmpeg's AAC encoder only.
+How far `aac_at` overshoots after the limiter is not measured.
+* The two-stage limiter costs CPU and memory.
+A whole stereo audio job of Tears of Steel to FLAC took 1.97 % of one core per real-time stream, against 1.49 % with one stage and 0.31 % without a limiter, and up to 139 MB of memory, against 49 MB without a limiter.
+These figures come from one FFmpeg process's CPU time; the capacity for concurrent streams is not measured.
+* Each stage holds back its 5 ms lookahead and its copies' delay before it passes audio on.
+The output's timestamps do not move, but the delay before the first output through HLS is not yet measured.
+* The ceiling names the Annex 2 filter, and other true-peak meters can read the limited channels higher.
+On full-band noise, a −1 dBTP downmix read up to −0.70 dBTP on libebur128 and up to −0.12 dBTP on a 1025-tap 32-phase reconstruction.
+On film audio, both read it within 0.1 dB of the ceiling.
+* The Annex 2 filter reads tones up to 0.22 dB high near a quarter of the sample rate, so the limiter can turn such a tone down by that much while a wider reconstruction reads it under the ceiling.
+* While the limiter acts on a loud bass line, its 50 ms release modulates the mix at the bass frequency.
+A 40 Hz line at −1 dBFS in a stereo downmix put sidebands at −39.6 dBc around 1 kHz dialogue; a 500 ms release would lower them to −58.4 dBc.
+* A lossy encode of the summed channels can still go over full scale after decoding.
+In stereo AAC and Opus, 2 to 13 of 128 synthetic full-scale pink-noise inputs read above 0 dBTP at each bit rate measured, up to +1.43 dBTP.
+Full-scale white noise did so at most multichannel steps, up to +2.43 dBTP (<<evidence-true-peak>>).
+The highest AAC readings came in the first AAC frame after an encoder started.
+A seek into a loud scene starts an encoder, so a stereo AAC downmix is most likely to read above full scale just after such a seek.
+* Auto beside a copy lists variants that the server encodes only after a switch.
+The first segments after a switch down wait for that variant's encoder to start, as every on-demand start does under ADR 0019.
+* A viewer away from home gets the same rules as a viewer at home.
+A viewer on a slow connection relies on the player's variant switching, or on the Apple client's own cap on a metered connection.
+* An AAC encode of a track of 7 or more channels plays 5.1, or 5.0 for a `7.0` track, so the track's second surround pair folds into the first.
+* An Opus or FLAC encode of a `7.0` track plays as 7.1 with a silent low-frequency channel when that codec's capability entry accepts 8 or more channels, and the player shows 7.1.
+In Opus, it costs the 7.1 rate of 640 kb/s, where a 5.0 encode costs 448 kb/s (ADR 0043).
+Everywhere else, the track plays 5.0, and each side's two surrounds share one channel.
+* A copied AC-3 or E-AC-3 `3.0(back)` or `3.1` track steps to stereo, and an encode of such a track is stereo, until a check on hardware passes.
+* Every job that encodes audio names a layout, and a job that names a layout of 3, 4, 7 or 8 channels needs a worker that lists probe version 7 (ADR 0032).
+Until the server stores a file's probe version 7 outcome, that file's 3- and 4-channel tracks step to stereo.
+* A track larger than the default track decides the audio step for the whole stream session.
+A copied AAC stereo default track at 128 kb/s beside a copied AAC 5.1 track at 384 kb/s costs 384 kb/s.
+Under a maximum bitrate of 1,150 kb/s, the 5.1 track encodes at AAC 5.1 at 320 kb/s and the default track keeps its copy.
+Under 1,000 kb/s, both play AAC stereo, the default track still as its copy.
+Before this amendment, that session cost 128 kb/s and took no step, so a variant sized to the maximum went 256 kb/s over it.
+* A step that changes the codec for a larger track encodes the default track too, even when the default track alone would have kept its copy.
 * A fixed quality above the source's size plays the source's size, not the size that its name suggests.
 It encodes at the bitrate of the tier that holds that size.
 * A source wider than 3840 is encoded at 3840 wide, even on a screen that could show more.
@@ -512,6 +913,14 @@ It encodes at the bitrate of the tier that holds that size.
 * A fixed quality on a source whose bitrate is below the tier's bitrate plays at the source's bitrate.
 
 == Rejected Alternatives
+
+* Offering a copy alone in Auto stalls playback when the viewer's bandwidth drops below the copy's bitrate.
+* Encoding the lower variants beside a copy from the start spends worker capacity on variants that the player may never request.
+* Listing the variant nearest 2000 kb/s first beside a copy, as ADR 0008 does for encodes, starts an encode when the stream session starts, for a player that may never need it.
+* Giving the lower variants their own segment list makes a switch from the copy fall inside a segment.
+* Classifying viewers as at home or away by IP address, with separate limits for each, misjudges viewers on weak Wi-Fi at home and on fast connections away.
+A VPN, a reverse proxy or carrier-grade NAT hides the viewer's location from the server.
+* A server-side cap for cellular viewers cannot see that a connection is metered, because only the device knows.
 
 * Applying the viewer's limits to encodes only would let a copy exceed every limit the viewer set.
 * Applying the viewer's limits to a copy in Original would break Original's promise of the source's own quality.
@@ -549,8 +958,12 @@ That is 768 kb/s for encoded 5.1 audio and more for a large copied track.
 * Capping the audio by a fixed table of the total bitrate while keeping the channel count would give 5.1 at 128 kb/s at low limits and lower the audio even when the picture gains nothing.
 * Following Apple's 192 kb/s for E-AC-3 5.1 assumes encoder tools that FFmpeg's E-AC-3 encoder turns off.
 * Stereo steps below 64 kb/s would need HE-AAC, and FFmpeg's only HE-AAC encoder is non-free.
+A macOS worker's `aac_at` writes HE-AAC, but a Linux worker could not write the same step.
+* A stereo or mono AAC step at 64 kb/s decoded material limited to −3 dBTP above 0 dBTP: 3 of 32 pink-noise inputs in stereo, and the loudest minute of a film's mono downmix.
+* A mono step from `libfdk_aac` would make the mono step depend on an encoder that FFmpeg classes as non-free.
 * A step for each audio track would mix codecs in one stream session, which ADR 0043 rejects.
 * Capping only the default track would let another rendition push `BANDWIDTH` over the maximum.
+* Taking the step from the default track alone would let a larger rendition take every variant over the maximum, because the stream session's audio bitrate and `BANDWIDTH` count the largest rendition (ADR 0054).
 * Keeping every audio copy would keep the overshoot of a large copied track.
 * Checking every video copy against the container bitrate alone would miss an encoded audio track that is larger than the source's own audio.
 * Adding a copied track's bitrate to the container bitrate would count the track twice.
@@ -563,6 +976,262 @@ An audio encode costs far less worker capacity than a video encode.
 * Taking a stereo step to gain a higher tier would drop surround that fits at a multichannel step.
 * Shrinking the picture below the 360p box at very low limits would add a box that is not a quality tier.
 * Showing the viewer a notice would interrupt playback for a change that the playlist already describes.
+* Keeping `-ac` with a channel count lets FFmpeg pick a default 3- or 4-channel layout.
+A `quad` track then loses its rear channels' opposite-phase content in AAC `4.0`, and a `3.0` track becomes AAC `2.1`, which Chromium refuses.
+* Encoding a `quad` or `2.1` track to AAC in its own layout writes channel configuration 0, which Chromium refuses.
+* Downmixing a track above a 3- or 4-channel maximum to that count merges a surround pair into one channel in AAC `4.0`.
+Stereo keeps every full-band channel in the mix.
+* Choosing the layout from the channel count alone cannot tell `quad` from `4.0`, or `2.1` from `3.0`.
+* FFmpeg's default downmix turns dialogue down to −10.7 dB in FLAC and ALAC, goes over full scale in AAC, AC-3 and E-AC-3, and drops a `2.1` track's low-frequency channel.
+* Adding `volume=2` to `-ac 2` lifts every channel by 6 dB.
+In the loud scene, 33 % of the samples went over full scale, and the AAC output's true peak reached +9.7 dBTP.
+* A matrix normalized by A/52's worst-case scaling turns dialogue down to −10.7 dB in every scene, to protect a sum that only loud scenes reach.
+* A centre above −3 dB, or a night-mode matrix, by default changes the balance of the mix for every viewer.
+That choice belongs to the deferred viewer setting.
+* FFmpeg's `loudnorm` changes the programme's loudness over time, and its linear mode needs a first pass over the whole file.
+* FFmpeg's default matrix for layouts with height channels gives the top-back channels no coefficient, so sound only in them goes silent in stereo.
+* One limiter ceiling for every downmix would either let a lossy codec's overshoot go over full scale in stereo or limit a FLAC or ALAC downmix more than it needs.
+* Counting a renamed surround pair as a downmix runs the matrix and the limiter on every TrueHD, DTS-HD MA and AC-3 5.1 encode, which changes samples that the rename alone keeps.
+* One limiter linked across every channel ducks dialogue for peaks in channels that the matrix never sums.
+* A −3 dBFS sample-peak ceiling for a FLAC or ALAC downmix limits about twice as often as a −1 dBTP true-peak ceiling and still lets true peaks reach −0.1 dBTP.
+* A −1 dBTP ceiling for a lossy stereo downmix lets decoded AAC, AC-3, E-AC-3 and Opus go over full scale.
+* A −4.5 dBTP ceiling for stereo AAC and Opus held every input measured, with at least 0.48 dB to spare.
+It limits Tears of Steel's stereo downmix by more than 1 dB for 88.1 s of 734 s, 37 % longer than the 64.4 s at −3 dBTP.
+It also guarantees nothing, because a lower ceiling did not reliably lower the decoded peak.
+One pink-noise input in AAC at 96 kb/s read +1.43 dBTP at a −3 dBTP ceiling, +0.68 dBTP at −3.5 dBTP and +1.20 dBTP at −4 dBTP.
+* Stereo AC-3 or E-AC-3 at 192 kb/s, at −3 dBTP, for the clients that declare either codec, kept all 128 pink-noise inputs at least 0.82 dB below 0 dBTP.
+It costs 1.5 to 2 times the bitrate of the stereo AAC and Opus steps at 96 and 128 kb/s.
+* A −1 dBFS sample-peak ceiling for a lossy downmix to more than two channels misses the peaks between samples, and the folded surround pair of a 7.1 to 5.1 downmix decoded over full scale in AAC 5.1 at 320 kb/s.
+* One limiter stage with copies between samples leaves the Annex 2 filter's reading over the ceiling.
+A bounded 16-sample burst read −0.90 dBTP after one stage at 22.05 kHz, and bursts that a targeted search found read −0.77 dBTP at 22.05 kHz and −0.90 dBTP at 48 kHz.
+* A lower internal limit for one stage, in place of a second stage, buys a margin that a bounded input can spend.
+At 0.888 (−1.03 dBFS), the same 16-sample burst still read −0.93 dBTP at 22.05 kHz.
+* A resampler chain, which oversamples the summed channels four times around `alimiter` and resamples them back, puts two resamplers in the audio that the viewer hears.
+On the pinned FFmpeg, it failed 168 of the 215 cases of the worker's limiter test, and it returned no samples for inputs of 1 and 100 samples.
+* Centring the Annex 2 phases on the sample that the gain belongs to lowers the filter's weight on distant taps by 13 %, but under the same search one stage read −0.63 dBTP at 22.05 kHz, against −0.77 dBTP for the published alignment.
+* A 500 ms release lowers the bass sidebands from −39.6 to −58.4 dBc, but holds the mix down for about half a second after each peak.
+* A/52's default levels for every AC-3 or E-AC-3 track override the centre and surround levels that the track's mixer chose.
+* An Lt/Rt stereo downmix encodes the surrounds in opposite phase, which cancels in mono and needs a matrix decoder to play as intended.
+* Encoding AAC 7.1 writes channel configuration 7, which AVFoundation plays as front-wide 7.1, with the side surrounds from the front speakers.
+* Encoding a `7.0` track in 5.1, in any codec, folds its four surrounds into one pair and adds a low-frequency channel that the track lacks.
+Opus or FLAC 7.1 with a silent low-frequency channel keeps all seven channels in place, and 5.0 invents no channel.
+* Carrying AC-3 and E-AC-3 `3.0(back)` and `3.1` now would misplace their channels on AVFoundation.
+
+[[evidence-downmix]]
+== Evidence: downmix
+
+These measurements ran on 2026-11-01 against FFmpeg 8.1.3 in the pinned worker image (`streamarr/streamarr-transcode-worker@sha256:f2011e95…`).
+The sources were synthetic 48 kHz floating-point WAV files, 20 s long, that the same FFmpeg built.
+The dialogue scene had a 1 kHz tone at −20 dBFS peak in the centre and silence elsewhere.
+The loud scene had a tone at −6 dBFS peak in every channel, each at a different frequency, with the centre at 1 kHz.
+Each level below is the left output channel; the right matched.
+"Over" counts samples above full scale, out of 1.92 million.
+The AAC output was 192 kb/s stereo, decoded back to floating point.
+The named matrix used the −3 dBFS ceiling.
+
+|===
+| Downmix | Centre, dialogue scene | Centre, loud scene, before encoding | Peak before encoding | Over before encoding | Over after AAC | AAC true peak
+
+| FFmpeg default, 5.1 to AAC | −3.0 dB | −3.0 dB | +1.6 dBFS | 75,000 | 1,023 | +2.9 dBTP
+| FFmpeg default, 5.1 to 16-bit FLAC | −10.7 dB | −10.7 dB | −6.0 dBFS | 0 | – | –
+| `-ac 2` with `volume=2`, 5.1 to AAC | +3.0 dB | +3.0 dB | +7.7 dBFS | 640,840 | 9,611 | +9.7 dBTP
+| Named matrix, 5.1 to AAC or FLAC | −3.0 dB | −7.3 dB | −3.0 dBFS | 0 | 0 | −2.7 dBTP
+| FFmpeg default, 7.1 to AAC | −3.0 dB | −3.0 dB | +3.7 dBFS | 138,680 | 2,727 | +3.7 dBTP
+| FFmpeg default, 7.1 to 16-bit FLAC | −12.9 dB | −12.9 dB | −6.2 dBFS | 0 | – | –
+| `-ac 2` with `volume=2`, 7.1 to AAC | +3.0 dB | +3.0 dB | +9.7 dBFS | 752,840 | 14,425 | +9.7 dBTP
+| Named matrix, 7.1 to AAC or FLAC | −3.0 dB | −7.8 dB | −3.0 dBFS | 0 | 0 | −2.8 dBTP
+|===
+
+* ALAC, like FLAC, takes integer samples (`s16p` and `s32p`), and FFmpeg's default put the dialogue scene's centre at −10.7 dB in ALAC too.
+AAC, AC-3 and E-AC-3 take `fltp`.
+* In the dialogue scene, the named matrix's output matched FFmpeg's default for AAC, so the limiter changed nothing below its ceiling.
+* After AAC, the loud 5.1 scene's centre measured −4.9 dB for FFmpeg's default, −4.8 dB for `-ac 2` with `volume=2` and −7.3 dB for the named matrix.
+The 6 dB boost of `volume=2` left the loud scene's dialogue no louder than FFmpeg's default after AAC, and it clipped.
+* A 16-bit 5.1 source with the same 1 kHz tone at −6 dBFS peak in FL, FC and SL sums to 1.207 on the left.
+With `pan` on the 16-bit samples, the sum clipped before the limiter, and the limited output's third harmonic rose to −23 dBc.
+With `aformat=sample_fmts=fltp` first, the third harmonic stayed at −103 dBc and the peak at −3.0 dBFS.
+* A centre click at sample 48,000 came out at sample 48,000 with the limiter, and the output kept the source's 144,000 samples.
+* A `2.1` source with a 50 Hz tone at −20 dBFS peak in its low-frequency channel gave silence with FFmpeg's default, with or without `volume=2`, and −23.0 dBFS (−3.0 dB) on each side with the named matrix.
+FFmpeg's default `lfe_mix_level` is 0.
+* The limiter's ceiling decided whether the decoded output went over full scale in the loud 5.1 scene:
+** At −1 dBFS: AAC went over by 1,095 samples at 64 kb/s, 25 at 128 kb/s and 10 at 192 kb/s; AC-3 and E-AC-3 at 192 kb/s did not in this synthetic scene, but did on film audio (<<evidence-downmix-film>>).
+** At −2 dBFS: AAC went over by 66 samples at 64 kb/s and 16 at 128 kb/s.
+** At −3 dBFS: AAC went over by 12 samples at 64 kb/s and by none at 128 or 192 kb/s; AC-3 and E-AC-3 did not.
+* A 7.1 source with a tone only in the left side channel, then only in the left back channel, gave −20 dBFS and −23 dBFS in the left surround of FFmpeg's default `5.1(side)`, and the reverse in its default `5.1`.
+The named fold gave −23 dBFS for both.
+* A 5.1 source with a tone only in its low-frequency channel gave silence in FFmpeg's default 5.0 and stereo.
+* The pinned image's `ffmpeg -filters` lists `pan` and `alimiter`.
+
+[[evidence-downmix-film]]
+== Evidence: downmix on film audio
+
+These measurements ran on 2026-11-01 against FFmpeg 8.1.3 in the pinned worker image.
+The sources were two Creative Commons masters from Xiph: Tears of Steel 5.1 (734 s, 24-bit, 48 kHz, layout `5.1`, every channel peaking at 0 dBFS) and the first 360 s of Sintel 5.1 (16-bit).
+Integrated loudness and true peaks come from FFmpeg's `ebur128` filter.
+Each limiter used attack and release settings of 5 ms and 50 ms.
+The rows for a 4× oversampled limiter measured the resampler chain that <<decision-downmix>> rejects; <<evidence-true-peak>> measures the two-stage limiter that replaced it.
+
+* Renaming against downmixing, on the first 60 s of Tears of Steel as 24-bit PCM:
+** FLAC with `-ch_layout 5.1(side)` and no filter kept all 17,280,000 samples.
+** PCM with `-ch_layout 5.1`, decoded from that FLAC, kept every sample too.
+** `aformat`, `pan` to `5.1(side)` and a linked `alimiter` at −1 dBFS changed 777,385 samples (4.50 %), by up to −19.3 dBFS.
+* A linked limiter at −1 dBFS on Tears of Steel's 5.1 to 5.0 downmix, which sums nothing, turned the mix down by up to 1.0 dB and by more than 0.5 dB for 15.1 s.
+It turned 239,307 of 3,210,044 centre samples between −30 and −6 dBFS down by more than 0.5 dB.
+* `alimiter` at −3 dBFS, given a 1 kHz tone at 0 dBFS in one channel and a 300 Hz tone at −20 dBFS in the other, gave peaks of −3.0 and −23.0 dBFS.
+* Tears of Steel's stereo downmix, unlimited, measured −13.3 LUFS and a +6.3 dBFS sample peak.
+Limited:
+
+|===
+| Limiter | Turned down by more than 1 dB | Largest reduction | Integrated loudness | Sample peak | True peak | CPU
+
+| −3 dBFS, sample peak | 64.2 s (8.7 %) | 9.3 dB | −15.4 LUFS | −3.0 dBFS | −0.1 dBTP | 4.8 s
+| −1 dBTP, 4× oversampled | 35.6 s (4.8 %) | 7.3 dB | −14.5 LUFS | −1.0 dBFS | −0.9 dBTP | 10.2 s
+|===
+
+CPU is FFmpeg's user time to decode, downmix and limit the 734 s on the Docker host; without a limiter it was 4.2 s.
+
+* Those two stereo downmixes, encoded and decoded back to floating point, went over full scale in this many samples:
+
+|===
+| Limiter | AAC 128 kb/s | AC-3 192 kb/s | E-AC-3 192 kb/s | Opus 128 kb/s
+
+| −3 dBFS, sample peak | 0 | 0 | 0 | 0
+| −1 dBTP, 4× oversampled | 15 (+1.45 dBFS) | 2 (+0.09 dBFS) | 4 (+0.25 dBFS) | 303 (+1.02 dBFS)
+|===
+
+* A 7.1 to 5.1 downmix of 360 s took Tears of Steel's front channels, centre, low-frequency channel and surround pair, the last as the back pair.
+Its side pair was either the same surround pair, the worst case for the fold, or Sintel's surround pair.
+The matrix folded each side's two surrounds at 0.7071, and a limiter linked across the folded pair alone acted on it.
+The front channels, centre and low-frequency channel came out identical to the source.
+Encoded at each lossy codec's lowest multichannel step and decoded back, the folded pair went over full scale in this many samples, with its peak:
+
+|===
+| Side pair, ceiling | AAC 5.1 320 kb/s | AC-3 5.1 384 kb/s | E-AC-3 5.1 384 kb/s | Opus 5.1 256 kb/s
+
+| Same pair, −1 dBFS | 4 (+0.40 dBFS) | 0 (−0.34 dBFS) | 0 (−0.09 dBFS) | 0 (−0.08 dBFS)
+| Same pair, −3 dBFS | 0 | 0 | 0 | –
+| Sintel's pair, −1 dBFS | 0 | 0 | 0 | 0
+| Sintel's pair, −3 dBFS | 0 | 0 | 0 | –
+|===
+
+The untouched front three channels of the same encodes went over by 91 to 103 samples in AAC, 213 to 232 in AC-3, 402 to 422 in E-AC-3 and 678 to 746 in Opus, with peaks up to +2.19 dBFS.
+Opus ran with `-mapping_family 1`.
+* A `5.1(side)` test file with a 40 Hz tone at −1 dBFS in both front channels and a 1 kHz tone at −20 dBFS in the centre, downmixed to stereo and limited at −3 dBFS, put sidebands at 1 kHz ± 40 and 80 Hz at −39.6 dBc with a 50 ms release and −58.4 dBc with 500 ms.
+* FFmpeg's `ashowinfo` printed these downmix levels from the first decoded frame of FATE samples:
+** `ac3/monsters_inc_5.1_448_small.ac3`: centre 0.707, surround 0.500;
+** `eac3/the_great_wall_7.1.eac3`: centre 0.595, surround 0.500;
+** `eac3/csi_miami_5.1_256_spx_small.eac3`: centre 0.707, surround 0.707, preferred downmix Lt/Rt;
+** `ac3/millers_crossing_4.0.ac3`: centre 0.707, surround 0.707.
+* Decoded with `-drc_scale 0`, `-target_level -31` lowered the overall RMS level of Miller's Crossing's AC-3 by 4.0 dB and CSI Miami's E-AC-3 by 5.0 dB, and left The Great Wall's E-AC-3 unchanged.
+
+[[evidence-true-peak]]
+== Evidence: the two-stage true-peak limiter
+
+These measurements ran on 2026-11-03 against FFmpeg 8.1.3 in the pinned worker image (`streamarr/streamarr-transcode-worker@sha256:a11de463…`), for https://github.com/streamarr/streamarr-transcode-worker/pull/142[streamarr/streamarr-transcode-worker#142].
+The harnesses were not committed, so this section gives the results.
+The Annex 2 filter read each output as a full convolution over every sample, the file's end included.
+libebur128 1.2.6 read it after 64 appended silent frames, because the library does not read the last samples of a file on its own.
+Every source channel stayed within full scale.
+
+* A bounded burst defeats one stage.
+The burst is 16 values of `numpy.random.default_rng(97).uniform(-1, 1, 16)`, at most 0.957, in FL, FR, FC, BL and BR of a 5.1 source.
+Through the whole mono job, one stage read −0.90 dBTP at 22.05 kHz and −0.95 dBTP at 48 kHz against the −1 dBTP ceiling; through the stereo job, −0.94 and −0.97 dBTP.
+The reading did not change when the burst sat at the start, the middle or the end of a 1 s file, or alone in a 16-sample file.
+At an internal limit of 0.888 (−1.03 dBFS), one stage read −0.93 dBTP at 22.05 kHz.
+* A search for bursts that one stage reads high ran 14,404 evaluations per case, on 24 samples in each summed source channel.
+The worst bursts it found read −0.77 dBTP (mono, 22.05 kHz), −0.90 dBTP (mono, 48 kHz), −0.93 dBTP (stereo, 48 kHz) and −0.96 dBTP (the surround pair of 7.1 to 5.1, 48 kHz).
+With the Annex 2 phases centred on the gain's sample, one stage read −0.63 dBTP at 22.05 kHz.
+* Two stages read −0.9997 dBTP or lower on the 16-sample burst at every rate from 22.05 to 96 kHz.
+The same search, run against the two stages, found nothing above −0.9987 dBTP at 22.05 kHz or above −0.9997 dBTP at 48 kHz.
+Two stages read −0.9999 dBTP or lower on 20 synthetic signals, on files of every length from 1 to 256 samples and of 300, 1,000, 4,800 and 10,000 samples, and on hot test cases built from the recipes of EBU Tech 3341.
+* An independent review reran the two stages on FFmpeg 8.0.1, a different build, with the same coefficients.
+The 14 searched bursts at four rates read −0.9987 dBTP or lower, 330 bounded 5.1 to mono jobs at 11 rates read −0.9993 dBTP or lower, and 160 bounded 22.2 to mono jobs read −0.9995 dBTP or lower.
+* The worker's `DownmixLimiterSmokeTest` runs 227 cases on the pinned image: the bursts at the start, middle and end of a file, inputs of 1 to 10,000 samples, the end of a file, an input that never reaches the ceiling, and the first frame's timestamp.
+Before the change, the resampler chain failed 168 of 215 of those cases.
+* On Tears of Steel's 734 s stereo downmix, the two stages read −1.0000 dBTP on the Annex 2 filter, −0.92 dBTP on libebur128 and −0.93 dBTP on a 1025-tap 32-phase reconstruction.
+They turned the mix down by more than 1 dB for 35.0 s and by up to 7.3 dB, and changed 8.56 % of the samples.
+The second stage never turned the mix down by more than 0.01 dB.
+Its mono downmix and a 7.1 to 5.1 surround pair also read −1.0000 dBTP.
+A 7.1 to 5.1 surround pair that peaks at −2.40 dBTP, below the ceiling, came out unchanged in every sample, and the channels that the matrix does not sum came out unchanged in every 7.1 to 5.1 job.
+* On full-band noise, the limited channels read up to −0.70 dBTP on libebur128 and up to −0.12 dBTP on the 1025-tap reconstruction.
+The Annex 2 filter reads a tone 0.22 dB high at 0.253 of the sample rate and up to 0.17 dB high between 0.35 and 0.45 of it.
+* The last release step left one sample of the mono film downmix at a gain of 1.0001.
+* On a 32-thread x86-64 workstation, with FFmpeg's default threads, a whole audio job that decodes, downmixes, limits, dithers and writes FLAC took this share of one core per real-time stream:
++
+|===
+| Job | No limiter | Resampler chain | One stage | Two stages
+
+| Tears of Steel 5.1 to stereo, 734 s | 0.31 % | 1.41 % | 1.49 % | 1.97 %
+| 7.1 to 5.1, 360 s | 0.56 % | 1.62 % | 1.76 % | 2.27 %
+|===
++
+The two-stage jobs used up to 139 MB of memory, against 114 MB with one stage and 49 MB without a limiter.
+
+Lossy encodes ran through the worker's two-stage graph at −3 dBTP, with every encode's layout named: 837 encode and decode runs, with no errors.
+Each reading below is the higher of the two meters for the summed channels, over the whole decoded output.
+The inputs were the loudest 60 s of Tears of Steel and of a 7.1 film built from the two Creative Commons masters, pink noise, pink bursts, test tones and full-scale white noise.
+
+[cols="2,1,1"]
+|===
+| Stereo step | Pink-noise inputs above 0 dBTP, of 32 | Highest reading
+
+| AAC 64 kb/s | 3 | +0.37 dBTP
+| AAC 96 kb/s | 2 | +0.25 dBTP
+| AAC 128 kb/s | 1 | +0.28 dBTP
+| Opus 64 kb/s | 3 | +0.66 dBTP
+| Opus 96 kb/s | 2 | +0.31 dBTP
+| Opus 128 kb/s | 1 | +0.12 dBTP
+| AC-3 and E-AC-3, 128 and 192 kb/s | 0 | −0.98 dBTP
+|===
+
+A wider run on 2026-11-04 used the same graph, the same pinned FFmpeg and the same meters, on 128 pink-noise inputs: the 32 above and 96 more.
+
+[cols="2,1,1"]
+|===
+| Stereo step at −3 dBTP | Pink-noise inputs above 0 dBTP, of 128 | Highest reading
+
+| AAC 96 kb/s | 4 | +1.43 dBTP
+| AAC 128 kb/s | 5 | +0.78 dBTP
+| Opus 64 kb/s | 13 | +0.66 dBTP
+| Opus 96 kb/s | 3 | +0.31 dBTP
+| Opus 128 kb/s | 2 | +0.15 dBTP
+| AC-3 and E-AC-3, 192 kb/s | 0 | −0.82 dBTP
+|===
+
+* The four highest AAC readings peaked 12.3 to 12.9 ms into the decode, inside the first 1,024-sample AAC frame, where the pink noise starts at full level.
+Opus showed no such effect at the start of its decode.
+* The fixed pink and burst inputs and four 60 s film windows stayed below 0 dBTP at every stereo step.
+The windows came from Tears of Steel, Sintel and two surround folds of the Creative Commons masters.
+The worst film reading was the Sintel window in Opus at 64 kb/s, at −0.14 dBTP.
+* At −4.5 dBTP, every input stayed below 0 dBTP, the closest at −0.48 dBTP (AAC 96 kb/s).
+* Run alone over the whole of Tears of Steel's stereo downmix, the limiter turned the mix down by more than 1 dB for 64.4 s at −3 dBTP and for 88.1 s at −4.5 dBTP.
+
+* The Tears of Steel window and the fixed pink and burst inputs decoded below 0 dBTP at every stereo step.
+* Mono AAC at 96 kb/s decoded the Tears of Steel window at −1.67 dBTP and all 32 pink-noise inputs at −0.68 dBTP or lower.
+At 64 kb/s, the same window decoded at +0.67 dBTP, with 14 samples at full scale.
+A 1 kHz square wave and a clipped sweep decoded above 0 dBTP at every mono AAC rate measured: at 96 kb/s, +0.31 dBTP and +2.22 dBTP.
+* Above two channels, no input but white noise decoded above 0 dBTP.
+The smallest margins were 0.32 dB in 5.1 (Opus 256 kb/s, pink noise), 0.79 dB in 5.0 (E-AC-3 384 kb/s, pink bursts), 1.60 dB in 4.0 (E-AC-3 384 kb/s, a film window) and 0.10 dB in 3.0 (AAC 192 kb/s, a film window).
+* Full-scale white noise decoded above 0 dBTP at most multichannel steps, by up to +2.43 dBTP in 5.1 Opus at 256 kb/s, and in mono AAC at 64 and 96 kb/s, AC-3 at 96 kb/s and Opus at 64 kb/s.
+* The channels that the limiter does not touch keep the source's peaks.
+On a Tears of Steel window whose front channels peak at 0 dBFS, AAC 4.0 at 256 kb/s decoded those channels at +2.06 dBTP, with 177 samples beyond full scale in 60 s.
+
+[[evidence-seven-zero]]
+== Evidence: a `7.0` track in Opus
+
+These measurements ran on 2026-11-03 against FFmpeg 8.1.3 in the pinned worker image.
+The source was a synthetic 48 kHz `7.0` file that the same FFmpeg built.
+Each of its seven channels carried its own tone, between 300 and 1,900 Hz, at −20 dBFS peak.
+Each level below is relative to the source channel's own level.
+
+* `libopus` refused the `7.0` layout, with and without `-mapping_family 1`.
+* Padded to `7.1` with `pan`, which gave the added low-frequency channel a gain of 0, the Opus encode decoded with each of the seven tones at 0.0 dB in its own channel.
+The low-frequency channel decoded as silence.
+* Folded to 5.0, with each side's back and side surrounds at 0.7071, the Opus encode kept the front channels and the centre at 0.0 dB.
+Each surround tone came out at −3.0 to −3.1 dB in its own side's surround channel.
+* hls.js 1.7.3 in Chromium 156 and Firefox 157 played the padded `7.1` Opus encode as fragmented MP4 with `-mapping_family 1`, through HLS and through plain MSE.
+Every channel came out in its RFC 7845 position, within 0.6 dB of the source's level, and the low-frequency channel stayed silent.
+* In the same players, the 5.0 encode put every channel in its RFC 7845 position, and each surround tone came out within 0.6 dB of the fold's −3 dB.
 
 == References
 
@@ -577,3 +1246,15 @@ An audio encode costs far less worker capacity than a video encode.
 * https://developer.apple.com/documentation/http-live-streaming/hls-authoring-specification-for-apple-devices[Apple: HLS Authoring Specification for Apple Devices]
 * https://github.com/FFmpeg/FFmpeg/blob/4811625b5f4e5aed528aed9225d0ca868a8e6e96/libavcodec/eac3enc.c[FFmpeg's E-AC-3 encoder] writes its frames with the adaptive hybrid transform and spectral extension turned off.
 * https://www.atsc.org/atsc-documents/a522012-digital-audio-compression-ac-3-e-ac-3-standard-12172012/[ATSC A/52: Digital Audio Compression (AC-3, E-AC-3) Standard]
+* link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032: Media File Probe Results Are Persisted and Playback Reads Them]
+* https://github.com/streamarr/streamarr-server/pull/711[streamarr/streamarr-server#711] keeps a copied 3- or 4-channel track's own channels in its codec's lower audio steps.
+* https://github.com/chromium/chromium/blob/4a84ff43ddb481a1c0035b185fe384870f5e428c/media/formats/mp4/aac.cc#L269[Chromium's AAC parser] refuses channel configuration 0.
+* ISO/IEC 14496-3, MPEG-4 Audio, defines AAC's channel configurations.
+* https://ffmpeg.org/ffmpeg-utils.html#Channel-Layout[FFmpeg's channel layout names]
+* https://www.itu.int/rec/R-REC-BS.775-4-202212-I/en[ITU-R BS.775-4: Multichannel stereophonic sound system with and without accompanying picture], Annex 4 for the downmix equations and the section on the low-frequency channel
+* https://github.com/FFmpeg/FFmpeg/blob/n8.1.3/libswresample/rematrix.c[FFmpeg 8.1.3's `rematrix.c`] builds the default matrix and normalizes it only for integer sample formats.
+* https://ffmpeg.org/ffmpeg-filters.html#alimiter[FFmpeg's `alimiter` filter]
+* https://www.itu.int/rec/R-REC-BS.1770[ITU-R BS.1770-5: Algorithms to measure audio programme loudness and true-peak audio level], Annex 2 for the example true-peak filter
+* https://tech.ebu.ch/docs/tech/tech3341.pdf[EBU Tech 3341: Loudness Metering], for its true-peak test cases
+* https://github.com/streamarr/streamarr-transcode-worker/pull/142[streamarr/streamarr-transcode-worker#142] implements the two-stage true-peak limiter.
+* Xiph's Creative Commons masters: https://media.xiph.org/tearsofsteel/tearsofsteel-surround.flac[Tears of Steel 5.1] and https://media.xiph.org/sintel/sintel-master-51.flac[Sintel 5.1]

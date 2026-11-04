@@ -11,11 +11,33 @@ ADR 0007 stays Accepted.
 ADR 0007's rule that routes all streams through FFmpeg still holds for every stream that is not direct-played.
 This decision relies on link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019] for held segment requests and for the server's preparing-or-ready events.
 
+An amendment for https://github.com/streamarr/streamarr-server/issues/59[streamarr/streamarr-server#59] settles five questions about direct play.
+The declaration must cover every audio track in the file, not only the selected audio (<<decision-every-audio-track>>).
+Probe version 7 adds the sample entry of the file's video stream and the file's major brand (<<decision-source-facts>>).
+MP4 and MOV are separate source containers, and the major brand tells them apart (<<decision-mp4-and-mov>>).
+The server checks the playback authority when each direct-play request starts, and a response that is already streaming finishes (<<decision-authority>>).
+The stream session's payload has one GraphQL type for each delivery (<<decision-payload>>).
+
+A later amendment for the same issue settles the source container values and the sample entries.
+Every video capability entry that lists MP4 or MOV also lists the sample entries that the player opens (<<decision-sample-entries>>).
+The declaration names eight source containers, and the M4V and 3GP brands and a file without an `ftyp` box count as MP4 (<<decision-mp4-and-mov>>).
+Playback and library scans never follow a soft link, and the server serves each direct-play response from the file that it opened without following links (<<decision-no-soft-links>>).
+On a worker, FFmpeg runs in a sandbox that limits it to the media root (link:0033-transcode-worker-is-a-separate-service.adoc#decision-ffmpeg-sandbox[ADR 0033]).
+The server reports three direct-play metrics (<<decision-metrics>>).
+The web client direct-plays MP4 and WebM files in the browser's own video element (<<decision-web>>).
+
+A third amendment, for https://github.com/streamarr/streamarr-server/pull/745[streamarr/streamarr-server#745], settles how a ServerAdmin sees the soft links that a scan skips.
+The scan stores each one as a skipped file, not as an item result (<<decision-no-soft-links>>).
+`addLibrary` refuses a library folder that sits below a soft link.
+
 NOTE: link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052] adds further fallbacks in Original.
 After a format error during the HLS copy, the server falls back to an encode, and the playback choice changes to Auto.
 Before that encode, a failed Dolby Vision copy whose compatible base the client declares falls back to the copy with Dolby Vision stripped, and Original stays selected.
 The fallback from direct play to HLS at original quality stays as this ADR decides.
 When the server rules out the HLS copy after direct play fails, the server falls back to an encode instead, and that encode plays in Auto.
+
+NOTE: link:0055-a-viewers-audio-delay-is-a-playback-session-parameter-and-the-server-shifts-the-audio-renditions.adoc[ADR 0055] changes when Original direct-plays.
+When an applied audio delay is not 0, Original plays the HLS copy instead of direct play whenever one capability entry accepts an HLS copy that can apply the delay.
 
 == Context
 
@@ -93,7 +115,7 @@ The stream decision of link:0013-stream-decision-architecture.adoc[ADR 0013] cho
 
 * the source container
 * the video stream
-* the selected audio
+* every audio track in the file (<<decision-every-audio-track>>)
 * any selected subtitle
 
 An image subtitle track stores each cue as a picture.
@@ -106,11 +128,186 @@ In some cases, the server burns in a forced image track automatically for a clie
 A forced image track that the server burns in automatically counts as a selected subtitle.
 A file therefore plays over HLS whenever the server burns in the file's forced image track.
 
+[[decision-every-audio-track]]
+=== The declaration must cover every audio track in the file
+
+During direct play, the player picks the audio track that the file starts with.
+AVPlayer picks the track by its own media-selection rules.
+The viewer can also switch to another audio track inside the file.
+The server sees only byte-range requests, so the server cannot tell which audio track plays.
+
+Direct play therefore needs every audio track in the file to be covered, not only the audio that the stream decision selects.
+An audio track is covered only when one audio capability entry accepts the track and lists the file's source container (link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc#decision-delivery-paths[ADR 0049]).
+A file with one audio track that the declaration does not cover plays over HLS.
+
 [[decision-authority]]
-=== Every direct-play request passes the live playback-authority check
+=== Every direct-play request passes the live playback-authority check when the request starts
 
 Every direct-play request passes the same live playback-authority check as playlist and segment requests (link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018]).
+The server checks the authority when each request starts, as for a file download.
+After the authority ends, the server denies the next request.
+A response that is already streaming when the authority ends still finishes.
+The server does not check the authority again while a response streams.
 The server only reads the source file.
+
+[[decision-no-soft-links]]
+=== Playback and library scans never follow a soft link
+
+A soft link, or symbolic link, is a file-system entry that points at another path.
+A hard link is another name for the same file, so a hard link is an ordinary file.
+
+The server answers `404 Not Found` to a direct-play request when any component of the file's path below the media root is a soft link.
+The server opens the file by walking from the media root one path component at a time, and it opens each component without following links.
+The server then serves every byte of the response from that open file.
+The server never opens the file again by its name.
+The worker refuses a soft link before it starts FFmpeg, and a sandbox keeps FFmpeg inside the media root (link:0033-transcode-worker-is-a-separate-service.adoc#decision-ffmpeg-sandbox[ADR 0033]).
+
+The library scan skips every soft link below the library folder, and the library folder itself when it is a soft link.
+A soft link to a file, a soft link to a folder and a broken soft link are all skipped.
+The scan never descends into a soft-linked folder.
+
+The scan stores each soft link that it skips as a skipped file, with the reason `SOFT_LINK`.
+A skipped file belongs to the library and holds the soft link's path and the reason.
+A library holds at most one skipped file for each path.
+The stored path names the soft link itself, never its target, so a soft link to a folder never ends with a separator (link:0012-filepath-uri-encoding.adoc[ADR 0012]).
+A skipped file's id comes from its library and its path.
+A rescan that skips the same soft link therefore gives it the same id, and a cursor keeps its place.
+`SOFT_LINK` is the only reason today.
+The scan stores a soft link even when the ignore rules would drop its name.
+When a scan's walk starts, it deletes the library's skipped files that other library operations stored.
+The list therefore shows what the latest walk skipped.
+An execution after a restart keeps the skipped files that its own operation stored (link:0027-library-operations-are-durable-jobs.adoc[ADR 0027]).
+A scan that stops before its walk starts, or whose library folder check fails, keeps the earlier list.
+Removing the library deletes its skipped files.
+A ServerAdmin pages through a library's skipped files in path order through `Library.administration.skippedFiles` (link:0014-protocol-agnostic-pagination.adoc[ADR 0014]).
+
+The file watcher skips a file when the file, or any folder from the library folder down to the file, is a soft link.
+The file watcher runs outside any library operation, so it stores no skipped file.
+The next scan stores the skip.
+
+A file record whose path holds a soft link becomes `UNREADABLE` under link:0038-scans-remove-media-only-when-files-are-confirmed-missing.adoc[ADR 0038], so the scan never confirms it missing and never removes its item.
+A file that a hard link names scans and plays like any other file.
+
+`addLibrary` refuses a library folder when any folder between the media root and the library folder is a soft link, or when the library folder itself is a soft link.
+The payload returns a typed error (link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026]).
+The error tells the ServerAdmin that the path passes through a soft link and to mount the real folder instead, for example with a bind mount.
+
+*Why:* A check of a path by its name, followed by an open by the same name, leaves a window between the two.
+In that window, anyone who can write to the library can swap a folder or the file for a soft link to a file outside the media root.
+The server would then serve that file to a viewer.
+An open of each component without following links, and a response from that one open file, leave no such window.
+Refusing every soft link is simpler than deciding which link targets are safe, because a link's target can change after any check.
+A scan that skipped no soft link would list files that playback then refuses.
+A skipped file tells the ServerAdmin why a file is missing from the library.
+A skipped file is not an item result.
+An item result is the outcome of a step for a subject that a library operation processes, such as a media file in a scan.
+A soft link never becomes a media file, so it has no step and no item result.
+A linked name that the ignore rules drop still matters: a linked subtitle file will matter once the scan reads subtitle files beside a video.
+A library whose folder sits below a soft link would scan, and playback would then refuse every one of its files.
+Refusing that folder in `addLibrary` reports the problem once, before any scan.
+
+[[decision-metrics]]
+=== The server reports open direct-play responses, the bytes that they serve and their answers
+
+The server reports three metrics for direct play:
+
+* a gauge of the direct-play responses that are open;
+* a counter of the bytes that direct play serves;
+* a counter of direct-play requests by their answer: `200`, `206`, `404` and `416`.
+
+*Why:* Direct play starts no job attempt, so no worker metric shows its load.
+The open responses and the bytes show the load that direct play puts on the server's storage and network.
+The answers show refused paths and range requests that the server could not satisfy.
+
+[[decision-source-facts]]
+=== Probe version 7 reports the sample entry of the file's video stream and the file's major brand
+
+Direct play needs two facts about the file as the file is stored.
+The HLS path needs neither fact.
+
+The first fact is the sample entry of the file's video stream, such as `hvc1`, `hev1`, `dvh1`, `dvav` or `avc1`.
+A sample entry is the four-character code that names a video stream's coding format in an MP4 or MOV file.
+The stored codec string cannot stand in for that fact.
+The codec string names the sample entry of a stream copy, which the worker writes as `hvc1` or `avc1` (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]).
+A source tagged `dvh1` or `hev1` therefore has the same codec string as a source tagged `hvc1`.
+Direct play of a Dolby Vision profile 8.2 or profile 9 file depends on the source's sample entry (https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395]).
+A profile 8.2 file tagged `hvc1` or a profile 9 file tagged `avc1` is eligible for a client that declares the base codec and SDR.
+A profile 8.2 file tagged `dvh1` or a profile 9 file tagged `dvav` is not eligible for any client.
+A Matroska file stores no sample entry, and a profile 8.2 file in Matroska is eligible for a client that declares the base codec and SDR.
+
+The second fact is the file's major brand, which <<decision-mp4-and-mov>> uses.
+
+The worker adds both facts to probe version 7, which has not shipped yet (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7-source-facts[ADR 0032]).
+The upgrade to probe version 7 already re-scans every file, so both facts arrive without a second re-scan.
+A file whose stored outcome predates probe version 7 has neither fact.
+Such a file plays over HLS until the server stores the file's probe version 7 outcome.
+
+[[decision-mp4-and-mov]]
+=== MP4 and MOV are separate source containers, and the major brand tells them apart
+
+ffprobe reads MP4, M4V and MOV files with one demuxer, so the demuxer's name cannot tell MP4 from MOV.
+Probe version 7 therefore reports the file's major brand, which the file's `ftyp` box names.
+QuickTime's major brand `qt  ` makes the source container MOV.
+Every other major brand makes the source container MP4.
+Those brands include the MPEG-4 brands, such as `isom` and `mp42`, the M4V brand `M4V ` and the 3GP brands, such as `3gp4`.
+A file that the MP4 demuxer reads without an `ftyp` box also counts as MP4, because ISO/IEC 14496-12 reads such a file as the brand `mp41`.
+The server never reads the source container from the file name or its extension.
+MP4 and MOV are separate values in the declaration, so a capability entry lists MP4, MOV or both.
+The `Content-Type` of a direct-play response follows the source container: `video/mp4` for MP4 and `video/quicktime` for MOV.
+
+The declaration names eight source containers:
+
+* `MP4`, which includes M4V and 3GP files;
+* `MOV`;
+* `MATROSKA`, which includes WebM;
+* `MPEG_TS`, which includes M2TS;
+* `MPEG_PS`;
+* `AVI`;
+* `ASF`;
+* `FLV`.
+
+The Apple client lists only `MP4` and `MOV`, because AVPlayer opens only MP4, M4V, MOV and 3GP files.
+
+*Why:* AVPlayer and the browsers open an M4V or 3GP file as they open an MP4 file, so no client needs to tell those files apart from MP4.
+A file without an `ftyp` box predates the box, and the standard that defines the box tells a reader to treat such a file as `mp41`.
+WebM is a subset of Matroska, and M2TS is MPEG-TS with a 4-byte timestamp before each packet, so one value covers each pair.
+
+[[decision-sample-entries]]
+=== A video capability entry that lists MP4 or MOV also lists the sample entries that the player opens
+
+Every video capability entry that lists `MP4` or `MOV` for direct play also lists the sample entries that the player opens from those containers.
+The server refuses a declaration in which such an entry lists no sample entry.
+An MP4 or MOV file's video stream is covered for direct play only when the entry also lists the stream's sample entry, as probe version 7 reports it (<<decision-source-facts>>).
+An MP4 or MOV video track with more than one sample entry is never covered, because a later chunk can select a sample entry that the entry does not list.
+Probe version 7 reports no sample entry for such a track (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-7-source-facts[ADR 0032]), and an MP4 or MOV file without a reported sample entry is never covered.
+The other source containers store no sample entry.
+An entry that lists only such containers, such as `MATROSKA` for WebM, lists no sample entries, and a file in such a container is matched on its other facts alone.
+An entry that applies only to HLS lists no sample entries, because the worker writes each HLS copy's sample entry itself, such as `hvc1` for an HEVC copy (link:0013-stream-decision-architecture.adoc[ADR 0013]).
+
+The Apple client lists `avc1`, `hvc1`, `dvh1` and `av01`.
+The Apple client never lists `hev1` or `dvhe`.
+The web client asks the browser about each sample entry on its own and lists only the sample entries that the browser accepts.
+Safari accepts only `hvc1` for HEVC.
+Each client lists a sample entry only after its player plays a real test file with that sample entry.
+
+*Why:* In the tvOS simulator, AVPlayer opened an MP4 or MOV file whose HEVC sample entry is `hev1`, played the sound over a black picture and reported no error (<<evidence-coverage>>).
+Without a list, the server would offer such a file for direct play.
+The client would then have to detect the black picture itself and spend a format attempt on a second start.
+Only the client knows which sample entries its player opens, so the list belongs in the client's declaration.
+An explicit list is required, so a client cannot silently accept every sample entry by leaving the list out.
+
+[[decision-payload]]
+=== The stream session's payload has one GraphQL type for each delivery
+
+The GraphQL payload of a stream session is an interface, `StreamSession`.
+`HlsStreamSession` and `DirectPlayStreamSession` implement that interface, one type for each delivery.
+The interface holds the fields that both deliveries share: the stream session's `id` and its `streamUrl`.
+For HLS, `streamUrl` points at the multivariant playlist.
+For direct play, `streamUrl` points at the source file.
+Each type holds only the fields that its own delivery has.
+For example, only `HlsStreamSession` has a `transcodeMode`.
+No field carries meaning through null.
+A client reads the delivery from the payload's type.
 
 [[decision-format-error]]
 === A format error during direct play falls back to HLS at original quality
@@ -156,7 +353,7 @@ Each client uses its platform's own player.
 The Apple client uses AVPlayer.
 The Android TV client uses Media3 ExoPlayer.
 ExoPlayer uses OkHttp as its HTTP stack.
-The web client uses hls.js with the hold-aware controller.
+The web client uses hls.js with the hold-aware controller for HLS, and the browser's own `<video>` element for direct play (<<decision-web>>).
 The hold-aware controller is the web client's quality controller for hls.js.
 The hold-aware controller accounts for held segment requests.
 
@@ -167,10 +364,23 @@ Every hls.js upgrade runs the hold-aware controller's tests before the upgrade m
 No client uses libmpv as its main playback engine.
 libmpv may return only as an opt-in second engine for direct play.
 
+[[decision-web]]
+=== The web client direct-plays MP4 and WebM in the browser's own video element
+
+The web client direct-plays a covered file in the browser's own `<video>` element.
+It declares the `MP4` and `MATROSKA` source containers, the second for WebM, only where the browser plays them.
+It asks the browser about each codec, container and sample entry before it declares them (<<decision-sample-entries>>).
+The web client keeps hls.js for every stream that plays over HLS.
+Issue https://github.com/streamarr/streamarr-server/issues/59[streamarr/streamarr-server#59] builds the web client's direct play beside the Apple client's.
+
+*Why:* Browsers open MP4 and WebM files in their own video element with byte-range requests, so direct play needs no player library.
+A covered file then starts and seeks without waiting for a producer, as on the TV clients.
+
 [[decision-safari]]
 === Safari keeps hls.js and offers AirPlay
 
-In Safari, the web client keeps hls.js.
+In Safari, the web client keeps hls.js for HLS.
+Direct play in Safari uses the browser's own `<video>` element, as in every browser (<<decision-web>>).
 The web client uses Safari's native HLS player only where hls.js cannot run.
 ManagedMediaSource is the media-source API that hls.js uses in Safari.
 The web player offers AirPlay by giving ManagedMediaSource the HLS URL as an alternate source.
@@ -188,7 +398,10 @@ When no preparing-or-ready events arrive, the hold-aware controller falls back t
 === Explicitly deferred
 
 * Remux-to-play, which repackages a file into a container that the player opens, so that more files direct-play.
-* Direct play on the web client.
+* How the declaration names the subtitle formats that a player plays from inside a file.
+https://github.com/streamarr/streamarr-server/issues/506[streamarr/streamarr-server#506], which adds subtitle selection, decides that question.
+* Sample entries in audio capability entries.
+The probe reports only the video stream's sample entry, so an audio capability entry lists none.
 * libmpv as an opt-in second engine for direct play.
 * Quality selection from the preparing-or-ready events on the TV clients, until a device test shows a need.
 ADR 0019 records this deferral.
@@ -215,6 +428,25 @@ Before this decision, only Auto spent that budget after a format error.
 * Direct play can reach a TV before the measurements on that TV run.
 Until those measurements run, a format error on a direct-played file falls back to HLS through the format-attempt budget.
 * A pinned player library changes only through a deliberate upgrade.
+* A file with one audio track that the declaration does not cover plays over HLS, even when the declaration covers the selected audio.
+* A revoked viewer keeps receiving a response that was already streaming when the authority ended.
+An open-ended range, such as `bytes=0-`, can carry the rest of the file in that one response.
+An HLS media segment, by contrast, lasts about 3 s.
+* Probe version 7 grows by two facts, so the re-scan for probe version 7 waits for the worker to report them.
+* An MP4 or MOV file direct-plays only after the server stores the file's probe version 7 outcome.
+* Each client selects the HLS fields of the payload through a type condition on `HlsStreamSession`.
+* An HEVC file tagged `hev1` plays over HLS on the Apple client, as a copy that the worker writes as `hvc1`.
+* A client that adds a sample entry must first play a real test file with it, so a new sample entry reaches direct play only after that check.
+* An old QuickTime file without an `ftyp` box is served as `video/mp4`.
+* Browsers differ in the files that they open.
+The web client declares `MATROSKA` for WebM, so a browser that opens WebM but refuses another Matroska file with the same codecs spends a format attempt on that file and falls back to HLS.
+* A library that reaches its files through soft links keeps those items after its next scan, marked unreadable, and they no longer play.
+The ServerAdmin must mount the real folders instead, for example with a bind mount.
+* A ServerAdmin sees only the soft links that the latest walk skipped.
+A soft link removed since then leaves the list at the next scan.
+* `addLibrary` checks the path above the library folder only once.
+A soft link placed above the library folder after the library is added does not stop a scan, and playback answers `404 Not Found` for that library's files.
+* Adding a library that sits below a soft link fails until the ServerAdmin mounts the real folder.
 
 == Rejected Alternatives
 
@@ -238,6 +470,34 @@ The ManagedMediaSource alternate source restores AirPlay with hls.js.
 * MoQ transport would replace HLS.
 Streamarr instead keeps HLS and combines what works in MoQ with HLS, to offset the problems that testing found.
 * Delivering media while an encoder is still producing that media is not worth exploring.
+* Covering only the selected audio, and having each client start that track itself, would make every client override its player's own track choice.
+A switch to another track inside the file could still reach a track that no capability entry covers.
+* Covering only the selected audio and accepting a mismatch would let the player start or switch to a track that it cannot play.
+The viewer could then hear nothing.
+* Capping each ranged response at a fixed size would make the player ask again, and each new request would pass the check.
+A request without a `Range` header would still receive the whole file.
+* Checking the authority again while a response streams, and closing the connection when the authority ends, would stop a revoked viewer within seconds.
+That check would run on a timer for every open response, and the server would have to write each response itself instead of serving a file range.
+Direct play instead treats each request as a file download, which the check at its start governs.
+* Adding the sample entry in a later probe version 8 would re-scan every library a second time.
+* Adding no sample-entry fact would keep every Dolby Vision profile 8.2 or profile 9 file in MP4 or MOV off direct play, against streamarr/streamarr-server#395.
+The server would also offer an HEVC file tagged `hev1` unchecked, so a player that refuses `hev1` would spend a format attempt and start a second time.
+* One `MP4` value for MP4, M4V and MOV would stretch the word past its usual meaning, and a MOV file would not get its exact `Content-Type`.
+* Reading MP4 or MOV from the file extension would give a renamed file the wrong source container.
+* A `delivery` field beside a nullable `transcodeMode` would make null mean direct play.
+* A union of the two payload types would share no fields, so every client would select the `id` and the `streamUrl` once for each delivery.
+* Leaving the sample entries out of the declaration, and letting the Apple client report a black picture as a format error, costs every `hev1` file a second start.
+* Requiring sample entries on an entry that lists only Matroska would force a WebM-only entry, such as VP8, to name an MP4 sample entry that its player never opens.
+* Withholding MP4 and MOV from the HEVC entry until the declaration lists sample entries would keep every HEVC MP4 or MOV file off direct play.
+* An optional list of sample entries would let a client that omits it accept every sample entry, including those its player refuses.
+* Separate values for M4V and 3GP would name files that every client opens as MP4.
+* Resolving a file's real path, checking that the path lies under the media root and then opening the file by name leaves a window in which a swapped component defeats the check.
+* Following only the soft links whose targets lie under the media root has the same window, because a link's target can change after the check.
+* Recording each skipped soft link in the scan's item results would put an entry with no media file and no step among the outcomes of steps.
+* Skipping soft links without storing them, as a walk that never descends into a soft-linked folder does, leaves the ServerAdmin no way to see why a title is missing.
+* Leaving out the soft links whose names the ignore rules drop would hide a linked subtitle file.
+* Adding a library below a soft link and scanning it normally would list items that never play.
+* Counting a file without an `ftyp` box as MOV would follow some old QuickTime files but contradict ISO/IEC 14496-12, which reads such a file as `mp41`.
 
 == Evidence
 
@@ -271,6 +531,8 @@ That list holds no Matroska type.
 Codec-profile limits narrow that further, such as AVPlayer's lack of support for 10-bit H.264.
 * A Matroska file whose codecs AVPlayer plays keeps playing over HLS as a stream copy.
 Remux-to-play, which this decision defers, would reach those files.
+* In the tvOS 27.0 simulator, AVPlayer reported an MP4 or MOV file whose HEVC sample entry is `hev1` ready, played its sound and showed no picture, with no error (https://github.com/streamarr/streamarr-apple/pull/138[streamarr/streamarr-apple#138]).
+The same file tagged `hvc1` played its picture and its sound.
 
 [[evidence-forced-tracks]]
 === Forced image tracks
@@ -304,11 +566,14 @@ On the SHIELD TV Pro, stock libmpv also cannot pass E-AC-3 and TrueHD audio thro
 * https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] adds typed client capability declarations.
 * https://github.com/streamarr/streamarr-server/issues/401[streamarr/streamarr-server#401] adds the playback session's format-attempt budget.
 * https://github.com/streamarr/streamarr-server/issues/507[streamarr/streamarr-server#507] adds the preparing-or-ready events.
+* https://github.com/streamarr/streamarr-server/issues/506[streamarr/streamarr-server#506] burns in an image subtitle when the viewer selects one, and adds subtitle selection.
 * link:0007-transcode-first-with-smart-remux.adoc[ADR 0007: Transcode-First With Smart Remux]
 * link:0013-stream-decision-architecture.adoc[ADR 0013: Stream Decision Architecture]
 * link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018: Live Playback Authority and Outbound Transcode Workers]
 * link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019: Recoverable Just-In-Time HLS Segment Delivery]
+* link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032: Media File Probe Results Are Persisted and Playback Reads Them]
 * link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043: Audio Tracks and Text Subtitles Are HLS Renditions, so Switching Them Never Restarts the Video]
+* link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049: A Client Capability Declaration Lists Capability Entries, and an Output Fits Only When One Capability Entry Accepts the Whole Output]
 * link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052: A Failed HLS Copy Falls Back to an Encode, and Original Changes to Auto Whenever It Must Encode]
 * https://developer.apple.com/documentation/avfoundation/avfiletype[Apple: `AVFileType`]
 * https://www.rfc-editor.org/rfc/rfc9110#name-range-requests[RFC 9110, section 14: Range Requests]

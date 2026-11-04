@@ -153,6 +153,18 @@ _Avoid_: playback (ADR 0018's token and request surface), app session, stream se
 A typed value that the stream decision records for why a stream session plays the file directly, copies a stream or encodes it, such as a codec that the client does not declare. The playback session keeps the reasons. A viewer sees them in the playback-data panel for that viewer's own playback, and a ServerAdmin sees every active stream session's reasons in the active-streams view (ADR 0013).
 _Avoid_: transcode reason (it also explains copies and direct play), log message
 
+**Audio delay**:
+A signed offset, from −2,000 ms to +2,000 ms in 10 ms steps, that a viewer sets to correct the lip-sync error of one device's playback chain. A positive delay plays the sound later than the picture. The client keeps it per device and per audio output and sends it with the playback session, which keeps it while it lasts (ADR 0055).
+_Avoid_: audio offset, lip-sync offset, A/V sync setting, audio latency (what the chain adds, not the correction), applied audio delay (the sum that the server shifts by)
+
+**Audio sync correction**:
+A signed offset, in the audio delay's range and step, that a ServerAdmin sets for a media file whose own audio is out of sync. One value covers all the file's audio streams, and an audio stream can carry its own, which replaces the file's for that stream. The server stores it with the media file, applies it for every viewer and device, and removes it when the source snapshot changes (ADR 0055).
+_Avoid_: title offset, audio offset, audio delay (the device's value), metadata edit (a catalog entry's field, which survives a file upgrade), override (reserved for administrative overrides in ADR 0024)
+
+**Applied audio delay**:
+The amount by which the server shifts one audio rendition: the playback session's audio delay plus the rendition's audio sync correction, clamped to −2,000 ms to +2,000 ms. The server moves decode times and never changes a sample (ADR 0055).
+_Avoid_: total delay, effective delay (effective value is a metadata term), audio delay (the device's part alone)
+
 **Source description**:
 The record of one media track as the probe found it.
 It never changes when the server chooses a playback output.
@@ -193,13 +205,21 @@ A Profile's rule for when a subtitle track starts on: `OFF` starts none, not eve
 _Avoid_: subtitle preference, subtitles on or off (for the stored setting), auto subtitles
 
 **Audio step**:
-One audio codec, channel count and bitrate that the server can deliver in place of the stream session's audio under the viewer's maximum bitrate: the session's own audio first, then multichannel steps at lower bitrates, then AAC stereo at 128, 96 and 64 kb/s, or AAC mono at 64 kb/s for a mono track or when no AAC entry for HLS accepts more than one channel.
-Multichannel steps keep the codec and channels of the encode that the server would choose, and AAC above 5.1 also steps through AAC 5.1 at 320 kb/s.
-A copied track in a codec that the server encodes (AAC, AC-3 or E-AC-3) adds steps in its own codec, up to 5.1 in AC-3 and E-AC-3.
+One audio codec, channel layout and bitrate that the server can deliver in place of the stream session's audio under the viewer's maximum bitrate: the session's own audio first, then a lower-rate step for a FLAC or ALAC rendition above 48 kHz (ADR 0043), then multichannel steps at lower bitrates, then AAC stereo at 128 and 96 kb/s, or AAC mono at 96 kb/s for a mono track or when no AAC entry for HLS accepts more than one channel.
+Multichannel steps keep the codec and channel layout of the step track's encode, or of the E-AC-3, AC-3 or AAC encode that the server would choose when that encode is FLAC, ALAC or Opus.
+A copied track in a codec with multichannel steps of its own (AAC, AC-3 or E-AC-3) adds steps in its own codec, up to 5.1; a copied AAC track above 5.1 steps through AAC 5.1 at 320 kb/s, or AAC 5.0 for a `7.0` track, because an AAC encode has at most six channels.
+A step keeps a track's 3 or 4 channels only in a layout that the step's codec carries exactly: `3.0` or `4.0` in AAC, and `2.1`, `3.0`, `4.0` or the one 2/2 mode of `quad` and `quad(side)` in AC-3 and E-AC-3; any other or unknown layout steps to stereo.
 All of these steps run from the highest bitrate to the lowest.
 The server steps down to fit the 360p tier or a video copy, and takes a lower multichannel step when it lets a larger picture fit.
-The server takes one step for the whole stream session, from the default track, and a step below the session's audio caps every audio rendition (ADR 0050).
+The server takes one step for the whole stream session, from the largest audio rendition, and a step below the session's audio caps every audio rendition (ADR 0050).
 _Avoid_: audio tier, audio quality, audio variant (a rendition is never a variant)
+
+**Downmix**:
+An audio encode whose output layout lacks a channel of the source track's layout, so that it mixes source channels together with ADR 0050's named matrix or leaves one out.
+A side pair and a back pair are one surround pair, so an encode that only renames that pair is not a downmix and writes every sample unchanged.
+An encode that pads a layout with silent channels, such as a `7.0` track to Opus or FLAC `7.1`, keeps every channel in place, so it is not a downmix either.
+A downmix that only leaves channels out has no limiter; otherwise the limiter acts only on the channels that the matrix sums, in two stages, at −1 dBTP when FLAC or ALAC writes the downmix and −3 dBTP for a lossy codec, as the BS.1770 Annex 2 filter reads them (ADR 0050).
+_Avoid_: downmix for an encode that only renames a surround pair or pads with silent channels; remix; fold-down
 
 **Quality tier**:
 A named 16:9 picture box that the quality ladder offers: 360p, 480p, 720p, 1080p, 1440p or 2160p.
@@ -218,6 +238,12 @@ _Avoid_: target format, requested output
 The media that the worker actually produces and that the playlist must describe.
 Under fragmented MP4 delivery, the initialization segment describes it on its own.
 _Avoid_: actual output, transcoded output
+
+**Bitstream rewrite**:
+A change that the worker makes to a copied video stream without decoding it, such as stripping Dolby Vision or HDR10+, converting Dolby Vision profile 7 to profile 8.1, or normalizing the Dolby Vision configuration record.
+The decision lists every bitstream rewrite of a stream copy, and the worker applies exactly the listed rewrites to the fragmented MP4 that FFmpeg writes.
+A stream copy passes the source video through unchanged apart from its listed bitstream rewrites (ADR 0036).
+_Avoid_: bitstream filter (an FFmpeg component), transform, conversion (unqualified), remux
 
 ### Segment delivery
 
@@ -270,8 +296,12 @@ The configured maximum media duration of a fragment. The muxer honors it at the 
 _Avoid_: fragment bound, chunk size
 
 **Preroll**:
-Preroll is media that a job attempt's seek emits before the attempt's first media segment. A stream-copy seek starts at the keyframe at or before the target. An attempt that encodes video and starts after segment 0 decodes the media before its first segment without encoding that media, so that media never reaches the producer. The producer discards preroll because this media belongs to earlier segments.
+Preroll is media that a job attempt's seek emits before the attempt's first media segment. A stream-copy seek starts at the keyframe at or before the target. An attempt that encodes video and starts after segment 0 decodes the media before its first segment without encoding that media, so that media never reaches the producer. The producer discards preroll because this media belongs to earlier segments, except the audio lead (ADR 0055).
 _Avoid_: overlap, lead-in
+
+**Audio lead**:
+The audio of the 2 s of media time before a job attempt's first media segment, which the producer delivers apart from the segments while an applied audio delay is positive. An attempt that starts at segment 0 always delivers 2 s of encoded silence as its audio lead, whatever the delay. The server shifts a segment later from it when it holds no segment before the attempt's first (ADR 0055).
+_Avoid_: lead-in, preroll (which the producer discards)
 
 **Stream copy**:
 Any transcode mode that passes the source video through unchanged (REMUX and AUDIO_TRANSCODE). Its segment boundaries depend on the source's own keyframes.
@@ -285,8 +315,16 @@ _Avoid_: verified encoder (unqualified)
 An encoder is keyframe-verified when recordings under the pinned FFmpeg show that every forced keyframe is a sync sample and starts a closed GOP. The recordings must also show that the encoder restarts its GOP count at each forced keyframe. When a recording deliberately suppresses one forced keyframe, the keyframe that the encoder's GOP places instead must also start a closed GOP. Whether a particular worker can run the encoder is a separate fact, which the term worker-verified encoder describes.
 _Avoid_: verified encoder (unqualified), GOP-verified encoder
 
+**Direct play**:
+The delivery in which the server sends the source file itself, and the player reads it with HTTP byte-range requests. Only Original direct-plays, and only a file whose source container, video stream, audio tracks and any selected subtitle the client capability declaration covers. A direct-play stream session starts no job attempt (ADR 0045).
+_Avoid_: direct stream, passthrough, stream copy (an HLS delivery)
+
+**Sample entry**:
+The four-character code that names a video stream's coding format in an MP4 or MOV file, such as `avc1`, `hvc1`, `hev1` or `dvh1`. Every video capability entry that lists MP4 or MOV also lists the sample entries that its player opens (ADR 0045).
+_Avoid_: codec tag, FourCC (unqualified), codec string (a different value)
+
 **Source container**:
-The container of a media file as the probe found it, such as Matroska, MP4 or MPEG-TS. This source fact decides whether the file qualifies for direct play. HLS delivery always uses fragmented MP4.
+The container of a media file as the probe found it, such as Matroska, MP4 or MPEG-TS. This source fact decides whether the file qualifies for direct play. MP4 and MOV are separate source containers, and the file's major brand tells them apart (ADR 0045). The M4V and 3GP brands, and a file without an `ftyp` box, count as MP4. MATROSKA includes WebM, and MPEG_TS includes M2TS. HLS delivery always uses fragmented MP4.
 _Avoid_: container format, ContainerFormat, output container
 
 ### Jobs and library operations
@@ -329,7 +367,15 @@ _Avoid_: try, retry (for the first attempt), run
 The latest recorded outcome of a step for a subject.
 An item result that counts for a library operation carries the operation's id.
 It is not an attempt history: an attempt that crashes records nothing.
+A soft link that a scan skips is a skipped file, not an item result.
 _Avoid_: attempt history, attempt log, job result
+
+**Skipped file**:
+A file-system entry that a scan's walk skips instead of reading, stored for the library with a typed reason (ADR 0045).
+The only reason today is `SOFT_LINK`.
+A skipped file never becomes a media file, so it has no step and no item result.
+A library keeps only the skipped files of its latest walk, and a ServerAdmin pages through them with `Library.administration.skippedFiles`.
+_Avoid_: ignored file (a name that the ignore rules drop, which Streamarr does not store), item result (the outcome of a step), unreadable file (a file record that a scan could not read, ADR 0038), skipped item
 
 **Take over**:
 To set a library operation's id on a pending artwork request for the same item, so the operation waits on that request (ADR 0027).

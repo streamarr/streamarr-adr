@@ -181,7 +181,7 @@ Outside Original, a video copy costs its video plus the session's audio, and the
 _Avoid_: client capabilities (what the player can decode), quality cap
 
 **Language override**:
-A Profile's choice of audio language, subtitle language or subtitle mode for one episode or movie, one season or one series. An empty choice comes from the next wider level. The language that the client picks when it starts a stream session comes first, then the most specific override, then the Profile's preferences, then the file's own default. A language that the viewer switches to during playback becomes the Profile's override for that series, or for that movie (ADR 0043).
+A Profile's choice of audio language, subtitle language or subtitle mode for one episode or movie, one season or one series. An empty choice comes from the next wider level. The choice that the client sends when it starts a stream session comes first, then the most specific override, then the Profile's preferences, then the file's own default. A switch of audio or subtitles during playback becomes the Profile's override for that series, or for that movie; turning on a full subtitle stores its language with the mode `ALWAYS` (ADR 0043).
 _Avoid_: track preference, per-title track, per-track override, default track (the file's flag)
 
 **Preferred audio languages**:

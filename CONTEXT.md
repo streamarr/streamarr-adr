@@ -352,7 +352,7 @@ _Avoid_: attempt history, attempt log, job result
 
 **Skipped file**:
 A file-system entry that a scan's walk skips instead of reading, stored for the library with a typed reason (ADR 0045).
-The only reason today is `SOFT_LINK`.
+The reasons are `SOFT_LINK`, `UNSUPPORTED_FILE_TYPE` (a file whose extension is not a supported video type and that the ignore rules keep) and `UNREADABLE` (an entry whose attributes the scan cannot read after it lists the entry).
 A skipped file never becomes a media file, so it has no step and no item result.
 A library keeps only the skipped files of its latest walk, and a ServerAdmin pages through them with `Library.administration.skippedFiles`.
 _Avoid_: ignored file (a name that the ignore rules drop, which Streamarr does not store), item result (the outcome of a step), unreadable file (a file record that a scan could not read, ADR 0038), skipped item

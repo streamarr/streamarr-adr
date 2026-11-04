@@ -17,6 +17,13 @@ Before that encode, a failed Dolby Vision copy whose compatible base the client 
 The fallback from direct play to HLS at original quality stays as this ADR decides.
 When the server rules out the HLS copy after direct play fails, the server falls back to an encode instead, and that encode plays in Auto.
 
+An amendment for https://github.com/streamarr/streamarr-server/issues/59[streamarr/streamarr-server#59] settles five questions about direct play.
+The declaration must cover every audio track in the file, not only the selected audio (<<decision-every-audio-track>>).
+Probe version 7 adds the sample entry of the file's video stream and the file's major brand (<<decision-source-facts>>).
+MP4 and MOV are separate source containers, and the major brand tells them apart (<<decision-mp4-and-mov>>).
+The server checks the playback authority when each direct-play request starts, and a response that is already streaming finishes (<<decision-authority>>).
+The stream session's payload has one GraphQL type for each delivery (<<decision-payload>>).
+
 == Context
 
 Before this decision, every stream plays over HLS (HTTP Live Streaming).
@@ -93,7 +100,7 @@ The stream decision of link:0013-stream-decision-architecture.adoc[ADR 0013] cho
 
 * the source container
 * the video stream
-* the selected audio
+* every audio track in the file (<<decision-every-audio-track>>)
 * any selected subtitle
 
 An image subtitle track stores each cue as a picture.
@@ -105,11 +112,74 @@ In some cases, the server burns in a forced image track automatically (link:0043
 A forced image track that the server burns in automatically counts as a selected subtitle.
 A file therefore plays over HLS whenever the server burns in the file's forced image track.
 
+[[decision-every-audio-track]]
+=== The declaration must cover every audio track in the file
+
+During direct play, the player picks the audio track that the file starts with.
+AVPlayer picks the track by its own media-selection rules.
+The viewer can also switch to another audio track inside the file.
+The server sees only byte-range requests, so the server cannot tell which audio track plays.
+
+Direct play therefore needs every audio track in the file to be covered, not only the audio that the stream decision selects.
+An audio track is covered only when one audio capability entry accepts the track and lists the file's source container (link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc#decision-delivery-paths[ADR 0049]).
+A file with one audio track that the declaration does not cover plays over HLS.
+
 [[decision-authority]]
-=== Every direct-play request passes the live playback-authority check
+=== Every direct-play request passes the live playback-authority check when the request starts
 
 Every direct-play request passes the same live playback-authority check as playlist and segment requests (link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018]).
+The server checks the authority when each request starts, as for a file download.
+After the authority ends, the server denies the next request.
+A response that is already streaming when the authority ends still finishes.
+The server does not check the authority again while a response streams.
 The server only reads the source file.
+
+[[decision-source-facts]]
+=== Probe version 7 reports the sample entry of the file's video stream and the file's major brand
+
+Direct play needs two facts about the file as the file is stored.
+The HLS path needs neither fact.
+
+The first fact is the sample entry of the file's video stream, such as `hvc1`, `hev1`, `dvh1`, `dvav` or `avc1`.
+A sample entry is the four-character code that names a video stream's coding format in an MP4 or MOV file.
+The stored codec string cannot stand in for that fact.
+The codec string names the sample entry of a stream copy, which the worker writes as `hvc1` or `avc1` (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]).
+A source tagged `dvh1` or `hev1` therefore has the same codec string as a source tagged `hvc1`.
+Direct play of a Dolby Vision profile 8.2 or profile 9 file depends on the source's sample entry (https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395]).
+A profile 8.2 file tagged `hvc1` or a profile 9 file tagged `avc1` is eligible for a client that declares the base codec and SDR.
+A profile 8.2 file tagged `dvh1` or a profile 9 file tagged `dvav` is not eligible for any client.
+A Matroska file stores no sample entry, and a profile 8.2 file in Matroska is eligible for a client that declares the base codec and SDR.
+
+The second fact is the file's major brand, which <<decision-mp4-and-mov>> uses.
+
+The worker adds both facts to probe version 7, which has not shipped yet.
+The upgrade to probe version 7 already re-scans every file, so both facts arrive without a second re-scan.
+A file whose stored outcome predates probe version 7 has neither fact.
+Such a file plays over HLS until the server stores the file's probe version 7 outcome.
+
+[[decision-mp4-and-mov]]
+=== MP4 and MOV are separate source containers, and the major brand tells them apart
+
+ffprobe reads MP4, M4V and MOV files with one demuxer, so the demuxer's name cannot tell MP4 from MOV.
+Probe version 7 therefore reports the file's major brand, which the file's `ftyp` box names.
+QuickTime's major brand `qt  ` makes the source container MOV.
+An MPEG-4 brand, such as `isom`, `mp42` or `M4V `, makes the source container MP4.
+The server never reads the source container from the file name or its extension.
+MP4 and MOV are separate values in the declaration, so a capability entry lists MP4, MOV or both.
+The `Content-Type` of a direct-play response follows the source container: `video/mp4` for MP4 and `video/quicktime` for MOV.
+
+[[decision-payload]]
+=== The stream session's payload has one GraphQL type for each delivery
+
+The GraphQL payload of a stream session is an interface, `StreamSession`.
+`HlsStreamSession` and `DirectPlayStreamSession` implement that interface, one type for each delivery.
+The interface holds the fields that both deliveries share: the stream session's `id` and its `streamUrl`.
+For HLS, `streamUrl` points at the multivariant playlist.
+For direct play, `streamUrl` points at the source file.
+Each type holds only the fields that its own delivery has.
+For example, only `HlsStreamSession` has a `transcodeMode`.
+No field carries meaning through null.
+A client reads the delivery from the payload's type.
 
 [[decision-format-error]]
 === A format error during direct play falls back to HLS at original quality
@@ -187,6 +257,10 @@ When no preparing-or-ready events arrive, the hold-aware controller falls back t
 === Explicitly deferred
 
 * Remux-to-play, which repackages a file into a container that the player opens, so that more files direct-play.
+* How the declaration names the subtitle formats that a player plays from inside a file.
+https://github.com/streamarr/streamarr-server/issues/506[streamarr/streamarr-server#506], which adds subtitle selection, decides that question.
+* Whether a capability entry names the sample entries that the player opens.
+The tvOS simulator check of https://github.com/streamarr/streamarr-server/issues/59[streamarr/streamarr-server#59] first measures whether AVPlayer opens an MP4 file whose HEVC sample entry is `hev1`.
 * Direct play on the web client.
 * libmpv as an opt-in second engine for direct play.
 * Quality selection from the preparing-or-ready events on the TV clients, until a device test shows a need.
@@ -214,6 +288,13 @@ Before this decision, only Auto spent that budget after a format error.
 * Direct play can reach a TV before the measurements on that TV run.
 Until those measurements run, a format error on a direct-played file falls back to HLS through the format-attempt budget.
 * A pinned player library changes only through a deliberate upgrade.
+* A file with one audio track that the declaration does not cover plays over HLS, even when the declaration covers the selected audio.
+* A revoked viewer keeps receiving a response that was already streaming when the authority ended.
+An open-ended range, such as `bytes=0-`, can carry the rest of the file in that one response.
+An HLS media segment, by contrast, lasts about 3 s.
+* Probe version 7 grows by two facts, so the re-scan for probe version 7 waits for the worker to report them.
+* An MP4 or MOV file direct-plays only after the server stores the file's probe version 7 outcome.
+* Each client selects the HLS fields of the payload through a type condition on `HlsStreamSession`.
 
 == Rejected Alternatives
 
@@ -237,6 +318,22 @@ The ManagedMediaSource alternate source restores AirPlay with hls.js.
 * MoQ transport would replace HLS.
 Streamarr instead keeps HLS and combines what works in MoQ with HLS, to offset the problems that testing found.
 * Delivering media while an encoder is still producing that media is not worth exploring.
+* Covering only the selected audio, and having each client start that track itself, would make every client override its player's own track choice.
+A switch to another track inside the file could still reach a track that no capability entry covers.
+* Covering only the selected audio and accepting a mismatch would let the player start or switch to a track that it cannot play.
+The viewer could then hear nothing.
+* Capping each ranged response at a fixed size would make the player ask again, and each new request would pass the check.
+A request without a `Range` header would still receive the whole file.
+* Checking the authority again while a response streams, and closing the connection when the authority ends, would stop a revoked viewer within seconds.
+That check would run on a timer for every open response, and the server would have to write each response itself instead of serving a file range.
+Direct play instead treats each request as a file download, which the check at its start governs.
+* Adding the sample entry in a later probe version 8 would re-scan every library a second time.
+* Adding no sample-entry fact would keep every Dolby Vision profile 8.2 or profile 9 file in MP4 or MOV off direct play, against streamarr/streamarr-server#395.
+The server would also offer an HEVC file tagged `hev1` unchecked, so a player that refuses `hev1` would spend a format attempt and start a second time.
+* One `MP4` value for MP4, M4V and MOV would stretch the word past its usual meaning, and a MOV file would not get its exact `Content-Type`.
+* Reading MP4 or MOV from the file extension would give a renamed file the wrong source container.
+* A `delivery` field beside a nullable `transcodeMode` would make null mean direct play.
+* A union of the two payload types would share no fields, so every client would select the `id` and the `streamUrl` once for each delivery.
 
 == Evidence
 
@@ -270,6 +367,7 @@ That list holds no Matroska type.
 Codec-profile limits narrow that further, such as AVPlayer's lack of support for 10-bit H.264.
 * A Matroska file whose codecs AVPlayer plays keeps playing over HLS as a stream copy.
 Remux-to-play, which this decision defers, would reach those files.
+* Whether AVPlayer opens an MP4 or MOV file whose HEVC sample entry is `hev1` is unmeasured.
 
 [[evidence-forced-tracks]]
 === Forced image tracks
@@ -303,11 +401,14 @@ On the SHIELD TV Pro, stock libmpv also cannot pass E-AC-3 and TrueHD audio thro
 * https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] adds typed client capability declarations.
 * https://github.com/streamarr/streamarr-server/issues/401[streamarr/streamarr-server#401] adds the playback session's format-attempt budget.
 * https://github.com/streamarr/streamarr-server/issues/507[streamarr/streamarr-server#507] adds the preparing-or-ready events.
+* https://github.com/streamarr/streamarr-server/issues/506[streamarr/streamarr-server#506] burns in an image subtitle when the viewer selects one, and adds subtitle selection.
 * link:0007-transcode-first-with-smart-remux.adoc[ADR 0007: Transcode-First With Smart Remux]
 * link:0013-stream-decision-architecture.adoc[ADR 0013: Stream Decision Architecture]
 * link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018: Live Playback Authority and Outbound Transcode Workers]
 * link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019: Recoverable Just-In-Time HLS Segment Delivery]
+* link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032: Media File Probe Results Are Persisted and Playback Reads Them]
 * link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043: Audio Tracks and Text Subtitles Are HLS Renditions, so Switching Them Never Restarts the Video]
+* link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049: A Client Capability Declaration Lists Capability Entries, and an Output Fits Only When One Capability Entry Accepts the Whole Output]
 * link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052: A Failed HLS Copy Falls Back to an Encode, and Original Changes to Auto Whenever It Must Encode]
 * https://developer.apple.com/documentation/avfoundation/avfiletype[Apple: `AVFileType`]
 * https://www.rfc-editor.org/rfc/rfc9110#name-range-requests[RFC 9110, section 14: Range Requests]

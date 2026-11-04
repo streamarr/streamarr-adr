@@ -270,7 +270,7 @@ The delivery in which the server sends the source file itself, and the player re
 _Avoid_: direct stream, passthrough, stream copy (an HLS delivery)
 
 **Sample entry**:
-The four-character code that names a video stream's coding format in an MP4 or MOV file, such as `avc1`, `hvc1`, `hev1` or `dvh1`. Every video capability entry that lists a source container also lists the sample entries that its player opens (ADR 0045).
+The four-character code that names a video stream's coding format in an MP4 or MOV file, such as `avc1`, `hvc1`, `hev1` or `dvh1`. Every video capability entry that lists MP4 or MOV also lists the sample entries that its player opens (ADR 0045).
 _Avoid_: codec tag, FourCC (unqualified), codec string (a different value)
 
 **Source container**:

@@ -149,6 +149,18 @@ _Avoid_: target frame rate, frame rate (unqualified) for the encode's rate
 The logical span of one viewing of a media title, which survives replacement stream sessions and holds the format-failure history and the format-attempt budget.
 _Avoid_: playback (ADR 0018's token and request surface), app session, stream session (one server-side run inside it)
 
+**Audio delay**:
+A signed offset, from −2,000 ms to +2,000 ms in 10 ms steps, that a viewer sets to correct the lip-sync error of one device's playback chain. A positive delay plays the sound later than the picture. The client keeps it per device and per audio output and sends it with the playback session, which keeps it while it lasts (ADR 0055).
+_Avoid_: audio offset, lip-sync offset, A/V sync setting, audio latency (what the chain adds, not the correction), applied audio delay (the sum that the server shifts by)
+
+**Audio sync correction**:
+A signed offset, in the audio delay's range and step, that a ServerAdmin sets for a media file whose own audio is out of sync. One value covers all the file's audio streams, and an audio stream can carry its own, which replaces the file's for that stream. The server stores it with the media file, applies it for every viewer and device, and removes it when the source snapshot changes (ADR 0055).
+_Avoid_: title offset, audio offset, audio delay (the device's value), metadata edit (a catalog entry's field, which survives a file upgrade), override (reserved for administrative overrides in ADR 0024)
+
+**Applied audio delay**:
+The amount by which the server shifts one audio rendition: the playback session's audio delay plus the rendition's audio sync correction, clamped to −2,000 ms to +2,000 ms. The server moves decode times and never changes a sample (ADR 0055).
+_Avoid_: total delay, effective delay (effective value is a metadata term), audio delay (the device's part alone)
+
 **Source description**:
 The record of one media track as the probe found it.
 It never changes when the server chooses a playback output.
@@ -256,8 +268,12 @@ The configured maximum media duration of a fragment. The muxer honors it at the 
 _Avoid_: fragment bound, chunk size
 
 **Preroll**:
-Preroll is media that a job attempt's seek emits before the attempt's first media segment. A stream-copy seek starts at the keyframe at or before the target. An attempt that encodes video and starts after segment 0 decodes the media before its first segment without encoding that media, so that media never reaches the producer. The producer discards preroll because this media belongs to earlier segments.
+Preroll is media that a job attempt's seek emits before the attempt's first media segment. A stream-copy seek starts at the keyframe at or before the target. An attempt that encodes video and starts after segment 0 decodes the media before its first segment without encoding that media, so that media never reaches the producer. The producer discards preroll because this media belongs to earlier segments, except the audio lead (ADR 0055).
 _Avoid_: overlap, lead-in
+
+**Audio lead**:
+The audio of the 2 s of media time before a job attempt's first media segment, which the producer delivers apart from the segments while an applied audio delay is positive. An attempt that starts at segment 0 always delivers 2 s of encoded silence as its audio lead, whatever the delay. The server shifts a segment later from it when it holds no segment before the attempt's first (ADR 0055).
+_Avoid_: lead-in, preroll (which the producer discards)
 
 **Stream copy**:
 Any transcode mode that passes the source video through unchanged (REMUX and AUDIO_TRANSCODE). Its segment boundaries depend on the source's own keyframes.

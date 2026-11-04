@@ -347,7 +347,15 @@ _Avoid_: try, retry (for the first attempt), run
 The latest recorded outcome of a step for a subject.
 An item result that counts for a library operation carries the operation's id.
 It is not an attempt history: an attempt that crashes records nothing.
+A soft link that a scan skips is a skipped file, not an item result.
 _Avoid_: attempt history, attempt log, job result
+
+**Skipped file**:
+A file-system entry that a scan's walk skips instead of reading, stored for the library with a typed reason (ADR 0045).
+The only reason today is `SOFT_LINK`.
+A skipped file never becomes a media file, so it has no step and no item result.
+A library keeps only the skipped files of its latest walk, and a ServerAdmin pages through them with `Library.administration.skippedFiles`.
+_Avoid_: ignored file (a name that the ignore rules drop, which Streamarr does not store), item result (the outcome of a step), unreadable file (a file record that a scan could not read, ADR 0038), skipped item
 
 **Take over**:
 To set a library operation's id on a pending artwork request for the same item, so the operation waits on that request (ADR 0027).

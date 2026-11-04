@@ -190,7 +190,7 @@ _Avoid_: audio tier, audio quality, audio variant (a rendition is never a varian
 An audio encode whose output layout lacks a channel of the source track's layout, so that it mixes source channels together with ADR 0050's named matrix or leaves one out.
 A side pair and a back pair are one surround pair, so an encode that only renames that pair is not a downmix and writes every sample unchanged.
 An encode that pads a layout with silent channels, such as a `7.0` track to Opus `7.1`, keeps every channel in place, so it is not a downmix either.
-A downmix that only leaves channels out has no limiter; otherwise the limiter acts only on the channels that the matrix sums, at −1 dBTP when FLAC or ALAC writes the downmix, −3 dBFS for lossy stereo or mono, and −1 dBFS for lossy multichannel (ADR 0050).
+A downmix that only leaves channels out has no limiter; otherwise the limiter acts only on the channels that the matrix sums, in two stages, at −1 dBTP when FLAC or ALAC writes the downmix and −3 dBTP for a lossy codec, as the BS.1770 Annex 2 filter reads them (ADR 0050).
 _Avoid_: downmix for an encode that only renames a surround pair or pads with silent channels; remix; fold-down
 
 **Quality tier**:

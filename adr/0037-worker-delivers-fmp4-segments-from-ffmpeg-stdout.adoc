@@ -43,6 +43,10 @@ A stream session in which any output exceeds the cap, or any encode has no bound
 A request that follows a held request for an earlier segment is prefetch and never relocates past that segment.
 The interim rule, and its refusal to copy a source with an interval that holds no keyframe, end once the pinned worker image groups on the list.
 
+NOTE: An amendment sends the chosen keyframe's presentation time as the seek position of an encoded replacement attempt that reads an MP4 or MOV source (<<decision-seek>>), because FFmpeg's MP4 demuxer seeks by presentation time.
+With the keyframe's decode time, that demuxer lands one keyframe interval early.
+A Matroska, MPEG-TS or any other source still gets the keyframe's decode time.
+
 NOTE: Under link:0013-stream-decision-architecture.adoc#reshape-rpus-starting-samples[ADR 0013], a job attempt that encodes an HEVC Dolby Vision source with no compatible base, such as profile 5, runs two FFmpeg processes when ADR 0013's conditions for moving the source's RPUs hold.
 The first FFmpeg copies the source and the job's audio into fragmented MP4, the worker moves the RPUs and gives each video sample its duration in the source, and the second FFmpeg reads the result on its standard input and writes the fMP4 that this decision describes.
 The first FFmpeg reads the source with the same input flags as a single FFmpeg, including `-start_at_zero` and the start time correction (<<decision-media-time-zero>>), so it places media time zero.
@@ -615,8 +619,13 @@ An attempt that encodes video with a start sequence number above zero uses the d
 The server chooses the source keyframe that the attempt reads from.
 That keyframe is the last source keyframe at or before the first segment's start minus 0.5 s.
 The server finds that keyframe in the stored keyframe positions.
-The server sends that keyframe's decode time as the job's seek position, or a position a margin before that decode time.
-The server sends the decode time rather than the presentation time, because a keyframe's presentation time can lie after its decode time.
+The server sends the time that the source's demuxer seeks by as the job's seek position, or a position a margin before that time.
+The container format that the probe outcome stores decides that time.
+For an MP4 or MOV source, the server sends that keyframe's presentation time, because FFmpeg's MP4 demuxer seeks by presentation time.
+The server rounds that time up to the seek position's precision and sends no margin before it, because any earlier time can land the demuxer on the keyframe before.
+That demuxer searches its decode-time index for the requested time less the stream's first composition offset.
+A keyframe that B-frames follow decodes before it presents, so its decode time lands that demuxer on the keyframe before it, one keyframe interval early.
+For a Matroska, MPEG-TS or any other source, the server sends that keyframe's decode time, because a keyframe's presentation time can lie after its decode time.
 The demuxer then starts reading at that keyframe in every container.
 The job's seek position has sub-second precision.
 The worker reads from the seek position with `-noaccurate_seek`.
@@ -641,6 +650,7 @@ With 1080p libx264 at the `medium` preset and 6 s segments, the decode-only earl
 The seek one period early took about 5.0 s.
 The paired difference was −2.00 s over 18 seeks, on two open-license films with three seek points each and 1 s fragments, timing the encoder alone.
 That time matters because macOS AVPlayer, against a fixture server, abandoned a segment request when no byte had arrived after one target duration.
+On the pinned FFmpeg 8.1.3, a read of an MP4 source from a keyframe's decode time took in the whole keyframe interval before that keyframe.
 Evidence: <<evidence-early-seek>>, https://github.com/streamarr/streamarr-server/issues/502[streamarr/streamarr-server#502].
 
 [[decision-hardware-decode]]
@@ -1846,6 +1856,11 @@ The replacement attempt's accurate seek discards that source frame.
 * On that source the start-0 attempt filled segment 5 from 30.030 s with repeats of the frame at 23 s.
 * A replacement attempt that sought to 24 s discarded that frame and started segment 5 at 31.031 s, still inside that segment's interval.
 * In one recording of the same source, `-noaccurate_seek` kept the frames before its target and landed on the source keyframe at 22.022 s.
+* FFmpeg's MP4 demuxer treats a seek target as a presentation time: it subtracts the stream's first composition offset and searches its decode-time index (https://github.com/FFmpeg/FFmpeg/blob/n8.1.3/libavformat/mov.c#L11683-L11685[`mov.c`: `mov_seek_stream`]).
+* Worker PR https://github.com/streamarr/streamarr-transcode-worker/pull/145[streamarr/streamarr-transcode-worker#145] read a 60 Mbps HEVC MP4 source with 10 s GOPs on the pinned FFmpeg 8.1.3, for a segment at 30 s.
+A read from the decode time 19.79 s of the keyframe before that segment landed on the keyframe one GOP earlier.
+The attempt's Dolby Vision copy then held back that GOP, and its first fragment grew to 82.1 MB, over the mover's 32 MiB limit.
+* Server PR https://github.com/streamarr/streamarr-server/pull/733[streamarr/streamarr-server#733] sends the presentation time for an MP4 or MOV source and the decode time for every other container.
 * That seek passed the frame at 23 s to the encoder and forced segment 5's keyframe at 30.030 s, as the start-0 attempt did.
 
 [[evidence-svt-av1]]

@@ -26,6 +26,10 @@ On a worker, FFmpeg runs in a sandbox that limits it to the media root (link:003
 The server reports three direct-play metrics (<<decision-metrics>>).
 The web client direct-plays MP4 and WebM files in the browser's own video element (<<decision-web>>).
 
+A third amendment, for https://github.com/streamarr/streamarr-server/pull/745[streamarr/streamarr-server#745], settles how a ServerAdmin sees the soft links that a scan skips.
+The scan stores each one as a skipped file, not as an item result (<<decision-no-soft-links>>).
+`addLibrary` refuses a library folder that sits below a soft link.
+
 NOTE: link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052] adds further fallbacks in Original.
 After a format error during the HLS copy, the server falls back to an encode, and the playback choice changes to Auto.
 Before that encode, a failed Dolby Vision copy whose compatible base the client declares falls back to the copy with Dolby Vision stripped, and Original stays selected.
@@ -157,10 +161,31 @@ The server then serves every byte of the response from that open file.
 The server never opens the file again by its name.
 The worker refuses a soft link before it starts FFmpeg, and a sandbox keeps FFmpeg inside the media root (link:0033-transcode-worker-is-a-separate-service.adoc#decision-ffmpeg-sandbox[ADR 0033]).
 
-The library scan skips every soft link.
-The scan records each skipped soft link in that scan's item results, with the reason "soft link" (link:0027-library-operations-are-durable-jobs.adoc[ADR 0027]).
+The library scan skips every soft link below the library folder, and the library folder itself when it is a soft link.
+A soft link to a file, a soft link to a folder and a broken soft link are all skipped.
+The scan never descends into a soft-linked folder.
+
+The scan stores each soft link that it skips as a skipped file, with the reason `SOFT_LINK`.
+A skipped file belongs to the library and holds the soft link's path and the reason.
+`SOFT_LINK` is the only reason today.
+The scan stores a soft link even when the ignore rules would drop its name.
+When a scan's walk starts, it deletes the library's skipped files that other library operations stored.
+The list therefore shows what the latest walk skipped.
+An execution after a restart keeps the skipped files that its own operation stored (link:0027-library-operations-are-durable-jobs.adoc[ADR 0027]).
+A scan that stops before its walk starts, or whose library folder check fails, keeps the earlier list.
+Removing the library deletes its skipped files.
+A ServerAdmin pages through a library's skipped files in path order through `Library.administration.skippedFiles` (link:0014-protocol-agnostic-pagination.adoc[ADR 0014]).
+
+The file watcher skips a file when the file, or any folder from the library folder down to the file, is a soft link.
+The file watcher runs outside any library operation, so it stores no skipped file.
+The next scan stores the skip.
+
 A file record whose path holds a soft link becomes `UNREADABLE` under link:0038-scans-remove-media-only-when-files-are-confirmed-missing.adoc[ADR 0038], so the scan never confirms it missing and never removes its item.
 A file that a hard link names scans and plays like any other file.
+
+`addLibrary` refuses a library folder when any folder between the media root and the library folder is a soft link, or when the library folder itself is a soft link.
+The payload returns a typed error (link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026]).
+The error tells the ServerAdmin that the path passes through a soft link and to mount the real folder instead, for example with a bind mount.
 
 *Why:* A check of a path by its name, followed by an open by the same name, leaves a window between the two.
 In that window, anyone who can write to the library can swap a folder or the file for a soft link to a file outside the media root.
@@ -168,7 +193,13 @@ The server would then serve that file to a viewer.
 An open of each component without following links, and a response from that one open file, leave no such window.
 Refusing every soft link is simpler than deciding which link targets are safe, because a link's target can change after any check.
 A scan that skipped no soft link would list files that playback then refuses.
-The item result tells the ServerAdmin why a file is missing from the library.
+A skipped file tells the ServerAdmin why a file is missing from the library.
+A skipped file is not an item result.
+An item result is the outcome of a step for a subject that a library operation processes, such as a media file in a scan.
+A soft link never becomes a media file, so it has no step and no item result.
+A linked name that the ignore rules drop still matters: a linked subtitle file will matter once the scan reads subtitle files beside a video.
+A library whose folder sits below a soft link would scan, and playback would then refuse every one of its files.
+Refusing that folder in `addLibrary` reports the problem once, before any scan.
 
 [[decision-metrics]]
 === The server reports open direct-play responses, the bytes that they serve and their answers
@@ -406,6 +437,11 @@ An HLS media segment, by contrast, lasts about 3 s.
 The web client declares `MATROSKA` for WebM, so a browser that opens WebM but refuses another Matroska file with the same codecs spends a format attempt on that file and falls back to HLS.
 * A library that reaches its files through soft links keeps those items after its next scan, marked unreadable, and they no longer play.
 The ServerAdmin must mount the real folders instead, for example with a bind mount.
+* A ServerAdmin sees only the soft links that the latest walk skipped.
+A soft link removed since then leaves the list at the next scan.
+* `addLibrary` checks the path above the library folder only once.
+A soft link placed above the library folder after the library is added does not stop a scan, and playback answers `404 Not Found` for that library's files.
+* Adding a library that sits below a soft link fails until the ServerAdmin mounts the real folder.
 
 == Rejected Alternatives
 
@@ -452,6 +488,10 @@ The server would also offer an HEVC file tagged `hev1` unchecked, so a player th
 * Separate values for M4V and 3GP would name files that every client opens as MP4.
 * Resolving a file's real path, checking that the path lies under the media root and then opening the file by name leaves a window in which a swapped component defeats the check.
 * Following only the soft links whose targets lie under the media root has the same window, because a link's target can change after the check.
+* Recording each skipped soft link in the scan's item results would put an entry with no media file and no step among the outcomes of steps.
+* Skipping soft links without storing them, as a walk that never descends into a soft-linked folder does, leaves the ServerAdmin no way to see why a title is missing.
+* Leaving out the soft links whose names the ignore rules drop would hide a linked subtitle file.
+* Adding a library below a soft link and scanning it normally would list items that never play.
 * Counting a file without an `ftyp` box as MOV would follow some old QuickTime files but contradict ISO/IEC 14496-12, which reads such a file as `mp41`.
 
 == Evidence

@@ -422,7 +422,7 @@ The number of items of one kind that a worker accepts at once. Each worker grant
 _Avoid_: limit (unqualified), quota, concurrency
 
 **Playback slots**:
-The capacity for job attempts. A worker setting fixes it until encoder headroom replaces it. Probes never use a playback slot.
+The capacity for job attempts that encode video. A worker setting fixes it until encoder headroom replaces it. A job attempt that copies the video takes no playback slot, even when it encodes audio, and the server's transcode limit leaves it out too (ADR 0044). Probes never use a playback slot.
 _Avoid_: slots for probes, shared slots, free slots (as encoder headroom)
 
 **Playback probe**:

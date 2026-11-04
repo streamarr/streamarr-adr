@@ -18,6 +18,10 @@ MP4 and MOV are separate source containers, and the major brand tells them apart
 The server checks the playback authority when each direct-play request starts, and a response that is already streaming finishes (<<decision-authority>>).
 The stream session's payload has one GraphQL type for each delivery (<<decision-payload>>).
 
+A later amendment for the same issue settles the source container values and the sample entries.
+Every video capability entry that lists a source container also lists the sample entries that the player opens (<<decision-sample-entries>>).
+The declaration names eight source containers, and the M4V and 3GP brands and a file without an `ftyp` box count as MP4 (<<decision-mp4-and-mov>>).
+
 NOTE: link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052] adds further fallbacks in Original.
 After a format error during the HLS copy, the server falls back to an encode, and the playback choice changes to Auto.
 Before that encode, a failed Dolby Vision copy whose compatible base the client declares falls back to the copy with Dolby Vision stripped, and Original stays selected.
@@ -163,10 +167,50 @@ Such a file plays over HLS until the server stores the file's probe version 7 ou
 ffprobe reads MP4, M4V and MOV files with one demuxer, so the demuxer's name cannot tell MP4 from MOV.
 Probe version 7 therefore reports the file's major brand, which the file's `ftyp` box names.
 QuickTime's major brand `qt  ` makes the source container MOV.
-An MPEG-4 brand, such as `isom`, `mp42` or `M4V `, makes the source container MP4.
+Every other major brand makes the source container MP4.
+Those brands include the MPEG-4 brands, such as `isom` and `mp42`, the M4V brand `M4V ` and the 3GP brands, such as `3gp4`.
+A file that the MP4 demuxer reads without an `ftyp` box also counts as MP4, because ISO/IEC 14496-12 reads such a file as the brand `mp41`.
 The server never reads the source container from the file name or its extension.
 MP4 and MOV are separate values in the declaration, so a capability entry lists MP4, MOV or both.
 The `Content-Type` of a direct-play response follows the source container: `video/mp4` for MP4 and `video/quicktime` for MOV.
+
+The declaration names eight source containers:
+
+* `MP4`, which includes M4V and 3GP files;
+* `MOV`;
+* `MATROSKA`, which includes WebM;
+* `MPEG_TS`, which includes M2TS;
+* `MPEG_PS`;
+* `AVI`;
+* `ASF`;
+* `FLV`.
+
+The Apple client lists only `MP4` and `MOV`, because AVPlayer opens only MP4, M4V, MOV and 3GP files.
+
+*Why:* AVPlayer and the browsers open an M4V or 3GP file as they open an MP4 file, so no client needs to tell those files apart from MP4.
+A file without an `ftyp` box predates the box, and the standard that defines the box tells a reader to treat such a file as `mp41`.
+WebM is a subset of Matroska, and M2TS is MPEG-TS with a 4-byte timestamp before each packet, so one value covers each pair.
+
+[[decision-sample-entries]]
+=== A video capability entry that lists a source container also lists the sample entries that the player opens
+
+Every video capability entry that lists a source container for direct play also lists the sample entries that the player opens.
+The server refuses a declaration in which such an entry lists no sample entry.
+A file's video stream is covered for direct play only when the entry also lists the stream's sample entry, as probe version 7 reports it (<<decision-source-facts>>).
+A file whose source container stores no sample entry, such as Matroska, is matched on its other facts alone.
+An entry that applies only to HLS lists no sample entries, because the worker writes each HLS copy's sample entry itself, such as `hvc1` for an HEVC copy (link:0013-stream-decision-architecture.adoc[ADR 0013]).
+
+The Apple client lists `avc1`, `hvc1`, `dvh1` and `av01`.
+The Apple client never lists `hev1` or `dvhe`.
+The web client asks the browser about each sample entry on its own and lists only the sample entries that the browser accepts.
+Safari accepts only `hvc1` for HEVC.
+Each client lists a sample entry only after its player plays a real test file with that sample entry.
+
+*Why:* In the tvOS simulator, AVPlayer opened an MP4 or MOV file whose HEVC sample entry is `hev1`, played the sound over a black picture and reported no error (<<evidence-coverage>>).
+Without a list, the server would offer such a file for direct play.
+The client would then have to detect the black picture itself and spend a format attempt on a second start.
+Only the client knows which sample entries its player opens, so the list belongs in the client's declaration.
+An explicit list is required, so a client cannot silently accept every sample entry by leaving the list out.
 
 [[decision-payload]]
 === The stream session's payload has one GraphQL type for each delivery
@@ -259,8 +303,8 @@ When no preparing-or-ready events arrive, the hold-aware controller falls back t
 * Remux-to-play, which repackages a file into a container that the player opens, so that more files direct-play.
 * How the declaration names the subtitle formats that a player plays from inside a file.
 https://github.com/streamarr/streamarr-server/issues/506[streamarr/streamarr-server#506], which adds subtitle selection, decides that question.
-* Whether a capability entry names the sample entries that the player opens.
-The tvOS simulator check of https://github.com/streamarr/streamarr-server/issues/59[streamarr/streamarr-server#59] first measures whether AVPlayer opens an MP4 file whose HEVC sample entry is `hev1`.
+* Sample entries in audio capability entries.
+The probe reports only the video stream's sample entry, so an audio capability entry lists none.
 * Direct play on the web client.
 * libmpv as an opt-in second engine for direct play.
 * Quality selection from the preparing-or-ready events on the TV clients, until a device test shows a need.
@@ -295,6 +339,9 @@ An HLS media segment, by contrast, lasts about 3 s.
 * Probe version 7 grows by two facts, so the re-scan for probe version 7 waits for the worker to report them.
 * An MP4 or MOV file direct-plays only after the server stores the file's probe version 7 outcome.
 * Each client selects the HLS fields of the payload through a type condition on `HlsStreamSession`.
+* An HEVC file tagged `hev1` plays over HLS on the Apple client, as a copy that the worker writes as `hvc1`.
+* A client that adds a sample entry must first play a real test file with it, so a new sample entry reaches direct play only after that check.
+* An old QuickTime file without an `ftyp` box is served as `video/mp4`.
 
 == Rejected Alternatives
 
@@ -334,6 +381,11 @@ The server would also offer an HEVC file tagged `hev1` unchecked, so a player th
 * Reading MP4 or MOV from the file extension would give a renamed file the wrong source container.
 * A `delivery` field beside a nullable `transcodeMode` would make null mean direct play.
 * A union of the two payload types would share no fields, so every client would select the `id` and the `streamUrl` once for each delivery.
+* Leaving the sample entries out of the declaration, and letting the Apple client report a black picture as a format error, costs every `hev1` file a second start.
+* Withholding MP4 and MOV from the HEVC entry until the declaration lists sample entries would keep every HEVC MP4 or MOV file off direct play.
+* An optional list of sample entries would let a client that omits it accept every sample entry, including those its player refuses.
+* Separate values for M4V and 3GP would name files that every client opens as MP4.
+* Counting a file without an `ftyp` box as MOV would follow some old QuickTime files but contradict ISO/IEC 14496-12, which reads such a file as `mp41`.
 
 == Evidence
 
@@ -367,7 +419,8 @@ That list holds no Matroska type.
 Codec-profile limits narrow that further, such as AVPlayer's lack of support for 10-bit H.264.
 * A Matroska file whose codecs AVPlayer plays keeps playing over HLS as a stream copy.
 Remux-to-play, which this decision defers, would reach those files.
-* Whether AVPlayer opens an MP4 or MOV file whose HEVC sample entry is `hev1` is unmeasured.
+* In the tvOS 27.0 simulator, AVPlayer reported an MP4 or MOV file whose HEVC sample entry is `hev1` ready, played its sound and showed no picture, with no error (https://github.com/streamarr/streamarr-apple/pull/138[streamarr/streamarr-apple#138]).
+The same file tagged `hvc1` played its picture and its sound.
 
 [[evidence-forced-tracks]]
 === Forced image tracks

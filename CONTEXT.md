@@ -269,8 +269,12 @@ _Avoid_: verified encoder (unqualified), GOP-verified encoder
 The delivery in which the server sends the source file itself, and the player reads it with HTTP byte-range requests. Only Original direct-plays, and only a file whose source container, video stream, audio tracks and any selected subtitle the client capability declaration covers. A direct-play stream session starts no job attempt (ADR 0045).
 _Avoid_: direct stream, passthrough, stream copy (an HLS delivery)
 
+**Sample entry**:
+The four-character code that names a video stream's coding format in an MP4 or MOV file, such as `avc1`, `hvc1`, `hev1` or `dvh1`. Every video capability entry that lists a source container also lists the sample entries that its player opens (ADR 0045).
+_Avoid_: codec tag, FourCC (unqualified), codec string (a different value)
+
 **Source container**:
-The container of a media file as the probe found it, such as Matroska, MP4 or MPEG-TS. This source fact decides whether the file qualifies for direct play. MP4 and MOV are separate source containers, and the file's major brand tells them apart (ADR 0045). HLS delivery always uses fragmented MP4.
+The container of a media file as the probe found it, such as Matroska, MP4 or MPEG-TS. This source fact decides whether the file qualifies for direct play. MP4 and MOV are separate source containers, and the file's major brand tells them apart (ADR 0045). The M4V and 3GP brands, and a file without an `ftyp` box, count as MP4. MATROSKA includes WebM, and MPEG_TS includes M2TS. HLS delivery always uses fragmented MP4.
 _Avoid_: container format, ContainerFormat, output container
 
 ### Jobs and library operations

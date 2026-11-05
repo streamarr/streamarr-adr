@@ -48,6 +48,12 @@ A stream session in which any output exceeds the cap, or any encode has no bound
 A request that follows a held request for an earlier segment is prefetch and never relocates past that segment.
 The interim rule, and its refusal to copy a source with an interval that holds no keyframe, end once the pinned worker image groups on the list.
 
+NOTE: An amendment replaces the segment list's whole slots with exact segment starts (<<decision-segment-list>>, https://github.com/streamarr/streamarr-server/issues/780[streamarr/streamarr-server#780]).
+Each job attempt of a stream session with a copied variant carries every segment's start in ticks of the source video stream's time base.
+In every variant of that stream session, segment N then starts at the presentation time of the source keyframe that opens copied segment N.
+Each encoded variant forces its keyframe on the first output frame at or after that start, so an encoded segment starts less than one output frame after the copied segment with the same number.
+A stream session without a copied variant keeps the plain 3 s grid and sends no list.
+
 NOTE: An amendment sends the chosen keyframe's presentation time as the seek position of an encoded replacement attempt that reads an MP4 or MOV source (<<decision-seek>>), because FFmpeg's MP4 demuxer seeks by presentation time.
 With the keyframe's decode time, that demuxer lands one keyframe interval early.
 A Matroska, MPEG-TS or any other source still gets the keyframe's decode time.
@@ -341,7 +347,11 @@ In that segment list, a slot that holds no source keyframe merges into the segme
 A merged segment therefore spans several slots.
 A stream copy advertises each segment's real duration.
 A copied segment opens at the first source keyframe in its first slot, and segment 0 also holds the media before its keyframe.
+In that segment list, segment 0 starts at zero, and every later segment starts at the presentation time of the source keyframe that opens it.
+A segment's start is therefore exact, and is not the start of its first slot.
 The stream session's encoded variants force their keyframes at the segment list's starts.
+An encoded variant's forced keyframe is the first output frame that presents at or after a segment's start.
+An encoded segment therefore starts less than one output frame after the copied segment with the same number.
 A keyframe that an encoder places inside a merged segment stays inside that segment, so a player can switch variants at every segment boundary.
 Audio and subtitle renditions use the stream session's segment list as well (link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043]).
 Once merged segment lists arrive, every stream session therefore uses 3 s slots.
@@ -358,15 +368,38 @@ A stream copy uses those keyframe positions for its segment boundaries, its play
 Each `EXTINF` gives a segment's real duration, and `EXT-X-TARGETDURATION` covers the longest merged segment, as RFC 8216 requires.
 Everything that counts segments reads the segment list: the advertised media segment count, the resume and relocation offsets, the forward-relocation gap, a copy's segment sizes and peak segment bitrate (link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc[ADR 0054]), and the end of a short copy (link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052]).
 
-The server and the worker share one segment list, because each job attempt carries it in `TranscodeExecution.segment_start_slots`.
-The field lists each segment's start, counted in slots of the stream session's segment length (https://github.com/streamarr/streamarr-server/pull/723[streamarr/streamarr-server#723]).
-A job without a list uses the plain grid, so a stream session whose variants all encode sends none.
+The server and the worker share one segment list, because each job attempt carries it in `TranscodeExecution.segment_start_ticks`.
+The field lists each segment's start on the zero-based timeline, in ticks of the time base that `TranscodeExecution.segment_start_time_base` holds.
+That time base is the time base of the stored keyframe positions of the source's chosen video stream (link:0032-media-file-probe-results-are-persisted.adoc#keyframe-positions[ADR 0032]).
+Each listed start after segment 0 is a stored keyframe tick, unchanged, so neither the server nor the worker rounds a start.
+A job without a list uses the plain grid, so a stream session whose variants all encode sends neither field.
 A non-empty list holds one entry for each advertised media segment, starts at 0 and strictly increases.
+A non-empty list always comes with its time base, and an empty list never does.
 The worker refuses any other list with `JOB_ATTEMPT_FAILURE_INVALID_SPECIFICATION`.
+Every job attempt of a stream session with a copied variant carries the list.
+That covers the copied variant, each encoded variant and each audio rendition, from the first attempt to every replacement attempt.
 The worker forces encoded keyframes at the listed starts, and groups fragments and audio samples on the listed intervals.
+The worker compares each sample's presentation time with a listed start exactly.
+The worker never rounds a start to a track's timescale before it compares.
+The list replaced `TranscodeExecution.segment_start_slots`, which counted each start in whole slots (https://github.com/streamarr/streamarr-server/pull/723[streamarr/streamarr-server#723]).
+The worker contract keeps that field's number and name reserved (https://github.com/streamarr/streamarr-server/issues/780[streamarr/streamarr-server#780]).
 A merged segment is expected and never fails an attempt by itself.
 A keyframe that skips a listed segment still fails the attempt with `SKIPPED_SEGMENT_NUMBER`, because the server and the worker then disagree about the source's keyframes.
 Streamarr has no production instances, so the change makes no provision for workers of different versions.
+
+*Why exact starts:* With whole slots, a copied segment opens at the first source keyframe in its slot.
+An encoded segment with the same number then starts at the slot's start.
+The two starts can lie up to one slot apart.
+A player that switches between the copy and an encoded variant at that boundary then plays up to one slot of media twice, or skips up to one slot.
+Apple's HLS authoring specification asks every variant to start each segment at the same time.
+
+*Why ticks of the video stream's time base:* The probe stores each keyframe as a whole number of ticks of the video stream's time base.
+A copy's FFmpeg subtracts the container start in the same ticks as the probe, so a copied keyframe keeps its stored tick.
+By default, FFmpeg's mp4 muxer gives a copied video track a timescale that is a multiple of the time base's denominator, so every tick stays a whole number of timescale ticks.
+Microseconds and nanoseconds cannot hold every tick exactly.
+An MPEG-TS tick is 1/90000 s, and an AVI time base such as 1001/24000 gives frame times with no terminating decimal.
+A rounded start would need one rounding rule that both repositories match.
+A start rounded past its keyframe would also move that keyframe into the segment before it.
 
 The segment cap, 128 MiB, is a constant of the worker contract that the server and the worker each fix in code, and no worker configures it.
 A merged segment can be long, and every variant and rendition of the stream session cuts its segments on the same list, so the server decides up front whether every advertised output fits.
@@ -496,6 +529,8 @@ FFmpeg's `-force_key_frames` has two modes: a list of absolute times, or an expr
 The worker forces the boundaries with the list, never an expression.
 `-force_key_frames:0` receives the start of every segment from the start sequence number up to, but not including, the variant's media segment count.
 On a plain grid, segment `k` starts at `k × period`, in whole seconds.
+On a list of exact starts (<<decision-segment-list>>), the worker forces the first output frame that presents at or after each listed start.
+FFmpeg reads the list in whole microseconds, so the worker writes each entry so that FFmpeg forces exactly that frame, and neither the frame before it nor the frame after it.
 Every attempt thus forces the same frame at each boundary it shares with another attempt.
 FFmpeg chooses the first frame at or after that boundary on the zero-based timeline.
 The list starts at the start sequence number, because FFmpeg consumes at most one entry per frame and would force an extra keyframe for each entry before the attempt's first frame.
@@ -1328,6 +1363,11 @@ No step rescans, drains or reconciles after exit.
 It loses `awaitSegment`, the liveness poll, the 50 ms constant and the output directory.
 * With no media on disk, the worker needs no segment base path and no code that cleans that path up.
 * The worker, not FFmpeg's muxer, decides where a segment ends.
+* In a stream session with a copied variant, every encoded variant starts segment `N` less than one output frame after the copy's segment `N`.
+A player that switches variants at a segment boundary repeats or skips less than one frame of media.
+* A job attempt of a stream session with a copied variant carries one tick count for each segment.
+A two-hour source at 3 s slots has at most 2,400 segments, and each tick count takes at most 10 bytes, so the list stays under 24 KB.
+* A stream session without a copied variant keeps the plain grid, and its job attempts carry no list.
 Tests verify this rule against recorded fixtures so that an FFmpeg upgrade under ADR 0029 cannot silently merge or split segments.
 * A stream-copy replacement attempt now starts on the advertised segment boundary, because the producer discards the preroll fragment.
 Its audio starts with the first sample at or after the boundary, so it no longer repeats audio that the previous segment holds.
@@ -1437,6 +1477,13 @@ The producer must both drain the pipe and cancel the upload.
 
 == Rejected Alternatives
 
+* Keeping the segment list in whole slots: a copied segment opens at its keyframe inside the slot, while an encoded segment opens at the slot's start.
+A switch between the copy and an encoded variant then repeats or skips up to one slot of media.
+* Letting each encoded variant place its keyframes by its own grid or its own encoder: that variant's segments would start at times that no other variant shares, and a switch would fall inside a segment.
+* Carrying each start in microseconds or nanoseconds: neither unit holds an MPEG-TS tick of 1/90000 s or an AVI time of 1001/24000 s exactly, so both repositories would need one matching rounding rule.
+* Carrying a rational time in each entry: every entry would repeat the same denominator, and the worker would check one more rule for each entry.
+* Listing exact starts for a stream session without a copied variant: the plain grid already starts segment `N` at exactly `N × 3 s`.
+A 3 s step is also not a whole number of ticks in a time base such as 1001/24000.
 * Counting copies against the slots' segment memory budget: copies that take no slot could fill it with unfinished segments and starve the encodes.
 * A fixed number of copies, or a setting for it: the memory that a worker can give copies depends on its container's limit, which the worker already knows.
 * Sizing the copy cap from the raw container memory limit: that limit also covers the JVM's other memory regions, so the cap would admit copies that the heap cannot hold.

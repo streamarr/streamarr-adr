@@ -16,6 +16,9 @@ A second amendment moves the letter index out of the finishing steps.
 The transaction that adds, removes or renames a movie or series now changes the library's letter index.
 A client therefore sees the letter index grow while a scan runs.
 
+A third amendment, for https://github.com/streamarr/streamarr-server/pull/745[streamarr/streamarr-server#745], makes a refresh start with the library folder check that a scan runs (<<library-folder-check>>).
+A refresh whose check fails ends as a scan whose check fails does, so a finished refresh never marks `HEALTHY` a library whose folder fails the check.
+
 == Context
 
 link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026] fixes the contract of `startLibraryScan` and `startLibraryRefresh`: each returns the `Library` node, accepted is not completed, and a client observes `Library.status` afterwards.
@@ -128,6 +131,23 @@ An operation reads only results that carry the operation's id, and never waits f
 A task stays admitted until Streamarr records an outcome for each poster and backdrop that the task requested, so a stop waits only for admitted tasks.
 A task or an operation waits by reading recorded results, never for an in-process signal, because a result can arrive after a restart or through a path that sends no signal.
 
+[[library-folder-check]]
+=== The library folder check
+
+Every library operation starts with the library folder check that link:0038-scans-remove-media-only-when-files-are-confirmed-missing.adoc[ADR 0038] defines, before it admits any task.
+ADR 0038 runs the check in a scan and in a removal of items with missing files, and a refresh runs the same check.
+Each execution runs the check again, because the folder can change between executions.
+An execution that completes a stored stop admits no task and runs no check.
+
+A refresh whose check fails ends as a scan whose check fails does.
+It admits no task, so it fetches no metadata and requests no artwork, and it ends as failed.
+The library turns `UNHEALTHY` with the reason that the check found, the same reason that a scan reports.
+The check is all that a refresh reads of the library folder: a refresh reads no media file and changes no file's availability.
+
+An operation whose check fails can never finish.
+A finished operation therefore marks `HEALTHY` only a library whose folder passed the check.
+The check adds no library status and no setting.
+
 === Finishing
 
 An operation finishes when every result that its tasks require is recorded, as https://github.com/streamarr/streamarr-server/issues/418[#418] defines: a success or a recorded failure, never an attempt that is still pending.
@@ -147,7 +167,7 @@ Once the walk is done and every required result is recorded, the finishing steps
 A scan updates file availability and removes items with missing files when the library's setting allows it (ADR 0038).
 Each finishing step is keyed by the operation's id and is idempotent, so a step that a restart interrupted has the same effect when it runs again.
 A finishing step for an operation that has ended does nothing, so a stale execution cannot apply a step to a later operation.
-To end an operation, Streamarr sets the library's final status and deletes the operation in one transaction: `HEALTHY` for a finished operation, the library's status from before the operation for a stopped one, and `UNHEALTHY` for a failed one.
+To end an operation, Streamarr sets the library's final status and deletes the operation in one transaction: `HEALTHY` for a finished operation, the library's status from before the operation for a stopped one, and `UNHEALTHY` for a failed one, including one whose library folder check failed.
 A stopped or failed operation skips the finishing steps that it has not started.
 
 === The letter index
@@ -242,6 +262,13 @@ They return when an operation needs membership beyond the operation id that artw
 * If Streamarr repeatedly fails to commit the transaction that sets the library's final status and deletes the operation, the library stays busy.
 The scheduled task runs the operation again with backoff until that transaction commits.
 * Two transactions that add titles with the same first letter to the same library wait for each other on that letter's row until the first transaction commits.
+* A finished refresh never clears a folder problem.
+A refresh of a library whose folder fails the check ends `UNHEALTHY` with the check's reason, and a refresh that finishes has passed the check.
+* A refresh after the ServerAdmin fixes the folder marks the library `HEALTHY` without a full scan.
+* A refresh cannot update metadata from stored records while the library folder fails the check, for example while its share is unmounted.
+* A refresh checks the library folder only at its start.
+A share that unmounts while a refresh runs does not fail that refresh, so the refresh can finish and mark the library `HEALTHY`.
+The next scan or refresh runs the check and reports the problem.
 
 == Rejected Alternatives
 
@@ -264,6 +291,9 @@ The scheduled task runs the operation again with backoff until that transaction 
 * Recalculating the letter index at a fixed interval while an operation runs — the letter index lags the titles, and each recalculation still reads every title in the library.
 * Changing the letter index from an application listener in the writer's transaction — every write path must publish an event, and a rename must carry the old letter.
 * Changing the letter index after the writer's transaction commits — a crash between the two commits loses the change, and nothing repairs the letter index.
+* Marking the library `HEALTHY` after every finished operation while a refresh runs no folder check — a refresh that finishes after a scan's check failed would mark the library `HEALTHY` while the folder problem remains, and hide the broken folder.
+* Letting only a finished scan clear a folder problem, so that a finished refresh keeps the library `UNHEALTHY` — a library whose folder the ServerAdmin fixed would stay flagged until a full scan, and the library's status would follow two rules for one fact, the state of its folder.
+* Running the check again when a refresh finishes — a refresh reads no media file and removes nothing, so a share that unmounts while it runs costs no data, and the next scan or refresh reports the problem; one check at the start keeps the rule simple.
 
 == References
 

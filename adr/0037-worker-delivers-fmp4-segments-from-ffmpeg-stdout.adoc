@@ -29,6 +29,17 @@ A job attempt passes `-discard none`, plus `-itsoffset` with the correction when
 Media time zero then stays the source container's start time, whatever streams the attempt maps.
 A job attempt whose stored probe outcome carries no correction reads the source as before the amendment.
 
+NOTE: An amendment puts libx265 on the keyframe-verified list (<<decision-gop>>).
+The worker passes `-x265-params no-scenecut=1:no-open-gop=1` to libx265.
+With those parameters, libx265 closes every GOP and places no scene-cut keyframe.
+New recordings in the pinned worker image show an IDR picture at every forced keyframe of libx265 and at its GOP's backstop keyframe (https://github.com/streamarr/streamarr-transcode-worker/pull/60[streamarr/streamarr-transcode-worker#60]).
+A variant that libx265 encodes therefore takes the extended GOP and carries `EXT-X-INDEPENDENT-SEGMENTS` under the same rules as a variant from libx264 or SVT-AV1 (<<decision-independent-segments>>).
+
+NOTE: An amendment chooses each variant's GOP once, from the variant's list of forced keyframes (<<decision-gop>>).
+A keyframe-verified encoder takes the extended GOP only when the list that starts at the variant's first segment reaches the variant's last segment.
+Otherwise every attempt of that variant takes the floored GOP.
+libx265 writes the GOP into the initialization segment, so every attempt of a variant must take the same GOP.
+
 NOTE: An amendment stops the producer from moving copied audio, and rebuilds each copied audio sample's duration and decode time from sample counts (<<decision-audio>>).
 Encoded audio starts on its own audio frame grid instead (link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc#decision-audio-grid[ADR 0043]).
 
@@ -496,7 +507,7 @@ Evidence: https://github.com/streamarr/streamarr-server/issues/512[streamarr/str
 
 The worker forces a keyframe at every segment boundary for every encoder, including SVT-AV1 and the hardware encoders that the previous worker controls through a frame-count GOP alone.
 The worker continues to disable scene-cut keyframes for libx264 through `-sc_threshold`.
-Issue https://github.com/streamarr/streamarr-server/issues/497[streamarr/streamarr-server#497] will set libx265's scene-cut behavior along with its other GOP arguments.
+The worker disables scene-cut keyframes for libx265 through the `no-scenecut=1` key of `-x265-params` (https://github.com/streamarr/streamarr-server/issues/497[streamarr/streamarr-server#497]).
 A scene-cut keyframe adds another keyframe inside an interval, and the producer groups that keyframe's fragment into the same segment.
 FFmpeg's `-force_key_frames` has two modes: a list of absolute times, or an expression evaluated against the time since the attempt's first frame.
 The worker forces the boundaries with the list, never an expression.
@@ -539,16 +550,18 @@ A decoder that starts at a CRA picture must discard them, so a segment that star
 A CRA picture never qualifies, even when no RASL picture follows it.
 The encoder may place RASL pictures after any CRA picture.
 The mp4 muxer marks the CRA picture as a sync sample in both cases.
-libx264 and SVT-AV1 are keyframe-verified.
+libx264, SVT-AV1 and libx265 are keyframe-verified.
 `h264_videotoolbox` and `hevc_videotoolbox` are keyframe-verified with B-frames off.
 With B-frames on, neither encoder is keyframe-verified.
 Upstream SVT-AV1 bug https://gitlab.com/AOMediaCodec/SVT-AV1/-/work_items/2385[#2385] stalled or reordered SVT-AV1's output, but the bug never dropped a forced keyframe (worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/42[#42]).
 The pinned runtime's SVT-AV1, release 4.3.0, contains the fix for that bug.
 The stall watchdog of the <<decision-waits,four waits>> and the short-sample rule for <<decision-untrusted-output,untrusted output>> still fail any attempt whose encoder stalls or reorders its output, so that the server can replace the attempt under ADR 0019.
-libx265 is not keyframe-verified.
-Under its default open GOP, its forced keyframes are CRA pictures.
+libx265 is keyframe-verified only with closed GOPs.
+Under libx265's default open GOP, libx265's forced keyframes are CRA pictures.
 When a recording suppressed a forced keyframe, libx265's GOP placed a CRA picture that was followed by a RASL picture.
-libx265 qualifies only after its GOPs are closed under issue https://github.com/streamarr/streamarr-server/issues/497[streamarr/streamarr-server#497] and a new recording shows that both its forced keyframes and its GOP's backstop keyframe are IDR pictures.
+The worker therefore passes `-x265-params no-scenecut=1:no-open-gop=1` to libx265 (https://github.com/streamarr/streamarr-server/issues/497[streamarr/streamarr-server#497]).
+`no-open-gop=1` closes every GOP, and `no-scenecut=1` stops libx265 from placing a keyframe at a scene cut.
+With those parameters, every keyframe in the libx265 recordings is an IDR picture with no leading pictures, including the GOP's backstop keyframe.
 Every other hardware encoder must pass the same recording checks before it is keyframe-verified (<<decision-hardware-encoders>>).
 
 The worker sets each encoder's frame-count GOP by whether that encoder is keyframe-verified.
@@ -559,17 +572,22 @@ Those keyframes start no segment, because the worker groups samples on the serve
 For every other encoder, the worker multiplies the period by the output frame rate and rounds the result down to obtain the floored GOP.
 Even if the encoder ignores forced keyframes, that GOP still places one keyframe inside every interval and never skips a segment.
 Under the floored GOP every segment holds at least one keyframe, and most hold two.
-The floored GOP keeps a keyframe in every interval for libx265 but does not close its GOPs.
-Closing those GOPs requires the changes tracked by issue https://github.com/streamarr/streamarr-server/issues/497[streamarr/streamarr-server#497].
 Past the list's last entry, only the GOP places keyframes.
 The floored GOP still puts a keyframe in every interval.
-With the extended GOP, keyframes drift away from the segment starts until an interval holds no keyframe.
-The producer then fails the attempt with `SKIPPED_SEGMENT_NUMBER` (<<decision-grouping,grouping>>).
-The server dispatches a replacement attempt from the skipped segment under ADR 0019, and that attempt starts a new list at the skipped segment's boundary.
+With the extended GOP, keyframes would drift away from the segment starts until an interval held no keyframe.
+A keyframe-verified encoder therefore takes the extended GOP only when the variant's list reaches the variant's last segment.
+The worker builds that list from the variant's first segment, whatever segment the attempt starts at.
+When that list ends early, every attempt of the variant takes the floored GOP.
+A forced keyframe that an encoder drops can still skip a segment, and the producer then fails the attempt with `SKIPPED_SEGMENT_NUMBER` (<<decision-grouping,grouping>>).
 
 *Why:* The floored GOP added a second keyframe beside the forced one at 13 of 15 boundaries.
 The extended GOP produced only forced keyframes in all twelve runs.
-libx265's backstop was a CRA picture followed by RASL pictures in three of four recordings.
+Under libx265's default open GOP, libx265's backstop was a CRA picture followed by RASL pictures in three of four recordings.
+With closed GOPs, libx265's forced keyframes and libx265's backstop at frame 433 were IDR pictures in every recording, from the start and after a seek (https://github.com/streamarr/streamarr-transcode-worker/pull/60[streamarr/streamarr-transcode-worker#60]).
+libx265 writes its settings, including the GOP, into the initialization segment.
+A replacement attempt that starts late builds a shorter list, and that list can reach the last segment when the start attempt's list does not.
+If each attempt chose the GOP from its own list, that replacement attempt would write a different initialization segment.
+The server refuses a replacement attempt whose initialization segment differs from the variant's stored initialization segment.
 The VideoToolbox encoders were recorded on an Apple M1 Max with macOS 26.6.2 and FFmpeg 8.1.2 for macOS on arm64, from the start and after a seek, at 23.976 and 29.97 fps.
 With B-frames off, every forced keyframe in 176 recordings was a sync sample: 4,155 of 4,155 for H.264 and 4,345 of 4,345 for HEVC.
 Each of those keyframes was an IDR picture with no leading pictures, and each encoder restarted its GOP count there.
@@ -608,7 +626,7 @@ The tag is true only when every media segment starts with a keyframe that opens 
 The server writes the tag in the multivariant playlist when every video variant of the stream session comes from a keyframe-verified encoder.
 Otherwise the server writes the tag only in the media playlists of the variants that come from a keyframe-verified encoder.
 A stream copy never carries the tag, because a source keyframe can open a GOP whose pictures reference earlier pictures.
-A variant from libx265 does not carry the tag while libx265 is off the keyframe-verified list.
+A variant from libx265 carries the tag under the same rules, because libx265 is keyframe-verified.
 
 *Why:* Without the tag, Safari's native player also requested the two segments before a seek target.
 With the tag, it requested only the segment that holds the target.
@@ -1189,7 +1207,7 @@ The fixtures README in the worker repository, cited in References, lists each re
 
 The recorder identifies the picture that starts each keyframe.
 It reads the NAL unit type for H.264 and HEVC, and the frame header for AV1.
-The tests therefore check that libx264 produces IDR pictures, SVT-AV1 produces shown key frames and libx265 produces CRA pictures in these fixtures.
+The tests therefore check that libx264 and libx265 produce IDR pictures and that SVT-AV1 produces shown key frames in these fixtures.
 Both the recorder and CI's check fail when a keyframe of a keyframe-verified encoder does not start a closed GOP.
 For every fixture the recorder also runs the HLS muxer, records each segment whose cut differs from the segment list, and records why the cuts differ.
 The HLS muxer's cuts are a comparison, not the reference.
@@ -1399,7 +1417,7 @@ The server keeps a producer while its reported output advances, and each client'
 * The server encodes a source until it knows the source's keyframe positions, so a file without a usable container index is encoded until its keyframe scan finishes.
 * A keyframe-verified encoder's segments hold one keyframe instead of the two that most segments hold under the floored GOP.
 Other encoders keep the extra keyframe until they are verified.
-libx265 can qualify after the changes tracked by issue https://github.com/streamarr/streamarr-server/issues/497[streamarr/streamarr-server#497].
+libx265 qualified once the worker closed libx265's GOPs.
 NVENC and VideoToolbox qualify through their own checks (https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56], https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57]), and https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] keeps VAAPI, QSV, AMF and RKMPP.
 * A worker encodes with a hardware encoder backend only after the backend passes the keyframe recording checks, the initialization-segment check and the output check.
 * Safari's native player fetches only the target segment when it seeks in a variant from a keyframe-verified encoder.
@@ -1419,9 +1437,8 @@ The server still handles requests for advertised segments that the worker did no
 The pinned runtime's SVT-AV1 4.3.0 contains the fix, and a soak under CPU contention found no failure (<<evidence-svt-av1-soak>>).
 The stall watchdog and the short-sample rule turn a hung FFmpeg or undecodable segments into a failed attempt that ADR 0019 replaces.
 Both rules stay after the runtime update of worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/42[#42], because they cover every encoder.
-* When a media file outlasts its list and a keyframe-verified encoder's attempt fails with `SKIPPED_SEGMENT_NUMBER`, the replacement attempt starts a new list at the skipped segment's start.
-Its first segment repeats about one period of media that the last drifted segment already held.
-ADR 0019's recovery cannot withdraw that repeat once the server has published it.
+* A variant whose list from its first segment cannot reach its last segment takes the floored GOP in every attempt, so most of its segments hold two keyframes.
+On a plain grid, only a media file longer than 18.7 hours at 3 s segments, or 35.6 hours at 6 s segments, has such a variant.
 * Switching H.264 to fMP4 removes the parameter sets that MPEG-TS carried in each media segment.
 The server instead serves the stored init with later segments and, once workers advertise their encoders, requires replacement attempts to use the backend that produced that init.
 * The upload loop gains `isReady` flow control, a readiness bound and an acknowledgment deadline.
@@ -1595,7 +1612,7 @@ That check also catches a worker that stays connected while its producer stops f
 * Requiring a source keyframe in the grid's final interval as well, the interim rule that this decision first accepted, would encode ordinary sources.
 AAC priming makes a container run about 23 ms past its video.
 A source whose video ends on a period boundary therefore leaves a final interval of about 23 ms, and that interval holds no keyframe.
-* Writing `EXT-X-INDEPENDENT-SEGMENTS` for every variant would claim independence for stream copies and libx265, whose segments can start with an open GOP.
+* Writing `EXT-X-INDEPENDENT-SEGMENTS` for every variant would claim independence for stream copies, whose segments can start with an open GOP.
 * Never writing `EXT-X-INDEPENDENT-SEGMENTS` would keep Safari's native player fetching two extra segments before every seek target.
 * Recording the VideoToolbox encoders only in https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] would keep them off the keyframe-verified list that the worker reads.
 * Deferring the VideoToolbox encoders would leave a Mac worker's hardware encoder unused, although both encoders already pass the recording checks.
@@ -1606,8 +1623,8 @@ Waiting for a replacement attempt to produce the missing segment would stall pla
 The extended GOP is safe only because forced keyframes, not the GOP, place every boundary.
 * Keeping the floored GOP for every encoder adds a second keyframe and a one-frame fragment beside most boundaries.
 It guards against a failure that the keyframe verification recordings rule out and that `SKIPPED_SEGMENT_NUMBER` would still name.
-* Verifying keyframes on sync samples alone would admit libx265.
-Its forced keyframes are CRA sync samples, and its backstop keyframe carried a RASL picture.
+* Verifying keyframes on sync samples alone would have admitted libx265 under its default open GOP.
+Under that GOP, libx265's forced keyframes are CRA sync samples, and libx265's backstop keyframe carried a RASL picture.
 The sync flag cannot distinguish an open GOP from a closed one.
 * A GOP of exactly the rounded-up number of frames fires on the same frame as a forced keyframe after a gap of that length.
 A recording cannot then show whether the encoder honored the forced keyframe or reached its GOP limit.
@@ -1875,6 +1892,15 @@ There the extra keyframe mostly fell on the interval's first frame, one frame be
 * Under the extended GOP no RASL picture followed a forced CRA picture.
 * With one forced keyframe suppressed, the keyframe that libx265's GOP placed instead was a CRA picture followed by one or two RASL pictures in three of the four recordings.
 * Under the floored GOP each libx265 recording held 3 to 23 RASL pictures.
+* The libx265 initialization segments under a GOP of 145 frames and under a GOP of 143 frames differed from byte 1,205 of their 3,847 bytes.
+* With FFmpeg 8.0.1, keyframes forced at 0, 1 and 2 s, 1 s segments at 1 fps and a GOP of 2 frames, no keyframe came at 3, 5, 7 or 9 s.
+* Worker PR https://github.com/streamarr/streamarr-transcode-worker/pull/60[streamarr/streamarr-transcode-worker#60] recorded libx265 again in the pinned worker image with `-x265-params no-scenecut=1:no-open-gop=1`.
+* Those recordings cover 66 s of a constant 23.976 fps source from the start, a replacement attempt from segment 5 that seeks one period early, the first 30 s with one forced keyframe left out, and the first 30 s under the floored GOP.
+* Every keyframe in those recordings was an IDR picture (HEVC NAL unit type 20) with no leading pictures.
+* Under the extended GOP of 145 frames, the only keyframes were the forced frames, one per segment.
+* With the forced keyframe for 18 s left out, libx265 restarted its GOP count at frame 288 and placed its backstop keyframe at frame 433, inside the interval that the missing keyframe would have opened.
+* The replacement attempt's initialization segment equalled the start-0 attempt's initialization segment, and each of its segments started on the start-0 attempt's frames.
+* A smoke test encoded a source with a scene cut at 2.5 s, and each of its three 6 s media segments started with an IDR picture and held no other random access picture.
 
 [[evidence-early-seek]]
 === The one-period-early seek

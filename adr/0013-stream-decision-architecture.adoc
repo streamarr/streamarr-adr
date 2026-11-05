@@ -912,9 +912,15 @@ On an MP4 source of 512x288 lossless HEVC, about 330 KB per picture, with B-fram
 That is over the worker's limit of 32 MiB for what it holds of the copy, so the attempt failed.
 With video alone, the first fragment held 323 KB and the largest 332 KB.
 `-max_interleave_delta 0` does not help, because 0 means that the muxer buffers without a bound.
-The chosen design, which reads the audio from a second input of the source, costs a second read of the source.
+The chosen design, which reads the audio from a second input of the source, has the two FFmpeg processes read the source's bytes twice.
 On an excerpt, one FFmpeg read 1,699,613 bytes, and the pair read 3,399,226 bytes, although the audio packets held 50,412 bytes.
-A source of 80 Mb/s on network storage is then read at about 160 Mb/s.
+These are bytes that the processes read, not reads from storage.
+The second FFmpeg reads the same part of the source seconds after the first, so the worker host's file cache normally serves the second read, and storage reads the source once.
+The path is also narrow: only a Dolby Vision profile 5 source whose RPUs start their samples takes it, and only when the job encodes.
+Profile 5 is the profile of streaming services' Dolby Vision, whose 4K streams typically stay below 25 Mb/s.
+* Writing the source audio to a second output of the first FFmpeg, on a pipe of its own, so that the source is read once: each muxer writes on its own, so the header problem above does not arise.
+It adds a second pipe between the two processes, and when one pipe fills while an FFmpeg waits on the other, both stall.
+Ruling that out needs its own tests, and the file cache already spares storage the second read on this rare path.
 * Carrying the source audio's sample rate and channel layout in the transcode job, so that the second FFmpeg could declare an MPEG-TS audio track before its first packet: the pinned build refused the sample rate as an MPEG-TS input option, and an audio copy still failed with `sample rate not set`.
 The job also cannot restore a codec's configuration, such as FLAC's or ALAC's, its packet durations or its padding.
 * Clearing the copy's frame rate with `setpts=PTS:strip_fps=1`, so that a variable-frame-rate source keeps its pictures: on the pinned build, each constant-frame-rate source then came out one frame short, with every frame different from a single FFmpeg's.
@@ -1150,8 +1156,8 @@ After some seeks, the demuxer reported `frame size > 2max_distance and no checks
 In one such attempt, 2 of the 192 expected video packets arrived.
 * Audio from a second input of the source: the second FFmpeg read the video from the pipe and the audio from the source.
 In 94 readable pairs, every packet equaled the single FFmpeg's, with a recipe that keeps the source's timestamps in the pipe.
-The source was read twice: 1,699,613 bytes for one FFmpeg and 3,399,226 bytes for the pair, although the audio packets held 50,412 bytes.
-At a source bitrate of 80 Mb/s, that is about 160 Mb/s of reads at real time.
+The processes read the source's bytes twice: 1,699,613 bytes for one FFmpeg and 3,399,226 bytes for the pair, although the audio packets held 50,412 bytes.
+The second read follows the first by seconds, so the worker host's file cache normally serves it.
 * Audio in the copy, measured on 2026-11-04 with the pinned FFmpeg 8.1.3 on a 512x288 lossless HEVC MP4 source of about 330 KB per picture, with B-frames and keyframes at 0, 10 and 20 s.
 With AAC audio in the copy and a seek to 18 s, the copy's first fragment held 63.8 MB.
 From the keyframe's decode time, 19.917 s, it held 79.0 MB.

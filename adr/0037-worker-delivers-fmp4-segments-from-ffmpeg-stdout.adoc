@@ -73,6 +73,12 @@ A job attempt in a playback session with a positive applied audio delay delivers
 Whatever the delay, an attempt that starts at segment 0 delivers 2 s of encoded silence before the track's first sample.
 An attempt that delivers a track's last sample delivers encoded silence from that sample's end until at least 2 s past the presentation's end.
 
+NOTE: An amendment records that the pinned runtime carries the fix for upstream SVT-AV1 bug https://gitlab.com/AOMediaCodec/SVT-AV1/-/work_items/2385[#2385] (<<evidence-svt-av1-soak>>).
+Under ADR 0029 the worker pins the FFmpeg 8.1.3-2 build.
+That build's SVT-AV1 is release 4.3.0 (commit `e3d63405`), and release 4.3.0 contains the fix, commit `ae2658e5`.
+The smoke test of more than 1000 segments now runs SVT-AV1 at the worker's production threading (https://github.com/streamarr/streamarr-transcode-worker/pull/161[streamarr/streamarr-transcode-worker#161]).
+The stall watchdog and the short-sample rule stay, because both rules cover every encoder.
+
 == Context
 
 This section describes the system before the changes required by this decision.
@@ -536,9 +542,9 @@ The mp4 muxer marks the CRA picture as a sync sample in both cases.
 libx264 and SVT-AV1 are keyframe-verified.
 `h264_videotoolbox` and `hevc_videotoolbox` are keyframe-verified with B-frames off.
 With B-frames on, neither encoder is keyframe-verified.
-SVT-AV1 stays keyframe-verified despite upstream bug https://gitlab.com/AOMediaCodec/SVT-AV1/-/work_items/2385[#2385] in the pinned runtime (worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/42[#42]), because that bug stalls or reorders output rather than dropping a forced keyframe.
-The stall watchdog of the <<decision-waits,four waits>> and the short-sample rule for <<decision-untrusted-output,untrusted output>> fail each affected attempt so that the server can replace it under ADR 0019.
-Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/42[#42] will update the selected runtime to a version that includes the fix.
+Upstream SVT-AV1 bug https://gitlab.com/AOMediaCodec/SVT-AV1/-/work_items/2385[#2385] stalled or reordered SVT-AV1's output, but the bug never dropped a forced keyframe (worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/42[#42]).
+The pinned runtime's SVT-AV1, release 4.3.0, contains the fix for that bug.
+The stall watchdog of the <<decision-waits,four waits>> and the short-sample rule for <<decision-untrusted-output,untrusted output>> still fail any attempt whose encoder stalls or reorders its output, so that the server can replace the attempt under ADR 0019.
 libx265 is not keyframe-verified.
 Under its default open GOP, its forced keyframes are CRA pictures.
 When a recording suppressed a forced keyframe, libx265's GOP placed a CRA picture that was followed by a RASL picture.
@@ -1190,7 +1196,7 @@ The HLS muxer's cuts are a comparison, not the reference.
 CI reads the committed recordings, derives their expected results without running FFmpeg, and fails when a recorded expectation disagrees with the results derived from the bytes.
 Smoke and image tests run real FFmpeg.
 A smoke test runs more than 1000 one-second segments through each software encoder to show that no interval is ever skipped.
-It runs SVT-AV1 at a parallelism of one so that upstream bug https://gitlab.com/AOMediaCodec/SVT-AV1/-/work_items/2385[#2385] cannot fail it.
+It runs SVT-AV1 at the worker's production threading, because the pinned runtime's SVT-AV1 contains the fix for upstream bug https://gitlab.com/AOMediaCodec/SVT-AV1/-/work_items/2385[#2385] (https://github.com/streamarr/streamarr-transcode-worker/pull/161[streamarr/streamarr-transcode-worker#161]).
 The server's scripted FFmpeg test fixture writes a recorded fMP4 stream to standard output instead of writing segment files.
 
 *Why:* The HLS muxer measures from the run's first packet, not from zero.
@@ -1305,8 +1311,6 @@ A source, sample rate or encoder that left a longer gap could again stall Chromi
 fMP4 reaches Media Source Extensions without the MPEG-TS remux that hid those gaps.
 * Encode with the VAAPI, QSV, AMF and RKMPP hardware encoders, and decode in hardware on Intel and AMD GPUs through QSV and VAAPI (https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14]).
 These backends wait until hardware exists to verify them.
-* Adopt a runtime whose SVT-AV1 fixes upstream bug https://gitlab.com/AOMediaCodec/SVT-AV1/-/work_items/2385[#2385] (worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/42[#42]).
-The worker takes FFmpeg as a pinned prebuilt release under ADR 0029, and no SVT-AV1 release contains commit `ae2658e5` yet.
 * Check whether different FFmpeg builds produce byte-identical inits.
 The init carries the muxer's version string, so a stream session that outlives a worker image upgrade could receive a replacement attempt whose init differs from the one the server serves.
 The measurements did not cover a stream session that spans a worker image upgrade.
@@ -1411,9 +1415,10 @@ It also gains the segment list's starts, `TranscodeExecution.segment_start_slots
 For streams that end early, it gains the instructions to hold the last picture and to pad the audio, the advertised end, and the reports of each stream's end and of a source that ended early (https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511]).
 The server still handles requests for advertised segments that the worker did not produce, under ADR 0019.
 * An FFmpeg command line carries its keyframe times in one argument, up to Linux's per-argument limit, and FFmpeg parses that argument in no measurable time.
-* SVT-AV1 attempts in the pinned runtime still fail under CPU contention, as the study found.
+* SVT-AV1 attempts in the runtime that the study pinned failed under CPU contention.
+The pinned runtime's SVT-AV1 4.3.0 contains the fix, and a soak under CPU contention found no failure (<<evidence-svt-av1-soak>>).
 The stall watchdog and the short-sample rule turn a hung FFmpeg or undecodable segments into a failed attempt that ADR 0019 replaces.
-Both rules stay after the runtime update tracked by worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/42[#42], because they cover every encoder.
+Both rules stay after the runtime update of worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/42[#42], because they cover every encoder.
 * When a media file outlasts its list and a keyframe-verified encoder's attempt fails with `SKIPPED_SEGMENT_NUMBER`, the replacement attempt starts a new list at the skipped segment's start.
 Its first segment repeats about one period of media that the last drifted segment already held.
 ADR 0019's recovery cannot withdraw that repeat once the server has published it.
@@ -1904,10 +1909,10 @@ The attempt's Dolby Vision copy then held back that GOP, and its first fragment 
 * In every run whose packets left the encoder in order, every forced keyframe was a shown AV1 key frame, a sync sample and a fragment start.
 * In those runs, under the extended GOP, no other keyframe appeared.
 * The runtime pinned during these runs, FFmpeg 8.1.2 with SVT-AV1 4.1.0 (ADR 0029), carried upstream SVT-AV1 bug https://gitlab.com/AOMediaCodec/SVT-AV1/-/work_items/2385[AOMediaCodec/SVT-AV1#2385].
-* The current pin, the FFmpeg 8.1.3-1 build with SVT-AV1 4.2.0, still carries the bug.
+* The FFmpeg 8.1.3-1 build with SVT-AV1 4.2.0, which the worker pinned later, still carried the bug.
 * When the encoder's oldest picture is slow, a later picture overwrites its slot in the packetization reorder queue, and the encoder runs out of output buffers.
 * SVT-AV1 4.0.x, 4.1.0 and 4.2.0 all have the bug.
-* Its fix, commit `ae2658e5`, is on SVT-AV1's master branch and in no release.
+* The fix is commit `ae2658e5`, and SVT-AV1 release 4.3.0 contains the fix.
 * In interleaved runs under load, the fix took 4.0.1 from 13 failures in 40 to none.
 * Under production threading the pinned image failed 10 of 740 runs.
 * All 10 failures came among the 420 runs under CPU contention, and none among the 320 without it.
@@ -1927,6 +1932,25 @@ Both `q` and SIGTERM end FFmpeg's main loop, but the main loop then waits for th
 * Of the encoder parameters the study ran, only `-svtav1-params lp=1` avoided the bug, in 90 runs without a failure.
 * `lp=1` encodes 1080p at 0.78 times real time, too slow to stream.
 * The study ran no other thread count, scene-change detection, lookahead, pinning or prediction structure.
+
+[[evidence-svt-av1-soak]]
+=== SVT-AV1 soak with the fix
+
+* A soak on 2026-11-05 ran the study's recipe and its four contended configurations through the pinned worker image.
+* That image carries the FFmpeg 8.1.3-2 build with SVT-AV1 4.3.0 (commit `e3d63405`).
+* The source was the study's synthetic test pattern of 1003 s at 64×36 and 24000/1001 fps.
+* The soak ran on a 32-core x86 build host.
+* Six encoder containers and a contention generator shared 12 CPUs, and each encoder container had a quota of 2 CPUs.
+* Each container showed SVT-AV1 ten online CPUs, as the study's host had.
+SVT-AV1 then chose a level of parallelism of 4 with 74 picture control sets, as in the study.
+* No run set `lp`.
+* A run failed on a hang, a non-zero exit, a non-monotonic decode time, a video sample other than one frame, a forced keyframe that was not a sync sample, or a dav1d decode error.
+* A control round ran the same soak with the study's runtime, SVT-AV1 4.1.0.
+It failed 10 of 1005 runs (1.0 %).
+Six of those failures were hangs that ignored SIGTERM.
+* The pinned runtime failed 0 of 7037 runs, so the failure rate is at most 0.052 % at 95 % confidence.
+* When SVT-AV1 sized its threads for all 32 CPUs, it chose a level of parallelism of 6 with 272 picture control sets.
+At that level, SVT-AV1 4.1.0 failed 0 of 113 runs, so that level cannot show whether the fix works.
 
 [[evidence-players]]
 === Real-player checks
@@ -2172,7 +2196,7 @@ The recorded fixtures repeat floored-GOP and suppressed-keyframe cases under the
 * https://github.com/FFmpeg/FFmpeg/blob/n8.1/fftools/ffmpeg_mux_init.c#L3175-L3299[`ffmpeg_mux_init.c`: parsing the list and choosing the mode]
 * Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/43[#43], which records that SVT-AV1's `av1C` sequence header differs from the one in its stream, and proposes rewriting it from the stream.
 * Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/42[#42], which records the SVT-AV1 study.
-* https://gitlab.com/AOMediaCodec/SVT-AV1/-/work_items/2385[SVT-AV1 issue #2385: the packetization reorder queue overruns and the output buffers run out], fixed by commit `ae2658e5` (merge request !2765) on SVT-AV1's master branch.
+* https://gitlab.com/AOMediaCodec/SVT-AV1/-/work_items/2385[SVT-AV1 issue #2385: the packetization reorder queue overruns and the output buffers run out], fixed by commit `ae2658e5` (merge request !2765), which SVT-AV1 release 4.3.0 contains.
 * https://github.com/FFmpeg/FFmpeg/blob/n8.1/fftools/ffmpeg.c#L147-L160[FFmpeg n8.1 `ffmpeg.c`: the signal handler counts signals and exits only on the fourth] and https://github.com/FFmpeg/FFmpeg/blob/n8.1/fftools/ffmpeg.c#L906-L921[its main loop ends on a signal or `q` and then stops the scheduler]
 * https://github.com/FFmpeg/FFmpeg/blob/n8.1/fftools/ffmpeg_sched.c#L2699-L2716[`ffmpeg_sched.c`: stopping joins every thread] and https://github.com/FFmpeg/FFmpeg/blob/n8.1/fftools/ffmpeg_mux.c#L177-L199[`ffmpeg_mux.c`: a non-monotonic decode time becomes the previous one plus one]
 * https://developer.apple.com/documentation/http-live-streaming/hls-authoring-specification-for-apple-devices/[Apple HLS authoring specification: container requirements per codec]

@@ -576,6 +576,7 @@ _Avoid_: disk coordinates, file path, TMDB numbers (the numbers that TMDB uses f
 The way TMDB arranges a series' episodes into seasons.
 It is TMDB's default order or one of the series' episode groups.
 A ServerAdmin chooses each series' episode ordering in each library, and Streamarr never chooses it (ADR 0047).
+Under an episode group, each section that holds a regular episode is the library's season item, and specials stay in Specials with their TMDB default-order season 0 numbers.
 _Avoid_: display order, sort order, episode order (unqualified)
 
 **Numbering correction**:
@@ -588,6 +589,11 @@ _Avoid_: metadata edit (a value on the catalog entry), override (reserved for ad
 A ServerAdmin's last-resort link from one file to one TMDB episode, for a file that its parsed episode numbers can't place.
 A rename or a replacement of the file loses the link (ADR 0047).
 _Avoid_: numbering correction, fix match (moving an item to another catalog entry), pin
+
+**Numbering review**:
+A library's list of the series that Streamarr marked for a ServerAdmin to review, each with its reasons, such as a better-fitting episode ordering or a broken numbering correction (ADR 0047).
+The ServerAdmin triages each reason, for example by re-pointing or removing a broken numbering correction.
+_Avoid_: inbox, alerts, problems (unqualified)
 
 ### Watch state
 
@@ -619,7 +625,7 @@ _Avoid_: completed attempt (a job attempt that completes), play, view
 
 **Manual mark**:
 A `markWatched` or `markUnwatched` that a Profile applies to an item.
-A manual mark records that item as the mark's source (ADR 0039).
+A manual mark records that item as the mark's source, and records the item's media file only when the item holds exactly one media file (ADR 0039).
 A manual mark on a season or series applies to each episode.
 `markUnwatched` also clears the resume positions that the mark covers.
 _Avoid_: toggle, override (reserved for administrative overrides in ADR 0024)

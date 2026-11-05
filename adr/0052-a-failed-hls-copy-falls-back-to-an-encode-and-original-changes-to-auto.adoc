@@ -19,6 +19,11 @@ NOTE: link:0055-a-viewers-audio-delay-is-a-playback-session-parameter-and-the-se
 Original then skips direct play whenever one capability entry accepts an HLS copy that can apply the delay.
 Every format attempt keeps the audio delay and the audio sync correction, and a change of either spends no format attempt.
 
+NOTE: A playback session can start at a start position (<<decision-start-position>>).
+Each format attempt starts at the start position until the player reports that playback moved from it.
+This amends link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]'s first job attempt, which starts at the start segment instead of segment 0.
+It also amends link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045]: a direct-play stream session carries the start position, and the client seeks the file there.
+
 == Context
 
 The viewer picks a playback choice when a stream session starts.
@@ -334,6 +339,48 @@ Epic streamarr/streamarr-server#399 already starts fresh when the viewer reopens
 A pick that skipped every failed output would send the viewer straight back to Auto and to the same notice.
 A pick that spent a format attempt could end playback with the typed terminal error, although the viewer only asked to try again.
 
+[[decision-start-position]]
+=== A playback session can start at a start position
+
+The start position is where the viewer wants playback to begin, in seconds from the start of the media.
+A client usually sends the viewer's resume position as the start position.
+The client sends the start position when it creates the playback session, as `startPositionSeconds` in the input of `createPlaybackSession`.
+The start position is optional.
+Without a start position, playback starts at the beginning of the media, as before.
+
+The server accepts a start position of 0 or more that lies before the end of the probed media.
+The server refuses every other start position with the typed error `StartPositionOutOfRangeError` (link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026]).
+The server refuses a negative start position before it reads the media file.
+
+An HLS stream session starts at the start segment.
+The start segment is the media segment that holds the start position on the stream session's own segment timeline.
+For a copy, each segment opens at its keyframe (ADR 0037), so a start position just before that keyframe lies in the segment before it.
+For an encode, the start segment comes from the plain segment grid.
+The first-listed variant's first job attempt starts at the start segment, and no job attempt starts at segment 0 (ADR 0019).
+The multivariant playlist marks the start position with `EXT-X-START`, with `TIME-OFFSET` set to the start position and `PRECISE=YES`.
+RFC 8216bis section 4.4.2.2 lets a multivariant playlist carry the tag.
+A tag in the multivariant playlist should not appear in the media playlists that it lists, so no media playlist repeats the tag.
+With `PRECISE=YES`, the player starts in the segment that holds the start position and renders no sample that presents before it.
+
+A direct-play stream session carries the start position, and the server returns the start position with the stream session.
+The client seeks the source file to the start position.
+The server serves the same byte ranges as before.
+
+The start position belongs to the playback session.
+Every later format attempt starts at the start position too, until the player reports a playback position for a ready format attempt in a whole second other than the start position's second.
+After that report, the next format attempt starts at the beginning of the media, as before, and the client seeks the new stream session itself.
+A format attempt that fails before the player reports a position keeps the start position.
+Every stream session returns its own start position as `startPositionSeconds`.
+
+*Why:* Before this decision, a resumed title started its first job attempt at segment 0.
+The player fetched segment 0, and then the client seeked to the resume position.
+The server stopped the job attempt at segment 0 and started another at the resume segment.
+Every resumed title paid for one wasted job attempt, one relocation and the delay of both.
+A start position lets the first job attempt start where the viewer resumes.
+The playlist tag tells the player where to begin, so the player requests the start segment first.
+A replacement that keeps the start position avoids the same waste after a format error during startup.
+A replacement after the player has moved does not keep the start position, because the start position no longer describes where the viewer is.
+
 == Consequences
 
 * In Original, a refused HLS copy no longer ends playback under the default budget.
@@ -364,6 +411,9 @@ The player never reaches the advertised end, so the client must stop it there.
 * A copied variant that runs short while some source stream still has media is detected near the real end of the source.
 In Original and in a fixed quality, the viewer then sees the notice near the end, and the encode pads to the advertised end (ADR 0037).
 * After the fallback, the viewer's limits bound the stream, because Auto honors them (ADR 0050).
+* A resumed title starts its first job attempt at the start segment, so the server no longer encodes or copies segment 0 for a viewer who resumes.
+* A client that sends a start position must not seek an HLS stream session to the same position again, or the player can request a segment that lies before the start segment and cause a relocation.
+* A replacement after the player moved starts at the beginning of the media, so the client must seek that replacement to the viewer's position.
 * The server's answer when a stream session starts, and its answer to a format failure, must carry the playback choice that plays, so that the client can show the notice and Auto.
 In a fixed quality, the answer must also tell the client that an encode replaced a failed copy, so that the client can show the notice.
 The answer must also carry the encode's dynamic range, so that the client's HDR toggle shows SDR after an SDR fallback.
@@ -404,6 +454,15 @@ The copy with Dolby Vision stripped keeps the source's pixels and HDR base.
 * Skipping the HLS copy after a failed direct play, so that a budget of two reaches the encode, would give up the source's own video whenever only direct play fails.
 The HLS copy still plays the source's own video, and it can play where direct play cannot, for example when the player refuses the source container.
 
+* Leaving the start to the client, the earlier behavior, starts every resumed title with a wasted job attempt at segment 0 and a relocation.
+* Marking the start in every media playlist instead of the multivariant playlist would repeat the same tag in each media playlist.
+RFC 8216bis section 4.4.2.2 prefers one tag in the multivariant playlist, and AVPlayer and hls.js 1.6 both read the tag there.
+* Marking the start with `PRECISE=NO` would play the media from the start of the start segment, up to one segment before the start position.
+* Starting a replacement at the latest reported playback position would follow a position that the player reports only in whole seconds and only from time to time.
+The client knows the viewer's exact position and seeks the replacement itself.
+* Changing the byte ranges of a direct-play stream session would change the source file that the player reads.
+The player seeks within the file on its own.
+
 == References
 
 * link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045: In Original Quality, a Client Direct-Plays Each File Its Capability Declaration Covers, and Each Client Uses Its Platform's Own Player]
@@ -413,9 +472,11 @@ The HLS copy still plays the source's own video, and it can play where direct pl
 * link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019: Recoverable Just-In-Time HLS Segment Delivery]
 * link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036: Video Contracts Share One Vocabulary and Preserve Dynamic-Range Facts]
 * link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037: The Worker Delivers Fragmented MP4 Segments From FFmpeg's Standard Output, and HLS Media Segments Are fMP4 Only]
+* link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026: Mutations Return Payloads Whose Expected Errors Are Typed Unions; Top-Level Errors Carry Failure]
 * link:0042-graphql-subscriptions-run-over-websocket-until-token-expiry.adoc[ADR 0042: GraphQL Subscriptions Keep Queried Screens Current over WebSocket until Token Expiry]
 * https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399] is the playback capabilities epic.
 * https://github.com/streamarr/streamarr-server/issues/401[streamarr/streamarr-server#401] adds format recovery and the format-attempt budget.
+* https://datatracker.ietf.org/doc/html/draft-pantos-hls-rfc8216bis[RFC 8216bis] section 4.4.2.2 defines `EXT-X-START`.
 * https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511] treats a copied variant that runs short as a format error.
 * https://github.com/streamarr/streamarr-server/issues/651[streamarr/streamarr-server#651] converts Dolby Vision profile 7 to profile 8.1 during a copy.
 * https://github.com/streamarr/streamarr-web/issues/29[streamarr/streamarr-web#29] adds the web client's quality control and format recovery.

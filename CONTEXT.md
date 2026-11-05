@@ -636,6 +636,10 @@ A resume position counts only when Streamarr saved the resume position after the
 The GraphQL field `watchProgress` returns the resume position.
 _Avoid_: watch progress (in prose), bookmark, playback position
 
+**Start position**:
+Where a playback session begins, in seconds from the start of the media. A client usually sends the resume position as the start position. Each format attempt starts at the start position until the player reports that playback moved from it. An HLS stream session starts its first job attempt at the start segment, the media segment that holds the start position, and its multivariant playlist marks the start position with `EXT-X-START` (ADR 0052).
+_Avoid_: resume position (the Profile's saved position, which a client may send as the start position), seek position (a job attempt's source seek), offset
+
 **Completion**:
 A watch-history entry that says a Profile watched an item.
 Playback that finishes creates a completion, and so does `markWatched`.

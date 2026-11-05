@@ -29,6 +29,7 @@ The web client direct-plays MP4 and WebM files in the browser's own video elemen
 A third amendment, for https://github.com/streamarr/streamarr-server/pull/745[streamarr/streamarr-server#745], settles how a ServerAdmin sees the soft links that a scan skips.
 The scan stores each one as a skipped file, not as an item result (<<decision-no-soft-links>>).
 `addLibrary` refuses a library folder that sits below a soft link.
+Every library operation's library folder check fails when a soft link leads to the library folder, so a soft link placed above the library folder later stops the next scan or refresh.
 
 NOTE: link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052] adds further fallbacks in Original.
 After a format error during the HLS copy, the server falls back to an encode, and the playback choice changes to Auto.
@@ -161,7 +162,7 @@ The server then serves every byte of the response from that open file.
 The server never opens the file again by its name.
 The worker refuses a soft link before it starts FFmpeg, and a sandbox keeps FFmpeg inside the media root (link:0033-transcode-worker-is-a-separate-service.adoc#decision-ffmpeg-sandbox[ADR 0033]).
 
-The library scan skips every soft link below the library folder, and the library folder itself when it is a soft link.
+The library scan skips every soft link below the library folder.
 A soft link to a file, a soft link to a folder and a broken soft link are all skipped.
 The scan never descends into a soft-linked folder.
 
@@ -191,6 +192,11 @@ A file that a hard link names scans and plays like any other file.
 The payload returns a typed error (link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026]).
 The error tells the ServerAdmin that the path passes through a soft link and to mount the real folder instead, for example with a bind mount.
 
+The library folder check (link:0038-scans-remove-media-only-when-files-are-confirmed-missing.adoc#library-folder-check[ADR 0038]) fails with a soft-link reason when the library folder, or any folder between the media root and the library folder, is a soft link.
+The check reads each folder by its current name at the start of every scan, refresh and removal of items with missing files (link:0027-library-operations-are-durable-jobs.adoc#library-folder-check[ADR 0027]).
+A soft link placed above the library folder after `addLibrary` therefore fails the next library operation.
+That operation walks no folder, fetches no metadata and removes nothing, and the library turns `UNHEALTHY`.
+
 *Why:* A check of a path by its name, followed by an open by the same name, leaves a window between the two.
 In that window, anyone who can write to the library can swap a folder or the file for a soft link to a file outside the media root.
 The server would then serve that file to a viewer.
@@ -203,7 +209,8 @@ An item result is the outcome of a step for a subject that a library operation p
 A soft link never becomes a media file, so it has no step and no item result.
 A linked name that the ignore rules drop still matters: a linked subtitle file will matter once the scan reads subtitle files beside a video.
 A library whose folder sits below a soft link would scan, and playback would then refuse every one of its files.
-Refusing that folder in `addLibrary` reports the problem once, before any scan.
+Refusing that folder in `addLibrary` reports the problem before any scan.
+The library folder check reports a soft link that appears later, so the library shows `UNHEALTHY` and the ServerAdmin learns why its files no longer play.
 
 [[decision-metrics]]
 === The server reports open direct-play responses, the bytes that they serve and their answers
@@ -443,8 +450,8 @@ The web client declares `MATROSKA` for WebM, so a browser that opens WebM but re
 The ServerAdmin must mount the real folders instead, for example with a bind mount.
 * A ServerAdmin sees only the soft links that the latest walk skipped.
 A soft link removed since then leaves the list at the next scan.
-* `addLibrary` checks the path above the library folder only once.
-A soft link placed above the library folder after the library is added does not stop a scan, and playback answers `404 Not Found` for that library's files.
+* A soft link placed above the library folder after the library is added fails every later library operation of that library with a soft-link reason, and the library stays `UNHEALTHY` until the ServerAdmin mounts the real folder.
+Playback answers `404 Not Found` for that library's files from the moment the soft link appears, before any library operation reports it.
 * Adding a library that sits below a soft link fails until the ServerAdmin mounts the real folder.
 
 == Rejected Alternatives

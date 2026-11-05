@@ -52,7 +52,7 @@ NOTE: An amendment replaces the segment list's whole slots with exact segment st
 Each job attempt of a stream session with a copied variant carries every segment's start in ticks of the source video stream's time base.
 In every variant of that stream session, segment N then starts at the presentation time of the source keyframe that opens copied segment N.
 Each encoded variant forces its keyframe on the first output frame at or after that start, so an encoded segment starts less than one output frame after the copied segment with the same number.
-Consecutive starts lie at least 100 ms apart, so every encoded variant has a frame in every segment.
+Consecutive starts lie at least 1 s apart, so every segment holds a frame of every encoded variant and a sample of every audio track.
 A copy places each keyframe at its stored tick only when the copy's timeline matches the probe's, so the server refuses a stream copy whose timeline may differ (<<decision-segment-list>>).
 A stream session without a copied variant keeps the plain 3 s grid and sends no list.
 
@@ -351,10 +351,13 @@ A stream copy advertises each segment's real duration.
 A copied segment opens at the first source keyframe in its first slot, and segment 0 also holds the media before its keyframe.
 In that segment list, segment 0 starts at zero, and every later segment starts at the presentation time of the source keyframe that opens it.
 A segment's start is therefore exact, and is not the start of its first slot.
-A slot opens a segment at its first keyframe that presents at least 100 ms after the start of the segment before it.
+A slot opens a segment at its first keyframe that presents at least 1 s after the start of the segment before it.
 A slot without such a keyframe merges into the segment before it.
-100 ms is one frame at 10 frames per second, the slowest rate that the frame-rate rule chooses (<<decision-frame-rate>>).
+1 s is longer than one frame at 10 frames per second, the slowest rate that the frame-rate rule chooses (<<decision-frame-rate>>).
 Every interval therefore holds at least one output frame of every encoded variant, and no forced keyframe falls in the next segment.
+1 s is also longer than one audio frame of every codec that Streamarr encodes.
+1 s is longer than one frame of the copied audio that common sources carry, too: AAC, AC-3, E-AC-3, DTS, Opus, MP3, ALAC with its default frame length, and FLAC within its streamable subset.
+Every interval therefore holds at least one sample start of each such audio track.
 The stream session's encoded variants force their keyframes at the segment list's starts.
 An encoded variant's forced keyframe is the first output frame that presents at or after a segment's start.
 An encoded segment therefore starts less than one output frame after the copied segment with the same number.
@@ -415,8 +418,11 @@ An MPEG-TS tick is 1/90000 s, and an AVI time base such as 1001/24000 gives fram
 A rounded start would need one rounding rule that both repositories match.
 A start rounded past its keyframe would also move that keyframe into the segment before it.
 
-*Why 100 ms and a matching timeline:* With source keyframes at 5.986 s and 6 s in adjacent slots, a 24 frames-per-second encode has no frame in the interval from 5.986 s to 6 s.
+*Why 1 s and a matching timeline:* With source keyframes at 5.986 s and 6 s in adjacent slots, a 24 frames-per-second encode has no frame in the interval from 5.986 s to 6 s.
 A check with FFmpeg 8.0.1 forced the frame at 6 s for both starts, so the encode skipped a segment number.
+A copied FLAC track at 44.1 kHz with 4,608-sample frames has frames that last 104 ms.
+In a check with FFmpeg 8.0.1, starts at 5.96 s and 6.06 s left that track with no sample start between them, so its segment would carry no audio.
+A segment without a track's samples fails to append in Media Source Extensions.
 Without the start time correction, a second audio track that started 154 ms before the first moved media time zero by 154 ms (<<evidence-timeline>>).
 A copy then places every keyframe 154 ms away from its stored tick.
 A keyframe that lands before its exact start joins the segment before it, so the copy skips a segment number.
@@ -1335,6 +1341,8 @@ Worker PR https://github.com/streamarr/streamarr-transcode-worker/pull/38[stream
 [[explicitly-deferred]]
 === Explicitly deferred
 
+* Keep a copied audio track whose frames last 1 s or longer, such as FLAC outside its streamable subset, from leaving a segment of an exact list without that track's samples.
+The 1 s spacing of exact starts covers the copied audio that common sources carry, and no guard covers longer frames yet.
 * Keep a copy whose video's end the server does not yet know from taking in the audio tail.
 The slots after such a copy's last keyframe merge into its last segment, which then holds every audio sample after the video's end, up to the segment cap.
 The attempt reports the video's end, and the server stores it, so the next stream session for the file encodes the video and holds its last picture.
@@ -1390,7 +1398,7 @@ A player that switches variants at a segment boundary repeats or skips less than
 A two-hour source at 3 s slots has at most 2,400 segments, and each tick count takes at most 10 bytes, so the list stays under 24 KB.
 * A stream session without a copied variant keeps the plain grid, and its job attempts carry no list.
 * An MPEG-TS, MPEG-PS or Ogg source whose probe outcome carries no start time correction encodes instead of copying.
-* A slot whose keyframes all present less than 100 ms after the start of the segment before it merges into that segment.
+* A slot whose keyframes all present less than 1 s after the start of the segment before it merges into that segment.
 * A stream-copy replacement attempt now starts on the advertised segment boundary, because the producer discards the preroll fragment.
 Its audio starts with the first sample at or after the boundary, so it no longer repeats audio that the previous segment holds.
 From an MPEG-TS source that repeat had been ten AAC frames, and Chromium dropped 7 video frames at the junction.
@@ -1507,6 +1515,8 @@ A switch between the copy and an encoded variant then repeats or skips up to one
 * Listing exact starts for a stream session without a copied variant: the plain grid already starts segment `N` at exactly `N × 3 s`.
 A 3 s step is also not a whole number of ticks in a time base such as 1001/24000.
 * Letting two starts lie closer than one output frame: an encode then has no frame in that interval and skips the segment number.
+* Spacing starts by one frame at 10 frames per second (100 ms): a copied audio track with longer frames, such as FLAC at 44.1 kHz with 4,608-sample frames, can leave a segment without audio.
+* Spacing starts by one whole slot: keyframes every 2.5 s would then merge into 5 s segments, which an aligned list does not need.
 * Keeping a slack for a copy whose timeline may differ from the probe's: a keyframe that lands before its exact start joins the segment before it, so no slack keeps the copy's segments on the list.
 * Counting copies against the slots' segment memory budget: copies that take no slot could fill it with unfinished segments and starve the encodes.
 * A fixed number of copies, or a setting for it: the memory that a worker can give copies depends on its container's limit, which the worker already knows.

@@ -102,6 +102,12 @@ That build's SVT-AV1 is release 4.3.0 (commit `e3d63405`), and release 4.3.0 con
 The smoke test of more than 1000 segments now runs SVT-AV1 at the worker's production threading (https://github.com/streamarr/streamarr-transcode-worker/pull/161[streamarr/streamarr-transcode-worker#161]).
 The stall watchdog and the short-sample rule stay, because both rules cover every encoder.
 
+NOTE: An amendment makes the worker queue its segment uploads at the server's per-worker upload limit (<<decision-upload-queue>>).
+The server states that limit, 8 calls, in `WorkerSessionAccepted.segment_upload_limit`, and a limit of 0 or an absent field means no limit.
+A queued segment still counts against the producer's and the worker's memory budgets, and its wait ends at the upload acknowledgment timeout or on a stop or a lost worker session.
+The server marks a refusal at the per-worker limit with `SegmentUploadLimitReached`, and the worker queues that segment again.
+A refusal at the server's fleet-wide limits carries no marker and still fails the job attempt.
+
 == Context
 
 This section describes the system before the changes required by this decision.
@@ -1017,6 +1023,60 @@ For the tracks it publishes, the importer publishes every fragment or fails.
 Only its live consumer skips a stale or missing group.
 Evidence: <<evidence-channel>>.
 
+[[decision-upload-queue]]
+=== The worker queues segment uploads at the server's per-worker upload limit
+
+The server accepts at most 8 concurrent `UploadSegment` calls from one worker, the per-worker upload limit.
+Its fleet-wide limits accept at most 32 calls from all workers together, and at most 512 MiB of declared segment lengths across the calls that it holds.
+When the server accepts a worker session, it states the per-worker limit in `WorkerSessionAccepted.segment_upload_limit`.
+The server sets that field from the constant that its own admission enforces, so the stated limit and the enforced limit cannot differ.
+A limit of 0 means no limit, and a server that does not set the field sends 0.
+Under no limit, the worker opens a call for every segment that is ready to upload, as it did before this amendment.
+
+Under a limit, the worker keeps at most that many upload calls open.
+A segment that becomes ready while all of them are open joins a first-come queue and waits until one of the worker's calls ends, whether that call succeeded or failed.
+Segments leave the queue in the order in which they became ready, so no producer waits while later segments go ahead.
+A producer hands over a closed segment only once the server has acknowledged the previous one, so the queue holds at most one segment of each producer.
+A queued segment is still the producer's upload in flight.
+Its bytes stay counted against the producer's budget and against the worker-wide budget, of the encodes or of the copies, that the producer counts against (<<decision-memory>>).
+While the segment waits, the reader may wait for room, as it does while an upload is in flight.
+The wait ends at the upload acknowledgment timeout, counted from when the segment first waits for a call.
+When that timeout expires before the segment's call opens, the worker fails the job attempt with `JOB_ATTEMPT_FAILURE_TRANSCODE_FAILED`, as it does for a failed upload, and ADR 0019's recovery handles that failure.
+A stop of the job attempt ends the wait at once without opening a call, and the attempt then stops as a stop decides.
+The end of the worker session ends the wait in the same way.
+The worker reports how many segments wait for a call with the `streamarr.worker.queued_segment_uploads` gauge, so that an operator can see when the per-worker limit holds a worker back.
+
+A canceled upload frees its place in the worker's count at once, but the server frees that place only when it finishes with the call.
+For a segment whose bytes have all arrived, that is after the server has stored the segment.
+In that window the server can refuse a call that the worker opened for a queued segment, although the worker counts fewer open calls than the limit.
+The server checks the per-worker limit before the fleet-wide limits.
+When the per-worker limit refuses a call, the server ends the call with `RESOURCE_EXHAUSTED` and attaches a `SegmentUploadLimitReached` message packed in a `google.rpc.Status` detail, which gRPC sends in the `grpc-status-details-bin` trailer.
+The message has no fields, because its presence is the marker.
+The server refuses that call before it reads any of the call's messages, so it holds no byte of the segment.
+On a refusal that carries the marker, the worker queues that segment again, ahead of every segment that joined the queue after it.
+The worker cannot observe when the server finishes storing a canceled upload, but the end of one of its own calls can free a place on the server.
+So when one of the worker's calls that holds a place ends, whether the server acknowledged its segment, the call failed or a stop canceled it, the worker ends the back-off of the earliest refused segment that still waits one out.
+That segment then opens its call as soon as its place in the queue and the worker's count of open calls allow.
+Each such end ends the back-off of a different refused segment, even when several calls end before a refused segment opens its call again.
+A call that the server refused at the per-worker limit is not such an end.
+Otherwise a refused segment opens its call again after a bounded back-off that the worker sets, so it still takes a place that the server frees while none of the worker's calls ends.
+The upload acknowledgment timeout, still counted from when the segment first waited, bounds the whole wait, so repeated refusals never extend it.
+A refusal at the fleet-wide limits carries no marker, and the worker fails the job attempt, as https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499] decides.
+Every other failure of an upload call also fails the job attempt, and ADR 0019's recovery handles each of these failures.
+A worker that reads neither the field nor the marker sees `RESOURCE_EXHAUSTED` on every refusal, as before this amendment, and fails the job attempt.
+
+The queue delays only a segment's first upload and its upload after a marked refusal, which holds no byte of the segment.
+Retrying an upload that failed after the server took its bytes stays deferred (<<explicitly-deferred>>).
+The field is named a limit, not a capacity, because the glossary reserves capacity for what a worker grants, and this limit is what the server accepts.
+
+*Why:* Without a fixed job count (https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499]), one worker can run more job attempts than the per-worker limit, so more segments than the limit can be ready at once.
+Before this amendment, every call beyond the limit failed its job attempt.
+A plain wake-up lets any waiter take a freed call, so under load one producer could wait until its timeout while other producers went ahead.
+A marked refusal means that the worker's own uploads hold the server's places, and the server frees one once it finishes with a call that the worker has already given up.
+The end of one of the worker's own calls is an event that the worker sees and that can free a place, so a refused segment opens its call again at that end instead of waiting out its back-off.
+The back-off stays for a place that the server frees later than the end that the worker sees, as it does for a canceled call.
+A fleet-wide refusal means that the calls of every worker together fill the server, and the refused worker cannot tell when another worker's call ends.
+
 === An attempt completes only when four facts hold
 
 An attempt completes only when four facts hold, in whatever order they arrive:
@@ -1218,6 +1278,7 @@ If FFmpeg has not exited when the stop's grace period expires, the worker sends 
 * A readiness wait fails the upload when the gRPC stream has not reported `isReady` within its bound.
 * For each upload, the worker starts the acknowledgment deadline when it sends the first byte.
 The upload fails if the server has not acknowledged the segment when that deadline expires.
+A segment that waits for a call under the server's per-worker upload limit waits at most the same timeout before its call opens (<<decision-upload-queue>>).
 * An exit wait starts once the pipe has ended and the server has acknowledged the last segment.
 FFmpeg must then exit within the stop's grace period.
 This wait watches the process, not the pipe.
@@ -1397,6 +1458,7 @@ A part's length stays unknown until the part ends, and ADR 0019 rejects LL-HLS b
 This ADR does not adopt MoQ, its transport or its live retention policy.
 * Retry uploads from the retained segment (worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/1[#1]).
 Until the worker supports these retries, a failed upload fails the attempt, and the server dispatches a replacement attempt within the budget ADR 0019 sets.
+A refusal at the server's per-worker upload limit is not a failed upload, because the server holds no byte of the segment, and the worker queues that segment again (<<decision-upload-queue>>).
 Once the worker supports retries, the producer retains the closed segment while it retries failed uploads with bounded back-off.
 The producer releases the segment after the server acknowledges it.
 The server must accept repeated uploads idempotently.
@@ -1542,6 +1604,12 @@ The producer does not align an encoded replacement attempt's AAC frames with the
 One server pull request switches the container, updates the worker image, replaces the scripted FFmpeg fixture, and records the player checks.
 * A stop can no longer end in a forced kill because the reader sat blocked in an upload.
 The producer must both drain the pipe and cancel the upload.
+* A worker can run more job attempts than the server accepts upload calls from it, and none of them fails only because more segments are ready than the per-worker limit (<<decision-upload-queue>>).
+The worker contract gains `WorkerSessionAccepted.segment_upload_limit` and the `SegmentUploadLimitReached` marker, and a worker that reads neither fails a job attempt on every refusal, as before.
+* While its segment waits for a call, a job attempt uploads no chunk, and its output stops advancing once the producer's budget is full.
+ADR 0019's stall threshold can therefore end a long wait before the upload acknowledgment timeout does, and the server then replaces the job attempt as stalled.
+* A segment refused in the window after a canceled upload opens its call again when another of the worker's calls ends or when its back-off expires.
+While none of the worker's calls ends, it can wait up to one back-off longer than it would if the server freed its place at the cancel.
 * A MoQ proof of concept needs `separate_moof`, a smaller fragmentation target and a publisher adapter, not a second producer.
 
 == Rejected Alternatives
@@ -1756,6 +1824,9 @@ The probe supplies only the start time correction, and FFmpeg still subtracts th
 * Giving job attempts the probe's read limits puts up to 1 GB of reading in front of every attempt.
 * Discarding each early stream with `-discard:N all` breaks a job attempt that maps that stream, such as a burn-in.
 * Exempting the upload wait from every bound, on the grounds that back-pressure is not a stall, leaves an attempt that a silent receiver can hold forever.
+* Freeing the server's place when the worker cancels an upload: the cancel reaches the server over the network, so the worker can open a queued segment's call before the server frees the place, and the change narrows the window in which the server refuses a queued segment without closing it.
+* Stating a lower per-worker limit than the server enforces: the canceled calls that the server still holds can outnumber the difference, so a refusal becomes rarer but can still fail a job attempt, and the server's unused places sit idle.
+* Queueing a segment again on every `RESOURCE_EXHAUSTED` refusal: it reverses the rule of https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499] that a refusal at the fleet-wide limits fails the job attempt, and a worker cannot tell when another worker's call frees a fleet-wide place.
 * Waiting indefinitely for FFmpeg to exit after its output ends lets a process that hangs after its last byte hold the attempt until a stop arrives.
 No other watchdog watches the process once the reader has finished reading the output.
 * Keeping MPEG-TS behind a worker capability flag changes nothing for the server, which would stop requesting MPEG-TS anyway, and both repositories would have to keep two container paths correct.
@@ -2299,6 +2370,9 @@ The Node recorder that made them (`src/test/fmp4-recorder`) runs in CI without F
 * Issue https://github.com/streamarr/streamarr-server/issues/512[streamarr/streamarr-server#512], which builds each stream session's segment list from 3 s slots and merges slots without a source keyframe.
 * Pull request https://github.com/streamarr/streamarr-server/pull/722[streamarr/streamarr-server#722], which publishes the instructions to hold the last picture and to pad the audio, the advertised end, and the reports of each stream's end and of a source that ended early.
 * Pull request https://github.com/streamarr/streamarr-server/pull/723[streamarr/streamarr-server#723], which publishes the job's segment list and states the segment cap as a contract constant.
+* Issue https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499], which keeps the server's upload limits and makes the worker queue its uploads at the per-worker limit.
+* Pull request https://github.com/streamarr/streamarr-server/pull/769[streamarr/streamarr-server#769], which publishes `segment_upload_limit` and the `SegmentUploadLimitReached` marker, and sends both.
+* Worker pull request https://github.com/streamarr/streamarr-transcode-worker/pull/158[streamarr/streamarr-transcode-worker#158], which queues the worker's uploads at the per-worker limit and adds the `streamarr.worker.queued_segment_uploads` gauge.
 * Worker pull request https://github.com/streamarr/streamarr-transcode-worker/pull/131[streamarr/streamarr-transcode-worker#131], whose smoke test pins the failure of an AC-3 or E-AC-3 attempt that starts after the audio's end.
 * Pull request https://github.com/streamarr/streamarr-server/pull/534[streamarr/streamarr-server#534], which advertises each stream copy segment's real duration and joins a final grid interval without a source keyframe to the segment before it.
 * Issue https://github.com/streamarr/streamarr-server/issues/446[streamarr/streamarr-server#446], which has the server refuse a stream session that would encode video without a usable frame rate.

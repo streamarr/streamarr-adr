@@ -1,0 +1,233 @@
+= ADR 0056: A Media Title's Profile-Dependent Fields Move under `selectedProfileState`, Which Is Null without a Selected Profile
+
+== Status
+
+Proposed
+
+== Context
+
+A media title is a movie, series, season or episode.
+In the GraphQL schema, `Movie`, `Episode`, `Season` and `Series` each carry fields whose values depend on the selected Profile.
+The selected Profile is the Profile that the session's access token names.
+The Profile-dependent fields sit beside the title's own facts, such as its title, runtime and artwork:
+
+* `watchStatus: WatchStatus!` on all four types.
+* `watchProgress: WatchProgress` on all four types.
+* `lastWatchedAt: String` on `Movie`, `Episode` and `Series`, but not on `Season`.
+* `languagePreference: LanguagePreference!` on all four types (link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043]).
+
+Each of these fields reads the selected Profile from the access token.
+Each field fails with `PROFILE_REQUIRED` when the token names no selected Profile.
+`watchStatus` and `languagePreference` are non-null, so a failure of either field makes the whole media title null in the response.
+
+Three problems follow from this shape.
+
+* A field name does not say that its value belongs to the selected Profile.
+  https://github.com/streamarr/streamarr-server/pull/758[streamarr/streamarr-server#758] lists each active stream for a ServerAdmin with a link to the media title that the stream plays.
+  A reader of `activeStreams { media { ... on Movie { watchStatus } } }` can take `watchStatus` for the watched status of the person who watches the stream.
+  The value belongs to the ServerAdmin's own selected Profile.
+* A ServerAdmin session often has no selected Profile.
+  In that session, a selection of `watchStatus` under an active stream's media makes the whole media title null and adds a `PROFILE_REQUIRED` error.
+  The title, runtime and artwork are lost although they need no Profile.
+* Every Profile-dependent field reads the selected Profile again and repeats the same check.
+  Each new Profile-dependent field adds another field that can null its title.
+
+The domain already treats these values as facts about a pair.
+Watch state belongs to the Profile and the catalog entry (link:0039-catalog-entries-hold-metadata-edits-and-user-data.adoc[ADR 0039]).
+A language override belongs to the Profile and the title (link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043]).
+Neither value is a fact of the media title alone.
+
+Streamarr has no production instances.
+The schema evolves in place, and the web and Apple clients move to the new contract in the same release.
+
+== Decision
+
+=== One field holds every Profile-dependent value
+
+`Movie`, `Episode`, `Season` and `Series` each gain one nullable field, `selectedProfileState: SelectedProfileState`.
+`selectedProfileState` holds every value of the media title that depends on the selected Profile.
+The four types lose `watchStatus`, `watchProgress`, `lastWatchedAt` and `languagePreference`.
+No Profile-dependent field stays on a media title beside `selectedProfileState`.
+A later Profile-dependent value of a media title, such as watchlist membership, also goes under `selectedProfileState`.
+
+The four parent types share one `SelectedProfileState` type and one `WatchState` type:
+
+[source,graphql]
+----
+type Movie implements BaseCollectable {
+    # ...the movie's own fields...
+    "The selected Profile's state of this movie. Null when the request has no selected Profile."
+    selectedProfileState: SelectedProfileState
+}
+
+type Episode {
+    # ...the episode's own fields...
+    "The selected Profile's state of this episode. Null when the request has no selected Profile."
+    selectedProfileState: SelectedProfileState
+}
+
+type Season {
+    # ...the season's own fields...
+    "The selected Profile's state of this season. Null when the request has no selected Profile."
+    selectedProfileState: SelectedProfileState
+}
+
+type Series implements BaseCollectable {
+    # ...the series' own fields...
+    "The selected Profile's state of this series. Null when the request has no selected Profile."
+    selectedProfileState: SelectedProfileState
+}
+
+"What one media title holds for the selected Profile (ADR 0056)."
+type SelectedProfileState {
+    "The selected Profile: the same object as Me.selectedProfile."
+    profile: SelectableProfile!
+    "The selected Profile's watch state of the media title."
+    watchState: WatchState!
+    "The language preferences of the selected Profile that apply here: the Profile's own, under its overrides (ADR 0043)."
+    languagePreference: LanguagePreference!
+}
+
+"One Profile's watch state of one media title."
+type WatchState {
+    "Whether the Profile watched the title. A season or a series takes its status from its episodes."
+    watchStatus: WatchStatus!
+    """
+    The resume position. A season or a series returns the most recently saved resume position among
+    its episodes. Null when no counted resume position applies.
+    """
+    watchProgress: WatchProgress
+    """
+    When the Profile last watched the title, as an ISO-8601 instant. A season or a series takes the
+    latest value among its episodes. Null when the Profile has not watched the title.
+    """
+    lastWatchedAt: String
+}
+----
+
+`WatchStatus`, `WatchProgress` and `LanguagePreference` keep their current fields and meanings.
+`WatchState` keeps the current field names `watchStatus`, `watchProgress` and `lastWatchedAt`.
+
+A season gains a last watched value.
+A season's last watched is the latest last watched among the season's episodes, by the rule that a series already follows.
+With that value, `WatchState` has the same three fields on all four media titles.
+
+`SelectedProfileState.profile` returns the `SelectableProfile` that `Me.selectedProfile` returns.
+A client cache therefore holds one record for the selected Profile.
+The `profile` field lets a reader see whose state a value holds.
+
+=== Without a selected Profile, the field is null
+
+`selectedProfileState` returns null without an error when the request has no selected Profile.
+The media title's own fields still resolve.
+No field under `selectedProfileState` fails with `PROFILE_REQUIRED`.
+
+`selectedProfileState` also returns null when a field under it fails to resolve.
+In that case, the response carries an error whose path starts at `selectedProfileState`.
+The media title keeps its own fields.
+A client tells the two cases apart by that error: a null with no error at its path means the request has no selected Profile.
+A client keeps its cached state for a null that comes with an error, and recovers as link:0042-graphql-subscriptions-run-over-websocket-until-token-expiry.adoc[ADR 0042] requires.
+
+This decision does not change who may reach a media title.
+`movie`, `series`, `season`, `episode`, `library`, `Library.items` and `continueWatching` keep their `PROFILE_REQUIRED` gate.
+A Profile's Content Ceiling decides what that Profile may see (link:0024-identity-authority-by-relationship.adoc[ADR 0024]), so those entry points still need a selected Profile.
+Today a media title appears without a selected Profile only under an active stream (https://github.com/streamarr/streamarr-server/pull/758[streamarr/streamarr-server#758]).
+
+=== The selected Profile comes only from the session
+
+`selectedProfileState` always describes the selected Profile of the request.
+No argument names a Profile, and no field returns another Profile's state.
+Under an active stream, `selectedProfileState` describes the caller's selected Profile, not the Profile that watches the stream.
+The authority stays the same as for the removed fields: the selected Profile that the signed access token names.
+ServerAdmin authority never widens `selectedProfileState`.
+
+=== The server reads the selected Profile once per media title
+
+The server reads the selected Profile when it resolves `selectedProfileState`.
+`selectedProfileState` carries the Profile's id to the fields under it.
+The fields under it do not read the access token again.
+Each field under `selectedProfileState` loads through a DataLoader whose key holds the Profile id and the media title's id.
+A page of media titles therefore costs one batched read for each value, as the removed fields cost.
+`selectedProfileState` itself needs no read.
+
+=== Filters and sorts keep their current inputs
+
+`MediaFilter.watchStatus` and the `LAST_WATCHED` value of `OrderMediaBy` keep their current names and places.
+`Library.items` and `LibraryItemChange.edge` keep their `sort` and `filter` arguments unchanged.
+`Library.items` requires a selected Profile, so these inputs always filter and sort by the selected Profile's watch state.
+A nested input such as `filter: { selectedProfile: { watchStatus } }` would add a level that carries no information.
+
+=== Subscriptions and mutations deliver the same media titles
+
+Every subscription and mutation that returns a media title keeps its shape.
+A client selects the Profile-dependent values through `selectedProfileState`.
+
+* `watchStateChanged` still delivers the media titles whose watch state changed, and the season and series of each changed episode.
+  A client selects `selectedProfileState { watchState { ... } }` on each item.
+  `watchStateChanged` requires a selected Profile, so `selectedProfileState` is null only after a field error.
+  A field under `selectedProfileState` that fails makes `selectedProfileState` null, and the item still arrives with its other fields.
+* `libraryItemUpdated` resolves `selectedProfileState` for the selected Profile of each subscriber.
+  A change that only touches watch state still reaches only the connections of the Profile that made the change.
+* `continueWatching` edges and `WatchStateChange.continueWatching` keep their nodes.
+  A client selects watch state through each node's `selectedProfileState`.
+* `markWatched` and `markUnwatched` still return the item in its resulting state.
+  `setLanguageOverride` and `clearLanguageOverride` still return the title in its resulting state.
+  A client selects the changed values under `selectedProfileState`.
+
+=== Clients merge the field into their caches
+
+`SelectedProfileState` and `WatchState` have no id.
+Each client caches them under their media title.
+A client merges an incoming `selectedProfileState` into the cached one field by field.
+A payload that selects only `watchState` therefore keeps a cached `languagePreference`.
+A client discards every cached `selectedProfileState` when the selected Profile changes, as it already discards the previous Profile's private state.
+
+=== Explicitly deferred
+
+* A way to reach a media title without a selected Profile, other than an active stream.
+  The entry points keep their gates until a separate decision opens one, for example for metadata editing in an Account-scoped session.
+* A field that returns another Profile's state, such as a ProfileManager's view of a Kid Profile's progress.
+  That field needs its own authorization and its own name.
+* Per-parent state types.
+  A future value that applies to only some media titles, such as a series' next episode, may split `SelectedProfileState` into one type per parent.
+  The schema evolves in place, so that split needs no compatibility field.
+* A move of the Profile's own language preferences.
+  `Me.languagePreferences` stays on `Me`, because those preferences belong to the Profile and not to a media title.
+
+== Consequences
+
+* A ServerAdmin who has no selected Profile reads an active stream's media title without an error.
+  `selectedProfileState` is null in that response.
+* A field name now states that its value belongs to the selected Profile.
+* A failure under `selectedProfileState` nulls only `selectedProfileState`, and the media title survives.
+* The schema change breaks every client query that selects the removed fields.
+  The server change and the web and Apple client changes must ship together.
+* Every client fragment that selects watch state or a language preference moves one or two levels deeper.
+  The four per-type watch-state fragments in each client can become one fragment on `WatchState`.
+* The web client must give `SelectedProfileState` and `WatchState` a merge policy, because Apollo Client replaces an embedded object without one.
+  Apollo iOS keys each id-less object by its path under the parent, and it merges the fields of that record.
+* A season gains a last watched value that clients can show and sort by.
+* The `PROFILE_REQUIRED` sentence in the description of `ActiveStream.media` (https://github.com/streamarr/streamarr-server/pull/758[streamarr/streamarr-server#758]) no longer applies.
+* The example in link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026] of a `markWatched` payload that returns `watchStatus` and `watchProgress` still holds.
+  The payload now returns those values under `selectedProfileState.watchState`, and normalization still merges them into every watched query.
+
+== Rejected Alternatives
+
+* Keep each Profile-dependent field on the media title, and fail each field with `PROFILE_REQUIRED` without a selected Profile — each failure of a non-null field nulls the whole media title, and no field name says whose value it returns.
+* A `profile` field on the media title, such as `movie.profile { watchState }` — "profile" alone is an avoided word, because a codec has profiles, and `movie.profile` reads as the movie's own Profile.
+* A viewer-prefixed field for each value, such as `viewerWatchStatus` and `viewerLanguagePreference` — "viewer" names the person who watches, every new value needs another prefixed field, and no single field can be null without a selected Profile.
+* A root query by Profile, such as `profileState(profileId: ID!, titleIds: [ID!]!)` — a screen would need a second query joined in the client, mutation payloads and subscription items would no longer carry the state on the media title they return, and a `profileId` argument would need its own authorization to read another Profile's state.
+* A `profileId` argument on `selectedProfileState` — no current screen reads another Profile's state, and the argument would need the same separate authorization.
+* One state type for each parent, such as `MovieSelectedProfileState` — the four types would hold the same fields, and each client would keep four copies of one fragment.
+* A synthetic id on `SelectedProfileState`, such as the Profile id plus the title id — no query can fetch an object by that id, and clients already discard Profile state when the selected Profile changes.
+* A nested filter input for watch state, such as `filter: { selectedProfile: { watchStatus } }` — `Library.items` already requires a selected Profile, so the extra level carries no information.
+* New names for the fields under `WatchState`, such as `watchedStatus` and `resumePosition` — the `watchStatus` filter and the `WatchStatus` enum keep the current name, and the glossary already maps each field to its term.
+
+== References
+
+* https://github.com/streamarr/streamarr-server/pull/758[streamarr/streamarr-server#758: active streams for a ServerAdmin]
+* link:0024-identity-authority-by-relationship.adoc[ADR 0024: Profiles, Profile selection and Content Ceilings]
+* link:0039-catalog-entries-hold-metadata-edits-and-user-data.adoc[ADR 0039: watch state belongs to the Profile and the catalog entry]
+* link:0042-graphql-subscriptions-run-over-websocket-until-token-expiry.adoc[ADR 0042: subscription delivery and recovery after field errors]
+* link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043: language preferences and overrides]
+* link:0048-clients-keep-live-lists-in-their-normalized-cache.adoc[ADR 0048: clients keep live lists in their normalized cache]

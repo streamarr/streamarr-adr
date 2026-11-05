@@ -29,6 +29,12 @@ The one Profile that represents an Account.
 Every Account has exactly one Personal Profile, and a Profile represents at most one Account.
 The Account and its Personal Profile transfer together, and the Account cannot unlink its Personal Profile.
 
+**Selected Profile**:
+The Profile that a session acts for.
+The Account picks the selected Profile in the Profile picker, and the Profile-scoped access token names it.
+A request has at most one selected Profile, and no argument of a request names the selected Profile.
+_Avoid_: current Profile, active Profile, viewer (the person who watches)
+
 **HouseholdAdmin**:
 The Household role that edits a Household's settings and manages its Devices.
 Every Household that has Accounts keeps at least one HouseholdAdmin.
@@ -624,20 +630,27 @@ _Avoid_: inbox, alerts, problems (unqualified)
 **Watch state**:
 The facts that Streamarr keeps about one Profile's viewing of a catalog entry: watched status, resume position, completions, manual marks and last watched.
 Watch state belongs to the Profile and the catalog entry, so every attached item shows the same watch state (ADR 0039).
+The GraphQL field `selectedProfileState.watchState` returns the selected Profile's watch state of a media title (ADR 0056).
 _Avoid_: watch activity, user data (unqualified), watch status (the watched status alone)
+
+**Selected Profile state**:
+What one media title holds for the selected Profile: the selected Profile itself, the Profile's watch state of the media title, and the language preferences that apply to the media title.
+The GraphQL field `selectedProfileState` on a movie, series, season or episode returns the selected Profile state, and returns null when the request has no selected Profile.
+Every value of a media title that depends on the selected Profile sits under `selectedProfileState` (ADR 0056).
+_Avoid_: profile (unqualified), viewer state, user data (unqualified), edge (a connection edge such as `ContinueWatchingEdge`)
 
 **Watched status**:
 Whether an item is watched, in progress or unwatched for a Profile.
 Only a counted resume position puts an item in progress.
 A season or series derives its watched status from its episodes.
-The GraphQL field `watchStatus` returns the watched status, and the `watchStatus` filter selects items by the watched status.
+The GraphQL field `selectedProfileState.watchState.watchStatus` returns the watched status, and the `watchStatus` filter selects items by the watched status.
 _Avoid_: watch status (in prose), played
 
 **Resume position**:
 Where playback of an item resumes for a Profile.
 The resume position comes from the latest progress that a stream session saved for the item with a position above zero.
 A resume position counts only when Streamarr saved the resume position after the item's latest completion that is not dismissed.
-The GraphQL field `watchProgress` returns the resume position.
+The GraphQL field `selectedProfileState.watchState.watchProgress` returns the resume position.
 _Avoid_: watch progress (in prose), bookmark, playback position
 
 **Start position**:
@@ -661,8 +674,8 @@ _Avoid_: toggle, override (reserved for administrative overrides in ADR 0024)
 **Last watched**:
 The time a Profile last watched an item.
 Last watched is the later of the time Streamarr saved the item's counted resume position and the time of the item's latest completion that is not dismissed.
-A series' last watched is the latest last watched among the series' episodes.
-Last watched orders the `LAST_WATCHED` sort and Continue Watching, and the GraphQL field `lastWatchedAt` returns the time.
+A season's last watched is the latest last watched among the season's episodes, and a series' last watched is the latest last watched among the series' episodes.
+Last watched orders the `LAST_WATCHED` sort and Continue Watching, and the GraphQL field `selectedProfileState.watchState.lastWatchedAt` returns the time.
 _Avoid_: last played, last activity, recently watched
 
 **Continue Watching**:

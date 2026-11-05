@@ -29,6 +29,17 @@ A job attempt passes `-discard none`, plus `-itsoffset` with the correction when
 Media time zero then stays the source container's start time, whatever streams the attempt maps.
 A job attempt whose stored probe outcome carries no correction reads the source as before the amendment.
 
+NOTE: An amendment puts libx265 on the keyframe-verified list (<<decision-gop>>).
+The worker passes `-x265-params no-scenecut=1:no-open-gop=1` to libx265.
+With those parameters, libx265 closes every GOP and places no scene-cut keyframe.
+New recordings in the pinned worker image show an IDR picture at every forced keyframe of libx265 and at its GOP's backstop keyframe (https://github.com/streamarr/streamarr-transcode-worker/pull/60[streamarr/streamarr-transcode-worker#60]).
+A variant that libx265 encodes therefore takes the extended GOP and carries `EXT-X-INDEPENDENT-SEGMENTS` under the same rules as a variant from libx264 or SVT-AV1 (<<decision-independent-segments>>).
+
+NOTE: An amendment chooses each variant's GOP once, from the variant's list of forced keyframes (<<decision-gop>>).
+A keyframe-verified encoder takes the extended GOP only when the list that starts at the variant's first segment reaches the variant's last segment.
+Otherwise every attempt of that variant takes the floored GOP.
+libx265 writes the GOP into the initialization segment, so every attempt of a variant must take the same GOP.
+
 NOTE: An amendment stops the producer from moving copied audio, and rebuilds each copied audio sample's duration and decode time from sample counts (<<decision-audio>>).
 Encoded audio starts on its own audio frame grid instead (link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc#decision-audio-grid[ADR 0043]).
 
@@ -48,9 +59,21 @@ A stream session in which any output exceeds the cap, or any encode has no bound
 A request that follows a held request for an earlier segment is prefetch and never relocates past that segment.
 The interim rule, and its refusal to copy a source with an interval that holds no keyframe, end once the pinned worker image groups on the list.
 
+NOTE: An amendment replaces the segment list's whole slots with exact segment starts (<<decision-segment-list>>, https://github.com/streamarr/streamarr-server/issues/780[streamarr/streamarr-server#780]).
+Each job attempt of a stream session with a copied variant carries every segment's start in ticks of the source video stream's time base.
+In every variant of that stream session, segment N then starts at the presentation time of the source keyframe that opens copied segment N.
+Each encoded variant forces its keyframe on the first output frame at or after that start, so an encoded segment starts less than one output frame after the copied segment with the same number.
+Consecutive starts lie at least 2 s apart, and the last start lies at least 2 s before the media's end, so every segment holds a frame of every encoded variant and a sample of every audio track, and a shifted audio segment still takes its audio from two stored segments.
+A copy places each keyframe at its stored tick only when the copy's timeline matches the probe's, so the server refuses a stream copy whose timeline may differ (<<decision-segment-list>>).
+A stream session without a copied variant keeps the plain 3 s grid and sends no list.
+
 NOTE: An amendment sends the chosen keyframe's presentation time as the seek position of an encoded replacement attempt that reads an MP4 or MOV source (<<decision-seek>>), because FFmpeg's MP4 demuxer seeks by presentation time.
 With the keyframe's decode time, that demuxer lands one keyframe interval early.
 A Matroska, MPEG-TS or any other source still gets the keyframe's decode time.
+
+NOTE: An amendment puts `h264_nvenc` and `hevc_nvenc` on the keyframe-verified list (<<decision-gop>>).
+The worker passes both encoders `-bf 3 -rc-lookahead 20` on every encode and on its startup test encode, so a GPU that cannot take those settings falls back to the software encoder.
+`av1_nvenc` stays off the list.
 
 NOTE: Under link:0013-stream-decision-architecture.adoc#reshape-rpus-starting-samples[ADR 0013], a job attempt that encodes an HEVC Dolby Vision source with no compatible base, such as profile 5, runs two FFmpeg processes when ADR 0013's conditions for moving the source's RPUs hold.
 The first FFmpeg copies only the source's video into fragmented MP4, with the source's raw timestamps, and the worker moves the RPUs and gives each video sample its duration in the source.
@@ -353,7 +376,21 @@ In that segment list, a slot that holds no source keyframe merges into the segme
 A merged segment therefore spans several slots.
 A stream copy advertises each segment's real duration.
 A copied segment opens at the first source keyframe in its first slot, and segment 0 also holds the media before its keyframe.
+In that segment list, segment 0 starts at zero, and every later segment starts at the presentation time of the source keyframe that opens it.
+A segment's start is therefore exact, and is not the start of its first slot.
+A slot opens a segment at its first keyframe that presents at least 2 s after the start of the segment before it.
+A slot without such a keyframe merges into the segment before it.
+A keyframe also opens a segment only when it presents at least 2 s before the end of the media, so the last segment lasts at least 2 s as well.
+2 s is the length of the audio lead and the end of the audio delay range of link:0055-a-viewers-audio-delay-is-a-playback-session-parameter-and-the-server-shifts-the-audio-renditions.adoc[ADR 0055].
+A shifted audio segment therefore still takes its audio from the stored segment with its own number and one stored segment next to it, as ADR 0055 requires.
+2 s is longer than one frame at 10 frames per second, the slowest rate that the frame-rate rule chooses (<<decision-frame-rate>>).
+Every interval therefore holds at least one output frame of every encoded variant, and no forced keyframe falls in the next segment.
+2 s is also longer than one audio frame of every codec that Streamarr encodes.
+2 s is longer than one frame of the copied audio that common sources carry, too: AAC, AC-3, E-AC-3, DTS, Opus, MP3, ALAC with its default frame length, and FLAC within its streamable subset.
+Every interval therefore holds at least one sample start of each such audio track.
 The stream session's encoded variants force their keyframes at the segment list's starts.
+An encoded variant's forced keyframe is the first output frame that presents at or after a segment's start.
+An encoded segment therefore starts less than one output frame after the copied segment with the same number.
 A keyframe that an encoder places inside a merged segment stays inside that segment, so a player can switch variants at every segment boundary.
 Audio and subtitle renditions use the stream session's segment list as well (link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043]).
 Once merged segment lists arrive, every stream session therefore uses 3 s slots.
@@ -370,15 +407,56 @@ A stream copy uses those keyframe positions for its segment boundaries, its play
 Each `EXTINF` gives a segment's real duration, and `EXT-X-TARGETDURATION` covers the longest merged segment, as RFC 8216 requires.
 Everything that counts segments reads the segment list: the advertised media segment count, the resume and relocation offsets, the forward-relocation gap, a copy's segment sizes and peak segment bitrate (link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc[ADR 0054]), and the end of a short copy (link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052]).
 
-The server and the worker share one segment list, because each job attempt carries it in `TranscodeExecution.segment_start_slots`.
-The field lists each segment's start, counted in slots of the stream session's segment length (https://github.com/streamarr/streamarr-server/pull/723[streamarr/streamarr-server#723]).
-A job without a list uses the plain grid, so a stream session whose variants all encode sends none.
+The server and the worker share one segment list, because each job attempt carries it in `TranscodeExecution.segment_start_ticks`.
+The field lists each segment's start on the zero-based timeline, in ticks of the time base that `TranscodeExecution.segment_start_time_base` holds.
+That time base is the time base of the stored keyframe positions of the source's chosen video stream (link:0032-media-file-probe-results-are-persisted.adoc#keyframe-positions[ADR 0032]).
+Each listed start after segment 0 is a stored keyframe tick, unchanged, so neither the server nor the worker rounds a start.
+A job without a list uses the plain grid, so a stream session whose variants all encode sends neither field.
 A non-empty list holds one entry for each advertised media segment, starts at 0 and strictly increases.
+A non-empty list always comes with its time base, and an empty list never does.
 The worker refuses any other list with `JOB_ATTEMPT_FAILURE_INVALID_SPECIFICATION`.
+Every job attempt of a stream session with a copied variant carries the list.
+That covers the copied variant, each encoded variant and each audio rendition, from the first attempt to every replacement attempt.
 The worker forces encoded keyframes at the listed starts, and groups fragments and audio samples on the listed intervals.
+The worker compares each sample's presentation time with a listed start exactly.
+The worker never rounds a start to a track's timescale before it compares.
+The list replaced `TranscodeExecution.segment_start_slots`, which counted each start in whole slots (https://github.com/streamarr/streamarr-server/pull/723[streamarr/streamarr-server#723]).
+The worker contract keeps that field's number and name reserved (https://github.com/streamarr/streamarr-server/issues/780[streamarr/streamarr-server#780]).
 A merged segment is expected and never fails an attempt by itself.
 A keyframe that skips a listed segment still fails the attempt with `SKIPPED_SEGMENT_NUMBER`, because the server and the worker then disagree about the source's keyframes.
 Streamarr has no production instances, so the change makes no provision for workers of different versions.
+
+Exact starts need a copy to place each source keyframe at its stored tick.
+FFmpeg makes no start time correction for a container whose demuxer does not allow timestamp discontinuities, such as MP4, MOV and Matroska, so a copy of such a source keeps the stored ticks.
+A copy of any other source keeps the stored ticks only when the stored probe outcome carries the start time correction (<<decision-media-time-zero>>).
+The server refuses a stream copy with the reason `no_start_time_correction` when neither condition holds, and encodes the video instead.
+That refusal covers an MPEG-TS, MPEG-PS or Ogg source whose probe outcome predates probe version 8 or reports a fallback.
+The refusal narrows the media-time-zero rule's promise that no source plays worse during the re-scan.
+Such a source encodes until its probe version 8 outcome carries a correction.
+
+*Why exact starts:* With whole slots, a copied segment opens at the first source keyframe in its slot.
+An encoded segment with the same number then starts at the slot's start.
+The two starts can lie up to one slot apart.
+A player that switches between the copy and an encoded variant at that boundary then plays up to one slot of media twice, or skips up to one slot.
+Apple's HLS authoring specification asks every variant to start each segment at the same time.
+
+*Why ticks of the video stream's time base:* The probe stores each keyframe as a whole number of ticks of the video stream's time base.
+A copy's FFmpeg subtracts the container start in the same ticks as the probe, so a copied keyframe keeps its stored tick.
+By default, FFmpeg's mp4 muxer gives a copied video track a timescale that is a multiple of the time base's denominator, so every tick stays a whole number of timescale ticks.
+Microseconds and nanoseconds cannot hold every tick exactly.
+An MPEG-TS tick is 1/90000 s, and an AVI time base such as 1001/24000 gives frame times with no terminating decimal.
+A rounded start would need one rounding rule that both repositories match.
+A start rounded past its keyframe would also move that keyframe into the segment before it.
+
+*Why 2 s and a matching timeline:* With source keyframes at 5.986 s and 6 s in adjacent slots, a 24 frames-per-second encode has no frame in the interval from 5.986 s to 6 s.
+A check with FFmpeg 8.0.1 forced the frame at 6 s for both starts, so the encode skipped a segment number.
+A copied FLAC track at 44.1 kHz with 4,608-sample frames has frames that last 104 ms.
+In a check with FFmpeg 8.0.1, starts at 5.96 s and 6.06 s left that track with no sample start between them, so its segment would carry no audio.
+A segment without a track's samples fails to append in Media Source Extensions.
+With starts 1 s apart, such as 5.9 s, 6.9 s and 9.9 s, an audio delay of +2 s would need audio from three stored segments for the segment from 6.9 s.
+Without the start time correction, a second audio track that started 154 ms before the first moved media time zero by 154 ms (<<evidence-timeline>>).
+A copy then places every keyframe 154 ms away from its stored tick.
+A keyframe that lands before its exact start joins the segment before it, so the copy skips a segment number.
 
 The segment cap, 128 MiB, is a constant of the worker contract that the server and the worker each fix in code, and no worker configures it.
 A merged segment can be long, and every variant and rendition of the stream session cuts its segments on the same list, so the server decides up front whether every advertised output fits.
@@ -502,12 +580,14 @@ Evidence: https://github.com/streamarr/streamarr-server/issues/512[streamarr/str
 
 The worker forces a keyframe at every segment boundary for every encoder, including SVT-AV1 and the hardware encoders that the previous worker controls through a frame-count GOP alone.
 The worker continues to disable scene-cut keyframes for libx264 through `-sc_threshold`.
-Issue https://github.com/streamarr/streamarr-server/issues/497[streamarr/streamarr-server#497] will set libx265's scene-cut behavior along with its other GOP arguments.
+The worker disables scene-cut keyframes for libx265 through the `no-scenecut=1` key of `-x265-params` (https://github.com/streamarr/streamarr-server/issues/497[streamarr/streamarr-server#497]).
 A scene-cut keyframe adds another keyframe inside an interval, and the producer groups that keyframe's fragment into the same segment.
 FFmpeg's `-force_key_frames` has two modes: a list of absolute times, or an expression evaluated against the time since the attempt's first frame.
 The worker forces the boundaries with the list, never an expression.
 `-force_key_frames:0` receives the start of every segment from the start sequence number up to, but not including, the variant's media segment count.
 On a plain grid, segment `k` starts at `k × period`, in whole seconds.
+On a list of exact starts (<<decision-segment-list>>), the worker forces the first output frame that presents at or after each listed start.
+FFmpeg reads the list in whole microseconds, so the worker writes each entry so that FFmpeg forces exactly that frame, and neither the frame before it nor the frame after it.
 Every attempt thus forces the same frame at each boundary it shares with another attempt.
 FFmpeg chooses the first frame at or after that boundary on the zero-based timeline.
 The list starts at the start sequence number, because FFmpeg consumes at most one entry per frame and would force an extra keyframe for each entry before the attempt's first frame.
@@ -545,16 +625,20 @@ A decoder that starts at a CRA picture must discard them, so a segment that star
 A CRA picture never qualifies, even when no RASL picture follows it.
 The encoder may place RASL pictures after any CRA picture.
 The mp4 muxer marks the CRA picture as a sync sample in both cases.
-libx264 and SVT-AV1 are keyframe-verified.
+libx264, SVT-AV1 and libx265 are keyframe-verified.
 `h264_videotoolbox` and `hevc_videotoolbox` are keyframe-verified with B-frames off.
 With B-frames on, neither encoder is keyframe-verified.
+`h264_nvenc` and `hevc_nvenc` are keyframe-verified with three B-frames and a 20-frame lookahead (`-bf 3 -rc-lookahead 20`).
+The worker always passes both settings to them, and its startup test encode passes them too.
 Upstream SVT-AV1 bug https://gitlab.com/AOMediaCodec/SVT-AV1/-/work_items/2385[#2385] stalled or reordered SVT-AV1's output, but the bug never dropped a forced keyframe (worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/42[#42]).
 The pinned runtime's SVT-AV1, release 4.3.0, contains the fix for that bug.
 The stall watchdog of the <<decision-waits,four waits>> and the short-sample rule for <<decision-untrusted-output,untrusted output>> still fail any attempt whose encoder stalls or reorders its output, so that the server can replace the attempt under ADR 0019.
-libx265 is not keyframe-verified.
-Under its default open GOP, its forced keyframes are CRA pictures.
+libx265 is keyframe-verified only with closed GOPs.
+Under libx265's default open GOP, libx265's forced keyframes are CRA pictures.
 When a recording suppressed a forced keyframe, libx265's GOP placed a CRA picture that was followed by a RASL picture.
-libx265 qualifies only after its GOPs are closed under issue https://github.com/streamarr/streamarr-server/issues/497[streamarr/streamarr-server#497] and a new recording shows that both its forced keyframes and its GOP's backstop keyframe are IDR pictures.
+The worker therefore passes `-x265-params no-scenecut=1:no-open-gop=1` to libx265 (https://github.com/streamarr/streamarr-server/issues/497[streamarr/streamarr-server#497]).
+`no-open-gop=1` closes every GOP, and `no-scenecut=1` stops libx265 from placing a keyframe at a scene cut.
+With those parameters, every keyframe in the libx265 recordings is an IDR picture with no leading pictures, including the GOP's backstop keyframe.
 Every other hardware encoder must pass the same recording checks before it is keyframe-verified (<<decision-hardware-encoders>>).
 
 The worker sets each encoder's frame-count GOP by whether that encoder is keyframe-verified.
@@ -565,23 +649,33 @@ Those keyframes start no segment, because the worker groups samples on the serve
 For every other encoder, the worker multiplies the period by the output frame rate and rounds the result down to obtain the floored GOP.
 Even if the encoder ignores forced keyframes, that GOP still places one keyframe inside every interval and never skips a segment.
 Under the floored GOP every segment holds at least one keyframe, and most hold two.
-The floored GOP keeps a keyframe in every interval for libx265 but does not close its GOPs.
-Closing those GOPs requires the changes tracked by issue https://github.com/streamarr/streamarr-server/issues/497[streamarr/streamarr-server#497].
 Past the list's last entry, only the GOP places keyframes.
 The floored GOP still puts a keyframe in every interval.
-With the extended GOP, keyframes drift away from the segment starts until an interval holds no keyframe.
-The producer then fails the attempt with `SKIPPED_SEGMENT_NUMBER` (<<decision-grouping,grouping>>).
-The server dispatches a replacement attempt from the skipped segment under ADR 0019, and that attempt starts a new list at the skipped segment's boundary.
+With the extended GOP, keyframes would drift away from the segment starts until an interval held no keyframe.
+A keyframe-verified encoder therefore takes the extended GOP only when the variant's list reaches the variant's last segment.
+The worker builds that list from the variant's first segment, whatever segment the attempt starts at.
+When that list ends early, every attempt of the variant takes the floored GOP.
+A forced keyframe that an encoder drops can still skip a segment, and the producer then fails the attempt with `SKIPPED_SEGMENT_NUMBER` (<<decision-grouping,grouping>>).
 
 *Why:* The floored GOP added a second keyframe beside the forced one at 13 of 15 boundaries.
 The extended GOP produced only forced keyframes in all twelve runs.
-libx265's backstop was a CRA picture followed by RASL pictures in three of four recordings.
+Under libx265's default open GOP, libx265's backstop was a CRA picture followed by RASL pictures in three of four recordings.
+With closed GOPs, libx265's forced keyframes and libx265's backstop at frame 433 were IDR pictures in every recording, from the start and after a seek (https://github.com/streamarr/streamarr-transcode-worker/pull/60[streamarr/streamarr-transcode-worker#60]).
+libx265 writes its settings, including the GOP, into the initialization segment.
+A replacement attempt that starts late builds a shorter list, and that list can reach the last segment when the start attempt's list does not.
+If each attempt chose the GOP from its own list, that replacement attempt would write a different initialization segment.
+The server refuses a replacement attempt whose initialization segment differs from the variant's stored initialization segment.
 The VideoToolbox encoders were recorded on an Apple M1 Max with macOS 26.6.2 and FFmpeg 8.1.2 for macOS on arm64, from the start and after a seek, at 23.976 and 29.97 fps.
 With B-frames off, every forced keyframe in 176 recordings was a sync sample: 4,155 of 4,155 for H.264 and 4,345 of 4,345 for HEVC.
 Each of those keyframes was an IDR picture with no leading pictures, and each encoder restarted its GOP count there.
 With `-bf 2`, HEVC's forced keyframes became CRA pictures followed by RASL pictures.
 VideoToolbox also placed IDR keyframes of its own at frames that differed between attempts, and none of them displaced a forced keyframe.
-Evidence: <<evidence-gop>>, <<evidence-svt-av1>>, https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57].
+The NVENC encoders were recorded on an RTX 5090 with NVIDIA driver 615.78.08, in the pinned worker image with FFmpeg 8.1.3, at 23.976 fps on a merged segment list.
+For both encoders at every rung of the default ladder, from the start and after a seek, every forced keyframe was a sync sample and an IDR picture with no leading pictures.
+In each recording that suppressed a forced keyframe, the next keyframe landed one extended GOP after the forced keyframe before it, and it was also an IDR picture with no leading pictures.
+With the lookahead on, NVENC also placed IDR keyframes with no leading pictures at scene cuts, and none of them displaced a forced keyframe.
+1080p recordings with the encoders' default B-frames and lookahead, and with `-bf 3 -rc-lookahead 0`, gave the same keyframe verdicts without the scene-cut keyframes.
+Evidence: <<evidence-gop>>, <<evidence-svt-av1>>, https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57], https://github.com/streamarr/streamarr-transcode-worker/pull/116[streamarr/streamarr-transcode-worker#116].
 
 [[decision-hardware-encoders]]
 === Hardware encoder backends join one at a time, after three checks
@@ -604,7 +698,9 @@ A second Mac must write the same parameter sets (SPS and PPS) as the first Mac f
 The output check stops a backend from writing a codec string, profile, level or tier that differs from what the playlist advertises.
 VideoToolbox's recordings made no timed runs, and only one Mac was measured.
 The parameter sets depend on the encoder's settings, and `-realtime 1` alone changed the H.264 SPS and the HEVC VPS, SPS and PPS.
-Evidence: https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56], https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57].
+`h264_nvenc` and `hevc_nvenc` pass all three checks on the RTX 5090.
+In three separate recording runs, each replacement attempt's initialization segment was byte-identical to its first attempt's at every rung, and every initialization segment passed the output check.
+Evidence: https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56], https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57], https://github.com/streamarr/streamarr-transcode-worker/pull/116[streamarr/streamarr-transcode-worker#116].
 
 [[decision-independent-segments]]
 === Keyframe-verified variants carry `EXT-X-INDEPENDENT-SEGMENTS`
@@ -614,7 +710,7 @@ The tag is true only when every media segment starts with a keyframe that opens 
 The server writes the tag in the multivariant playlist when every video variant of the stream session comes from a keyframe-verified encoder.
 Otherwise the server writes the tag only in the media playlists of the variants that come from a keyframe-verified encoder.
 A stream copy never carries the tag, because a source keyframe can open a GOP whose pictures reference earlier pictures.
-A variant from libx265 does not carry the tag while libx265 is off the keyframe-verified list.
+A variant from libx265 carries the tag under the same rules, because libx265 is keyframe-verified.
 
 *Why:* Without the tag, Safari's native player also requested the two segments before a seek target.
 With the tag, it requested only the segment that holds the target.
@@ -1250,7 +1346,7 @@ The fixtures README in the worker repository, cited in References, lists each re
 
 The recorder identifies the picture that starts each keyframe.
 It reads the NAL unit type for H.264 and HEVC, and the frame header for AV1.
-The tests therefore check that libx264 produces IDR pictures, SVT-AV1 produces shown key frames and libx265 produces CRA pictures in these fixtures.
+The tests therefore check that libx264 and libx265 produce IDR pictures and that SVT-AV1 produces shown key frames in these fixtures.
 Both the recorder and CI's check fail when a keyframe of a keyframe-verified encoder does not start a closed GOP.
 For every fixture the recorder also runs the HLS muxer, records each segment whose cut differs from the segment list, and records why the cuts differ.
 The HLS muxer's cuts are a comparison, not the reference.
@@ -1347,6 +1443,8 @@ Worker PR https://github.com/streamarr/streamarr-transcode-worker/pull/38[stream
 [[explicitly-deferred]]
 === Explicitly deferred
 
+* Keep a copied audio track whose frames last 2 s or longer from leaving a segment of an exact list without that track's samples.
+The 2 s spacing of exact starts covers the copied audio that common sources carry, and no guard covers longer frames yet.
 * Keep a copy whose video's end the server does not yet know from taking in the audio tail.
 The slots after such a copy's last keyframe merge into its last segment, which then holds every audio sample after the video's end, up to the segment cap.
 The attempt reports the video's end, and the server stores it, so the next stream session for the file encodes the video and holds its last picture.
@@ -1395,6 +1493,13 @@ It loses `awaitSegment`, the liveness poll, the 50 ms constant and the output di
 * With no media on disk, the worker needs no segment base path and no code that cleans that path up.
 * The worker, not FFmpeg's muxer, decides where a segment ends.
 Tests verify this rule against recorded fixtures so that an FFmpeg upgrade under ADR 0029 cannot silently merge or split segments.
+* In a stream session with a copied variant, every encoded variant starts segment `N` less than one output frame after the copy's segment `N`.
+A player that switches variants at a segment boundary repeats or skips less than one frame of media.
+* A job attempt of a stream session with a copied variant carries one tick count for each segment.
+A two-hour source at 3 s slots has at most 2,400 segments, and each tick count takes at most 10 bytes, so the list stays under 24 KB.
+* A stream session without a copied variant keeps the plain grid, and its job attempts carry no list.
+* An MPEG-TS, MPEG-PS or Ogg source whose probe outcome carries no start time correction encodes instead of copying.
+* A slot whose keyframes all present less than 2 s after the start of the segment before it, or less than 2 s before the media's end, merges into the segment before it.
 * A stream-copy replacement attempt now starts on the advertised segment boundary, because the producer discards the preroll fragment.
 Its audio starts with the first sample at or after the boundary, so it no longer repeats audio that the previous segment holds.
 From an MPEG-TS source that repeat had been ten AAC frames, and Chromium dropped 7 video frames at the junction.
@@ -1461,8 +1566,8 @@ The server keeps a producer while its reported output advances, and each client'
 * The server encodes a source until it knows the source's keyframe positions, so a file without a usable container index is encoded until its keyframe scan finishes.
 * A keyframe-verified encoder's segments hold one keyframe instead of the two that most segments hold under the floored GOP.
 Other encoders keep the extra keyframe until they are verified.
-libx265 can qualify after the changes tracked by issue https://github.com/streamarr/streamarr-server/issues/497[streamarr/streamarr-server#497].
-NVENC and VideoToolbox qualify through their own checks (https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56], https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57]), and https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] keeps VAAPI, QSV, AMF and RKMPP.
+libx265 qualified once the worker closed libx265's GOPs.
+`h264_nvenc` and `hevc_nvenc` qualified on their GPU recordings (https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56]). The VideoToolbox encoders are keyframe-verified, but no worker encodes with them until their timing checks pass (https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57]). https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] keeps VAAPI, QSV, AMF and RKMPP.
 * A worker encodes with a hardware encoder backend only after the backend passes the keyframe recording checks, the initialization-segment check and the output check.
 * Safari's native player fetches only the target segment when it seeks in a variant from a keyframe-verified encoder.
 * The extended GOP alone no longer guarantees a keyframe in every interval.
@@ -1481,9 +1586,8 @@ The server still handles requests for advertised segments that the worker did no
 The pinned runtime's SVT-AV1 4.3.0 contains the fix, and a soak under CPU contention found no failure (<<evidence-svt-av1-soak>>).
 The stall watchdog and the short-sample rule turn a hung FFmpeg or undecodable segments into a failed attempt that ADR 0019 replaces.
 Both rules stay after the runtime update of worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/42[#42], because they cover every encoder.
-* When a media file outlasts its list and a keyframe-verified encoder's attempt fails with `SKIPPED_SEGMENT_NUMBER`, the replacement attempt starts a new list at the skipped segment's start.
-Its first segment repeats about one period of media that the last drifted segment already held.
-ADR 0019's recovery cannot withdraw that repeat once the server has published it.
+* A variant whose list from its first segment cannot reach its last segment takes the floored GOP in every attempt, so most of its segments hold two keyframes.
+On a plain grid, only a media file longer than 18.7 hours at 3 s segments, or 35.6 hours at 6 s segments, has such a variant.
 * Switching H.264 to fMP4 removes the parameter sets that MPEG-TS carried in each media segment.
 The server instead serves the stored init with later segments and, once workers advertise their encoders, requires replacement attempts to use the backend that produced that init.
 * The upload loop gains `isReady` flow control, a readiness bound and an acknowledgment deadline.
@@ -1510,6 +1614,18 @@ While none of the worker's calls ends, it can wait up to one back-off longer tha
 
 == Rejected Alternatives
 
+* Keeping the segment list in whole slots: a copied segment opens at its keyframe inside the slot, while an encoded segment opens at the slot's start.
+A switch between the copy and an encoded variant then repeats or skips up to one slot of media.
+* Letting each encoded variant place its keyframes by its own grid or its own encoder: that variant's segments would start at times that no other variant shares, and a switch would fall inside a segment.
+* Carrying each start in microseconds or nanoseconds: neither unit holds an MPEG-TS tick of 1/90000 s or an AVI time of 1001/24000 s exactly, so both repositories would need one matching rounding rule.
+* Carrying a rational time in each entry: every entry would repeat the same denominator, and the worker would check one more rule for each entry.
+* Listing exact starts for a stream session without a copied variant: the plain grid already starts segment `N` at exactly `N × 3 s`.
+A 3 s step is also not a whole number of ticks in a time base such as 1001/24000.
+* Letting two starts lie closer than one output frame: an encode then has no frame in that interval and skips the segment number.
+* Spacing starts by one frame at 10 frames per second (100 ms): a copied audio track with longer frames, such as FLAC at 44.1 kHz with 4,608-sample frames, can leave a segment without audio.
+* Spacing starts by 1 s: a shifted audio segment under an audio delay of up to 2 s would then need audio from three stored segments, and ADR 0055 reads two.
+* Spacing starts by one whole slot: keyframes every 2.5 s would then merge into 5 s segments, which an aligned list does not need.
+* Keeping a slack for a copy whose timeline may differ from the probe's: a keyframe that lands before its exact start joins the segment before it, so no slack keeps the copy's segments on the list.
 * Counting copies against the slots' segment memory budget: copies that take no slot could fill it with unfinished segments and starve the encodes.
 * A fixed number of copies, or a setting for it: the memory that a worker can give copies depends on its container's limit, which the worker already knows.
 * Sizing the copy cap from the raw container memory limit: that limit also covers the JVM's other memory regions, so the cap would admit copies that the heap cannot hold.
@@ -1663,7 +1779,7 @@ That check also catches a worker that stays connected while its producer stops f
 * Requiring a source keyframe in the grid's final interval as well, the interim rule that this decision first accepted, would encode ordinary sources.
 AAC priming makes a container run about 23 ms past its video.
 A source whose video ends on a period boundary therefore leaves a final interval of about 23 ms, and that interval holds no keyframe.
-* Writing `EXT-X-INDEPENDENT-SEGMENTS` for every variant would claim independence for stream copies and libx265, whose segments can start with an open GOP.
+* Writing `EXT-X-INDEPENDENT-SEGMENTS` for every variant would claim independence for stream copies, whose segments can start with an open GOP.
 * Never writing `EXT-X-INDEPENDENT-SEGMENTS` would keep Safari's native player fetching two extra segments before every seek target.
 * Recording the VideoToolbox encoders only in https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] would keep them off the keyframe-verified list that the worker reads.
 * Deferring the VideoToolbox encoders would leave a Mac worker's hardware encoder unused, although both encoders already pass the recording checks.
@@ -1674,8 +1790,8 @@ Waiting for a replacement attempt to produce the missing segment would stall pla
 The extended GOP is safe only because forced keyframes, not the GOP, place every boundary.
 * Keeping the floored GOP for every encoder adds a second keyframe and a one-frame fragment beside most boundaries.
 It guards against a failure that the keyframe verification recordings rule out and that `SKIPPED_SEGMENT_NUMBER` would still name.
-* Verifying keyframes on sync samples alone would admit libx265.
-Its forced keyframes are CRA sync samples, and its backstop keyframe carried a RASL picture.
+* Verifying keyframes on sync samples alone would have admitted libx265 under its default open GOP.
+Under that GOP, libx265's forced keyframes are CRA sync samples, and libx265's backstop keyframe carried a RASL picture.
 The sync flag cannot distinguish an open GOP from a closed one.
 * A GOP of exactly the rounded-up number of frames fires on the same frame as a forced keyframe after a gap of that length.
 A recording cannot then show whether the encoder honored the forced keyframe or reached its GOP limit.
@@ -1946,6 +2062,15 @@ There the extra keyframe mostly fell on the interval's first frame, one frame be
 * Under the extended GOP no RASL picture followed a forced CRA picture.
 * With one forced keyframe suppressed, the keyframe that libx265's GOP placed instead was a CRA picture followed by one or two RASL pictures in three of the four recordings.
 * Under the floored GOP each libx265 recording held 3 to 23 RASL pictures.
+* The libx265 initialization segments under a GOP of 145 frames and under a GOP of 143 frames differed from byte 1,205 of their 3,847 bytes.
+* With FFmpeg 8.0.1, keyframes forced at 0, 1 and 2 s, 1 s segments at 1 fps and a GOP of 2 frames, no keyframe came at 3, 5, 7 or 9 s.
+* Worker PR https://github.com/streamarr/streamarr-transcode-worker/pull/60[streamarr/streamarr-transcode-worker#60] recorded libx265 again in the pinned worker image with `-x265-params no-scenecut=1:no-open-gop=1`.
+* Those recordings cover 66 s of a constant 23.976 fps source from the start, a replacement attempt from segment 5 that seeks one period early, the first 30 s with one forced keyframe left out, and the first 30 s under the floored GOP.
+* Every keyframe in those recordings was an IDR picture (HEVC NAL unit type 20) with no leading pictures.
+* Under the extended GOP of 145 frames, the only keyframes were the forced frames, one per segment.
+* With the forced keyframe for 18 s left out, libx265 restarted its GOP count at frame 288 and placed its backstop keyframe at frame 433, inside the interval that the missing keyframe would have opened.
+* The replacement attempt's initialization segment equalled the start-0 attempt's initialization segment, and each of its segments started on the start-0 attempt's frames.
+* A smoke test encoded a source with a scene cut at 2.5 s, and each of its three 6 s media segments started with an IDR picture and held no other random access picture.
 
 [[evidence-early-seek]]
 === The one-period-early seek

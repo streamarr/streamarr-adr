@@ -63,6 +63,10 @@ NOTE: An amendment sends the chosen keyframe's presentation time as the seek pos
 With the keyframe's decode time, that demuxer lands one keyframe interval early.
 A Matroska, MPEG-TS or any other source still gets the keyframe's decode time.
 
+NOTE: An amendment puts `h264_nvenc` and `hevc_nvenc` on the keyframe-verified list (<<decision-gop>>).
+The worker passes both encoders `-bf 3 -rc-lookahead 20` on every encode and on its startup test encode, so a GPU that cannot take those settings falls back to the software encoder.
+`av1_nvenc` stays off the list.
+
 NOTE: Under link:0013-stream-decision-architecture.adoc#reshape-rpus-starting-samples[ADR 0013], a job attempt that encodes an HEVC Dolby Vision source with no compatible base, such as profile 5, runs two FFmpeg processes when ADR 0013's conditions for moving the source's RPUs hold.
 The first FFmpeg copies only the source's video into fragmented MP4, with the source's raw timestamps, and the worker moves the RPUs and gives each video sample its duration in the source.
 The second FFmpeg reads the result on its standard input, reads the source's audio from a second input of the source with the single FFmpeg's seek and input options, and writes the fMP4 that this decision describes.
@@ -553,6 +557,8 @@ The mp4 muxer marks the CRA picture as a sync sample in both cases.
 libx264, SVT-AV1 and libx265 are keyframe-verified.
 `h264_videotoolbox` and `hevc_videotoolbox` are keyframe-verified with B-frames off.
 With B-frames on, neither encoder is keyframe-verified.
+`h264_nvenc` and `hevc_nvenc` are keyframe-verified with three B-frames and a 20-frame lookahead (`-bf 3 -rc-lookahead 20`).
+The worker always passes both settings to them, and its startup test encode passes them too.
 Upstream SVT-AV1 bug https://gitlab.com/AOMediaCodec/SVT-AV1/-/work_items/2385[#2385] stalled or reordered SVT-AV1's output, but the bug never dropped a forced keyframe (worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/42[#42]).
 The pinned runtime's SVT-AV1, release 4.3.0, contains the fix for that bug.
 The stall watchdog of the <<decision-waits,four waits>> and the short-sample rule for <<decision-untrusted-output,untrusted output>> still fail any attempt whose encoder stalls or reorders its output, so that the server can replace the attempt under ADR 0019.
@@ -593,7 +599,12 @@ With B-frames off, every forced keyframe in 176 recordings was a sync sample: 4,
 Each of those keyframes was an IDR picture with no leading pictures, and each encoder restarted its GOP count there.
 With `-bf 2`, HEVC's forced keyframes became CRA pictures followed by RASL pictures.
 VideoToolbox also placed IDR keyframes of its own at frames that differed between attempts, and none of them displaced a forced keyframe.
-Evidence: <<evidence-gop>>, <<evidence-svt-av1>>, https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57].
+The NVENC encoders were recorded on an RTX 5090 with NVIDIA driver 615.78.08, in the pinned worker image with FFmpeg 8.1.3, at 23.976 fps on a merged segment list.
+For both encoders at every rung of the default ladder, from the start and after a seek, every forced keyframe was a sync sample and an IDR picture with no leading pictures.
+In each recording that suppressed a forced keyframe, the next keyframe landed one extended GOP after the forced keyframe before it, and it was also an IDR picture with no leading pictures.
+With the lookahead on, NVENC also placed IDR keyframes with no leading pictures at scene cuts, and none of them displaced a forced keyframe.
+1080p recordings with the encoders' default B-frames and lookahead, and with `-bf 3 -rc-lookahead 0`, gave the same keyframe verdicts without the scene-cut keyframes.
+Evidence: <<evidence-gop>>, <<evidence-svt-av1>>, https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57], https://github.com/streamarr/streamarr-transcode-worker/pull/116[streamarr/streamarr-transcode-worker#116].
 
 [[decision-hardware-encoders]]
 === Hardware encoder backends join one at a time, after three checks
@@ -616,7 +627,9 @@ A second Mac must write the same parameter sets (SPS and PPS) as the first Mac f
 The output check stops a backend from writing a codec string, profile, level or tier that differs from what the playlist advertises.
 VideoToolbox's recordings made no timed runs, and only one Mac was measured.
 The parameter sets depend on the encoder's settings, and `-realtime 1` alone changed the H.264 SPS and the HEVC VPS, SPS and PPS.
-Evidence: https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56], https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57].
+`h264_nvenc` and `hevc_nvenc` pass all three checks on the RTX 5090.
+In three separate recording runs, each replacement attempt's initialization segment was byte-identical to its first attempt's at every rung, and every initialization segment passed the output check.
+Evidence: https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56], https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57], https://github.com/streamarr/streamarr-transcode-worker/pull/116[streamarr/streamarr-transcode-worker#116].
 
 [[decision-independent-segments]]
 === Keyframe-verified variants carry `EXT-X-INDEPENDENT-SEGMENTS`

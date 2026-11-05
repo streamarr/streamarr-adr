@@ -165,6 +165,10 @@ _Avoid_: title offset, audio offset, audio delay (the device's value), metadata 
 The amount by which the server shifts one audio rendition: the playback session's audio delay plus the rendition's audio sync correction, clamped to −2,000 ms to +2,000 ms. The server moves decode times and never changes a sample (ADR 0055).
 _Avoid_: total delay, effective delay (effective value is a metadata term), audio delay (the device's part alone)
 
+**Playback report**:
+A snapshot that a viewer shares with the Server Admin from the playback-data panel: the server's decisions for the viewer's own playback session, the player's figures at the moment the viewer shared it, and an optional note of up to 280 characters. A ServerAdmin reads it in the Shared reports list and marks it read. The server deletes it 30 days after it was shared (ADR 0013).
+_Avoid_: bug report, issue, ticket, feedback, diagnostics upload (no file is uploaded)
+
 **Source description**:
 The record of one media track as the probe found it.
 It never changes when the server chooses a playback output.

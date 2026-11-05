@@ -958,7 +958,12 @@ When the per-worker limit refuses a call, the server ends the call with `RESOURC
 The message has no fields, because its presence is the marker.
 The server refuses that call before it reads any of the call's messages, so it holds no byte of the segment.
 On a refusal that carries the marker, the worker queues that segment again, ahead of every segment that joined the queue after it.
-The worker opens the segment's call again only after a bounded back-off that the worker sets, because it cannot observe when the server finishes storing a canceled upload.
+The worker cannot observe when the server finishes storing a canceled upload, but the end of one of its own calls can free a place on the server.
+So when one of the worker's calls that holds a place ends, whether the server acknowledged its segment, the call failed or a stop canceled it, the worker ends the back-off of the earliest refused segment that still waits one out.
+That segment then opens its call as soon as its place in the queue and the worker's count of open calls allow.
+Each such end ends the back-off of a different refused segment, even when several calls end before a refused segment opens its call again.
+A call that the server refused at the per-worker limit is not such an end.
+Otherwise a refused segment opens its call again after a bounded back-off that the worker sets, so it still takes a place that the server frees while none of the worker's calls ends.
 The upload acknowledgment timeout, still counted from when the segment first waited, bounds the whole wait, so repeated refusals never extend it.
 A refusal at the fleet-wide limits carries no marker, and the worker fails the job attempt, as https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499] decides.
 Every other failure of an upload call also fails the job attempt, and ADR 0019's recovery handles each of these failures.
@@ -972,6 +977,8 @@ The field is named a limit, not a capacity, because the glossary reserves capaci
 Before this amendment, every call beyond the limit failed its job attempt.
 A plain wake-up lets any waiter take a freed call, so under load one producer could wait until its timeout while other producers went ahead.
 A marked refusal means that the worker's own uploads hold the server's places, and the server frees one once it finishes with a call that the worker has already given up.
+The end of one of the worker's own calls is an event that the worker sees and that can free a place, so a refused segment opens its call again at that end instead of waiting out its back-off.
+The back-off stays for a place that the server frees later than the end that the worker sees, as it does for a canceled call.
 A fleet-wide refusal means that the calls of every worker together fill the server, and the refused worker cannot tell when another worker's call ends.
 
 === An attempt completes only when four facts hold
@@ -1497,7 +1504,8 @@ The producer must both drain the pipe and cancel the upload.
 The worker contract gains `WorkerSessionAccepted.segment_upload_limit` and the `SegmentUploadLimitReached` marker, and a worker that reads neither fails a job attempt on every refusal, as before.
 * While its segment waits for a call, a job attempt uploads no chunk, and its output stops advancing once the producer's budget is full.
 ADR 0019's stall threshold can therefore end a long wait before the upload acknowledgment timeout does, and the server then replaces the job attempt as stalled.
-* A segment refused in the window after a canceled upload waits at least one back-off longer than it would if the server freed its place at the cancel.
+* A segment refused in the window after a canceled upload opens its call again when another of the worker's calls ends or when its back-off expires.
+While none of the worker's calls ends, it can wait up to one back-off longer than it would if the server freed its place at the cancel.
 * A MoQ proof of concept needs `separate_moof`, a smaller fragmentation target and a publisher adapter, not a second producer.
 
 == Rejected Alternatives

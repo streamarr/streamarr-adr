@@ -52,6 +52,8 @@ NOTE: An amendment replaces the segment list's whole slots with exact segment st
 Each job attempt of a stream session with a copied variant carries every segment's start in ticks of the source video stream's time base.
 In every variant of that stream session, segment N then starts at the presentation time of the source keyframe that opens copied segment N.
 Each encoded variant forces its keyframe on the first output frame at or after that start, so an encoded segment starts less than one output frame after the copied segment with the same number.
+Consecutive starts lie at least 100 ms apart, so every encoded variant has a frame in every segment.
+A copy places each keyframe at its stored tick only when the copy's timeline matches the probe's, so the server refuses a stream copy whose timeline may differ (<<decision-segment-list>>).
 A stream session without a copied variant keeps the plain 3 s grid and sends no list.
 
 NOTE: An amendment sends the chosen keyframe's presentation time as the seek position of an encoded replacement attempt that reads an MP4 or MOV source (<<decision-seek>>), because FFmpeg's MP4 demuxer seeks by presentation time.
@@ -349,6 +351,10 @@ A stream copy advertises each segment's real duration.
 A copied segment opens at the first source keyframe in its first slot, and segment 0 also holds the media before its keyframe.
 In that segment list, segment 0 starts at zero, and every later segment starts at the presentation time of the source keyframe that opens it.
 A segment's start is therefore exact, and is not the start of its first slot.
+A slot opens a segment at its first keyframe that presents at least 100 ms after the start of the segment before it.
+A slot without such a keyframe merges into the segment before it.
+100 ms is one frame at 10 frames per second, the slowest rate that the frame-rate rule chooses (<<decision-frame-rate>>).
+Every interval therefore holds at least one output frame of every encoded variant, and no forced keyframe falls in the next segment.
 The stream session's encoded variants force their keyframes at the segment list's starts.
 An encoded variant's forced keyframe is the first output frame that presents at or after a segment's start.
 An encoded segment therefore starts less than one output frame after the copied segment with the same number.
@@ -387,6 +393,14 @@ A merged segment is expected and never fails an attempt by itself.
 A keyframe that skips a listed segment still fails the attempt with `SKIPPED_SEGMENT_NUMBER`, because the server and the worker then disagree about the source's keyframes.
 Streamarr has no production instances, so the change makes no provision for workers of different versions.
 
+Exact starts need a copy to place each source keyframe at its stored tick.
+FFmpeg makes no start time correction for a container whose demuxer does not allow timestamp discontinuities, such as MP4, MOV and Matroska, so a copy of such a source keeps the stored ticks.
+A copy of any other source keeps the stored ticks only when the stored probe outcome carries the start time correction (<<decision-media-time-zero>>).
+The server refuses a stream copy with the reason `no_start_time_correction` when neither condition holds, and encodes the video instead.
+That refusal covers an MPEG-TS, MPEG-PS or Ogg source whose probe outcome predates probe version 8 or reports a fallback.
+The refusal narrows the media-time-zero rule's promise that no source plays worse during the re-scan.
+Such a source encodes until its probe version 8 outcome carries a correction.
+
 *Why exact starts:* With whole slots, a copied segment opens at the first source keyframe in its slot.
 An encoded segment with the same number then starts at the slot's start.
 The two starts can lie up to one slot apart.
@@ -400,6 +414,12 @@ Microseconds and nanoseconds cannot hold every tick exactly.
 An MPEG-TS tick is 1/90000 s, and an AVI time base such as 1001/24000 gives frame times with no terminating decimal.
 A rounded start would need one rounding rule that both repositories match.
 A start rounded past its keyframe would also move that keyframe into the segment before it.
+
+*Why 100 ms and a matching timeline:* With source keyframes at 5.986 s and 6 s in adjacent slots, a 24 frames-per-second encode has no frame in the interval from 5.986 s to 6 s.
+A check with FFmpeg 8.0.1 forced the frame at 6 s for both starts, so the encode skipped a segment number.
+Without the start time correction, a second audio track that started 154 ms before the first moved media time zero by 154 ms (<<evidence-timeline>>).
+A copy then places every keyframe 154 ms away from its stored tick.
+A keyframe that lands before its exact start joins the segment before it, so the copy skips a segment number.
 
 The segment cap, 128 MiB, is a constant of the worker contract that the server and the worker each fix in code, and no worker configures it.
 A merged segment can be long, and every variant and rendition of the stream session cuts its segments on the same list, so the server decides up front whether every advertised output fits.
@@ -1363,12 +1383,14 @@ No step rescans, drains or reconciles after exit.
 It loses `awaitSegment`, the liveness poll, the 50 ms constant and the output directory.
 * With no media on disk, the worker needs no segment base path and no code that cleans that path up.
 * The worker, not FFmpeg's muxer, decides where a segment ends.
+Tests verify this rule against recorded fixtures so that an FFmpeg upgrade under ADR 0029 cannot silently merge or split segments.
 * In a stream session with a copied variant, every encoded variant starts segment `N` less than one output frame after the copy's segment `N`.
 A player that switches variants at a segment boundary repeats or skips less than one frame of media.
 * A job attempt of a stream session with a copied variant carries one tick count for each segment.
 A two-hour source at 3 s slots has at most 2,400 segments, and each tick count takes at most 10 bytes, so the list stays under 24 KB.
 * A stream session without a copied variant keeps the plain grid, and its job attempts carry no list.
-Tests verify this rule against recorded fixtures so that an FFmpeg upgrade under ADR 0029 cannot silently merge or split segments.
+* An MPEG-TS, MPEG-PS or Ogg source whose probe outcome carries no start time correction encodes instead of copying.
+* A slot whose keyframes all present less than 100 ms after the start of the segment before it merges into that segment.
 * A stream-copy replacement attempt now starts on the advertised segment boundary, because the producer discards the preroll fragment.
 Its audio starts with the first sample at or after the boundary, so it no longer repeats audio that the previous segment holds.
 From an MPEG-TS source that repeat had been ten AAC frames, and Chromium dropped 7 video frames at the junction.
@@ -1484,6 +1506,8 @@ A switch between the copy and an encoded variant then repeats or skips up to one
 * Carrying a rational time in each entry: every entry would repeat the same denominator, and the worker would check one more rule for each entry.
 * Listing exact starts for a stream session without a copied variant: the plain grid already starts segment `N` at exactly `N × 3 s`.
 A 3 s step is also not a whole number of ticks in a time base such as 1001/24000.
+* Letting two starts lie closer than one output frame: an encode then has no frame in that interval and skips the segment number.
+* Keeping a slack for a copy whose timeline may differ from the probe's: a keyframe that lands before its exact start joins the segment before it, so no slack keeps the copy's segments on the list.
 * Counting copies against the slots' segment memory budget: copies that take no slot could fill it with unfinished segments and starve the encodes.
 * A fixed number of copies, or a setting for it: the memory that a worker can give copies depends on its container's limit, which the worker already knows.
 * Sizing the copy cap from the raw container memory limit: that limit also covers the JVM's other memory regions, so the cap would admit copies that the heap cannot hold.

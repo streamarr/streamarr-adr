@@ -7,7 +7,8 @@ Accepted
 NOTE: Under link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043], the stream decision selects every audio track and chooses the text subtitle tracks.
 The server delivers each selected track as an HLS rendition.
 Each audio track keeps its own copy-or-encode decision inside one audio codec per stream session.
-An image subtitle track that the viewer selects is burned into the video.
+An image subtitle track that the viewer selects is burned into the video for a client without a subtitle layer.
+A client with that layer draws the subtitle itself (link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc#decision-subtitle-layer[ADR 0043]).
 
 NOTE: link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045] adds direct play as an outcome of the stream decision.
 The stream decision chooses direct play only when the viewer picks Original.
@@ -20,6 +21,10 @@ In a fixed quality, the encode keeps the same fixed quality.
 In both, the client tells the viewer that a converted version is playing.
 This ADR's rule that switches a copy without parameter sets to an encode therefore applies in every playback choice.
 When the stream decision rules out direct play and every copy in Original, the encode that it chooses also plays in Auto, with the same notice.
+
+NOTE: An amendment makes each playback session keep typed decision reasons (<<decision-reasons>>).
+A playback-data panel shows a viewer the reasons for that viewer's own playback.
+A live active-streams view shows ServerAdmins every active stream session with its reasons.
 
 NOTE: link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032] changes where the probe input comes from.
 The pipeline's probe step reads persisted container and stream rows; ffprobe runs during library file processing, not at stream creation.
@@ -717,7 +722,33 @@ The server may encode a stream, or copy a stream that the client could not play 
 The decision then lists the properties that each capability entry of the source's codec family did not accept.
 When no capability entry names the source's codec family, the decision names the codec family.
 The decision also names each property issue that rules out a copy.
-For now, the list stays in the server: the server logs it and counts it in a metric tagged by property.
+The server also logs the list and counts it in a metric tagged by property.
+The list becomes the decision reasons of the stream session (<<decision-reasons>>).
+
+[[decision-reasons]]
+=== Each playback session keeps typed decision reasons, which viewers and ServerAdmins can see
+
+The stream decision records why it plays the file directly, copies a stream or encodes it.
+It records each reason as a typed value, not as text.
+A reason names the fact that ruled out a copy or direct play, such as a property that <<copy-refusals>> lists.
+Examples are a codec that the client does not declare, a source above the viewer's maximum bitrate, a subtitle that needs burn-in, and a copy that lacks its parameter sets.
+The playback session keeps the reasons of each of its stream sessions.
+The issue that builds the reasons names their values.
+
+Two views show the reasons.
+The Apple and web players offer a playback-data panel, which any viewer can open during playback.
+The panel shows the viewer's own playback session: whether each stream plays directly, copies or encodes, and why.
+A live active-streams view shows a ServerAdmin every active stream session.
+Each row shows the Profile that watches, the media title, whether each stream plays directly, copies or encodes, and why.
+The view updates through a GraphQL subscription (link:0042-graphql-subscriptions-run-over-websocket-until-token-expiry.adoc[ADR 0042]).
+It lists only active stream sessions and keeps no history.
+Only a ServerAdmin can open it, and the server checks that authority from live facts through Cedar (link:0025-cedar-decides-authorization.adoc[ADR 0025]).
+Like `libraryStatusChanged`, the subscription authorizes when it opens, and that authority lasts until the opening token expires (ADR 0042).
+So a ServerAdmin whose authority ends keeps receiving rows for at most the rest of that token's lifetime.
+
+*Why:* A viewer whose file encodes can see why without server logs, and can then change a setting or a device.
+A ServerAdmin can see who uses worker capacity, and why each encode runs.
+Typed reasons let each client word a reason in its own interface, and let tests assert the reason.
 
 [[explicitly-deferred]]
 === Explicitly deferred
@@ -727,10 +758,9 @@ For now, the list stays in the server: the server logs it and counts it in a met
 * Client-declared dynamic ranges (https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395]).
 Client-declared dynamic ranges alone do not bring back HDR copies.
 * Profile 10.0 copies, until the worker's `dav1` rewrite is verified (<<no-compatible-base-copies>>).
-* Showing the list of refused properties to clients, such as on a media information screen (<<copy-refusals>>).
-The field can arrive when a client builds that screen.
 * How a planned output describes Dolby Vision in the worker contract (https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396]).
 * Whether the produced-output check accepts HDR10+ or Dolby Vision in a copy whose plan names them `ABSENT`, because the probe could not check them (<<copy-planned-range>>).
+* A stop-stream action in the active-streams view, and a history of ended stream sessions (<<decision-reasons>>).
 * Choosing the HEVC sample-entry tag of every copy, and copying sources whose sample-entry tag is `dvhe` or `dvav` (https://github.com/streamarr/streamarr-transcode-worker/issues/18[streamarr/streamarr-transcode-worker#18]).
 
 == Consequences
@@ -738,7 +768,8 @@ The field can arrive when a client builds that screen.
 * Decision records are pure domain objects.
 * Mode resolution considers all stream decisions (e.g. subtitle burn-in promotes REMUX -> FULL_TRANSCODE).
 * New stream types follow the same pattern.
-* TranscodeReason tracking can be added as metadata on each decision later.
+* Each playback session carries its typed decision reasons (<<decision-reasons>>).
+A new rule in the stream decision adds a reason value with it.
 * Encodes no longer produce High 10 or PQ-tagged H.264.
 Firefox refuses High 10.
 Apple's players refuse PQ-tagged H.264.
@@ -814,6 +845,10 @@ The viewer then waits through a failed start before the next format attempt or t
 
 == Rejected Alternatives
 
+* Decision reasons only in the server's logs: a viewer cannot read them, and a ServerAdmin must search them.
+* Reasons as free text: clients could not word them in their own interface, and tests would match strings.
+* An active-streams view open to every viewer: it would show each viewer what other Profiles watch.
+* A live authority check before each row of the active-streams view: ADR 0042 bounds every subscription's authority by its token's lifetime, and this view needs no exception to that rule.
 * 10-bit H.264 output (High 10): Firefox refuses High 10.
 In headless Firefox on macOS, `MediaSource.isTypeSupported` returned false for High 10 in 21 of 21 runs.
 Before this amendment, the pinned worker image encoded every 10-bit HEVC source to High 10, in 13 of 13 encodes.
@@ -840,6 +875,8 @@ AVPlayer without an HDR display refuses a variant declared `VIDEO-RANGE=HLG`.
 WebKit's native player times out on that variant.
 * Leaving tone mapping to the worker's discretion: link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036] requires the server to choose every change to the source.
 The worker would also probe the source a second time.
+* Sending an HDR copy to a client on an SDR screen and letting the device tone-map it: the server keeps tone mapping, because no measurement shows how iOS and tvOS tone-map an HDR copy on an SDR TV.
+A research issue measures that device tone mapping before Streamarr reconsiders it.
 * The bt2390 tone curve at the same 1000-nit peak, or the bt2390 curve as a fallback if the mobius curve showed a color cast: above the peak, the bt2390 curve folds back and maps brighter input to darker output.
 A highlight brighter than 1000 nits therefore renders darker than a 1000-nit highlight.
 With the pinned build's filter, the bt2390 curve mapped a 983-nit PQ gray to luma 235.

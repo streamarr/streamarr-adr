@@ -149,6 +149,10 @@ _Avoid_: target frame rate, frame rate (unqualified) for the encode's rate
 The logical span of one viewing of a media title, which survives replacement stream sessions and holds the format-failure history and the format-attempt budget.
 _Avoid_: playback (ADR 0018's token and request surface), app session, stream session (one server-side run inside it)
 
+**Decision reason**:
+A typed value that the stream decision records for why a stream session plays the file directly, copies a stream or encodes it, such as a codec that the client does not declare. The playback session keeps the reasons. A viewer sees them in the playback-data panel for that viewer's own playback, and a ServerAdmin sees every active stream session's reasons in the active-streams view (ADR 0013).
+_Avoid_: transcode reason (it also explains copies and direct play), log message
+
 **Audio delay**:
 A signed offset, from −2,000 ms to +2,000 ms in 10 ms steps, that a viewer sets to correct the lip-sync error of one device's playback chain. A positive delay plays the sound later than the picture. The client keeps it per device and per audio output and sends it with the playback session, which keeps it while it lasts (ADR 0055).
 _Avoid_: audio offset, lip-sync offset, A/V sync setting, audio latency (what the chain adds, not the correction), applied audio delay (the sum that the server shifts by)
@@ -187,6 +191,18 @@ The maximum width and height apply as the client gives them, and the maximum bit
 When the audio leaves no room for the 360p tier under the maximum bitrate, the server lowers the audio through the audio steps before the stream exceeds the maximum.
 Outside Original, a video copy costs its video plus the session's audio, and the server lowers the audio before it encodes the video.
 _Avoid_: client capabilities (what the player can decode), quality cap
+
+**Language override**:
+A Profile's choice of audio language, subtitle language or subtitle mode for one episode or movie, one season or one series. An empty choice comes from the next wider level. The choice that the client sends when it starts a stream session comes first, then the most specific override, then the Profile's preferences, then the file's own default. A switch of audio or subtitles in the player becomes the Profile's override for that episode or movie only, and never carries to the next episode; turning on a full subtitle stores its language with the mode `ALWAYS`. A change on a settings screen outside the player stores the override of that screen's episode, movie, season or series (ADR 0043).
+_Avoid_: track preference, per-title track, per-track override, default track (the file's flag)
+
+**Preferred audio languages**:
+A Profile's ordered list of at most five audio languages. A stream session plays the first language in the list that the file holds in a track that can be the default. Each language is a value of the server's language table, which the schema exposes as the `Language` enum and which maps each value to the codes that files carry (ADR 0043).
+_Avoid_: preferred language (unqualified), language code (for the enum value)
+
+**Subtitle mode**:
+A Profile's rule for when a subtitle track starts on: `OFF` starts none, not even a forced track; `FORCED`, the default, starts only a forced track in the selected audio's language; `ALWAYS` starts the track in the Profile's default subtitle language (ADR 0043).
+_Avoid_: subtitle preference, subtitles on or off (for the stored setting), auto subtitles, foreign audio (no such mode)
 
 **Audio step**:
 One audio codec, channel layout and bitrate that the server can deliver in place of the stream session's audio under the viewer's maximum bitrate: the session's own audio first, then a lower-rate step for a FLAC or ALAC rendition above 48 kHz (ADR 0043), then multichannel steps at lower bitrates, then AAC stereo at 128 and 96 kb/s, or AAC mono at 96 kb/s for a mono track or when no AAC entry for HLS accepts more than one channel.
@@ -243,6 +259,10 @@ _Avoid_: chunk, part
 An alternate HLS track, such as one audio language or one text subtitle track. The multivariant playlist lists each rendition in an `EXT-X-MEDIA` tag. Each rendition has its own media playlist. A viewer switches renditions without leaving the variant. A variant is the quality-ladder option that an `EXT-X-STREAM-INF` tag lists. A rendition is never a variant (ADR 0043).
 _Avoid_: variant, audio variant, alternate stream, track (unqualified)
 
+**Subtitle layer**:
+A client's own view above the platform's player that draws subtitles from the original subtitle data that the server sends: text, ASS and SSA with their styling, and PGS images. A client without one gets WebVTT renditions and burned-in image subtitles (ADR 0043).
+_Avoid_: overlay (unqualified), subtitle renderer, burn-in (the server's fallback)
+
 **Audio frame grid**:
 The start times of an encoded audio rendition's frames, at its encoder's frame length and sample rate, counted from the default track's first sample: the copy's own first sample when the session copies the default track, and the track's probed start when the session encodes it. Every job attempt puts each audio encode's frames on that rendition's grid, allowing for the encoder's fixed delay, so consecutive job attempts meet without a gap or an overlap. A copied track keeps its own frames, and the producer never moves it (ADR 0043).
 _Avoid_: encoder frame grid, audio snap
@@ -296,7 +316,7 @@ An encoder is keyframe-verified when recordings under the pinned FFmpeg show tha
 _Avoid_: verified encoder (unqualified), GOP-verified encoder
 
 **Direct play**:
-The delivery in which the server sends the source file itself, and the player reads it with HTTP byte-range requests. Only Original direct-plays, and only a file whose source container, video stream, audio tracks and any selected subtitle the client capability declaration covers. A direct-play stream session starts no job attempt (ADR 0045).
+The delivery in which the server sends the source file itself, and the player reads it with HTTP byte-range requests. Only Original direct-plays, and only a file whose source container, video stream, audio tracks and any selected subtitle the client capability declaration covers. A direct-play stream session starts no job attempt (ADR 0045). A player that cannot select an audio track inside the file, such as Chromium's or Firefox's, direct-plays a file only when the chosen audio track is the file's first audio track; when the viewer switches to another track, the client moves to HLS at the viewer's position (ADR 0043).
 _Avoid_: direct stream, passthrough, stream copy (an HLS delivery)
 
 **Sample entry**:
@@ -422,7 +442,7 @@ One output format that the server chooses within a playback session. Each format
 _Avoid_: fallback stream, replacement (unqualified)
 
 **Encoder backend**:
-An encoder that a worker runs for a codec family, together with whether it is hardware or software. A worker can run a hardware and a software backend for the same codec family, so the variants of one codec family can come from two backends at once (ADR 0044). When a connected worker has a hardware backend for the chosen codec family, the server dispatches each variant to a worker with that hardware backend first, and to a software backend only when no such worker has a free playback slot (ADR 0009). Every replacement attempt for a variant must use the backend of the job attempt that produced the variant's initialization segment (ADR 0037).
+An encoder that a worker runs for a codec family, together with whether it is hardware or software. A worker can run a hardware and a software backend for the same codec family, so the variants of one codec family can come from two backends at once (ADR 0044). When a connected worker has a hardware backend for the chosen codec family, the server dispatches each variant to a worker with that hardware backend first, and to a software backend only when no such worker has a free playback slot (ADR 0009). Every replacement attempt for a variant must use the backend of the job attempt that produced the variant's initialization segment (ADR 0037). When a hardware backend fails during a stream, playback continues on a new variant from the software backend of the same codec family on any worker with room, the failed worker first, and the worker stops offering the failed backend, and decodes in software, until the backend and the hardware decoder pass their checks again (ADR 0044).
 _Avoid_: encoder capability, codec
 
 **Completed attempt**:
@@ -460,7 +480,7 @@ The number of items of one kind that a worker accepts at once. Each worker grant
 _Avoid_: limit (unqualified), quota, concurrency
 
 **Playback slots**:
-The capacity for job attempts. A worker setting fixes it until encoder headroom replaces it. Probes never use a playback slot.
+The capacity for job attempts that encode video. A worker setting fixes it until encoder headroom replaces it. A job attempt that copies the video takes no playback slot, even when it encodes audio, and the server's transcode limit leaves it out too (ADR 0044). A worker bounds its copies by a copy cap that it sizes from its maximum heap after a reserve instead, and refuses a copy beyond it with its own failure value (ADR 0037). Probes never use a playback slot.
 _Avoid_: slots for probes, shared slots, free slots (as encoder headroom)
 
 **Playback probe**:

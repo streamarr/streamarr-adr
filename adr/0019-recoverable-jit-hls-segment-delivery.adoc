@@ -23,6 +23,9 @@ The relocation gap is how far a requested media segment may lie ahead of a runni
 The two-segment relocation gap depends on the decode-only early-start seek that link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] specifies.
 With the decode-only early-start seek, a job attempt reads from the source keyframe that the server sends.
 The job attempt then decodes the media before its first segment but does not encode that media.
+An amendment keeps an idle stream session's segments for one hour by default, as a ServerAdmin setting, and ends the longest-idle stream sessions first when the segment disk runs short of space (<<decision-idle-retention>>).
+The same amendment has a left variant that copies the video give up its place under a worker's copy cap when the worker refuses a copy because that cap is full (<<decision-requested-variant>>).
+An amendment lets a new viewer's first request stop another stream session's left variant that copies the video on a full worker, and gives the new viewer the capacity error when no such left variant is left to stop (<<decision-requested-variant>>).
 
 === Implementation status
 
@@ -36,6 +39,8 @@ The server still relocates forward when the segment 24 s before the requested se
 https://github.com/streamarr/streamarr-server/issues/550[streamarr/streamarr-server#550] implements <<decision-newest-request>>.
 https://github.com/streamarr/streamarr-server/pull/676[streamarr/streamarr-server#676] implements the current segment as the media segment that the player needs next, and the preroll in the startup budget.
 https://github.com/streamarr/streamarr-server/pull/677[streamarr/streamarr-server#677] keeps the variant that the player leaves running until the switched variant delivers a media segment.
+https://github.com/streamarr/streamarr-server/pull/744[streamarr/streamarr-server#744] takes copies out of the transcode limit and the worker job slots, stops a left variant that copies the video when a worker refuses a copy with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` (https://github.com/streamarr/streamarr-server/pull/769[streamarr/streamarr-server#769]), and lets a new viewer's first request make room for its copy.
+https://github.com/streamarr/streamarr-server/pull/747[streamarr/streamarr-server#747] implements <<decision-idle-retention>>.
 The server does not yet publish the preparing-or-ready state (https://github.com/streamarr/streamarr-server/issues/507[streamarr/streamarr-server#507]).
 The worker does not yet pad an encoded variant past a source that ends early (https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511]).
 The server does not yet start extra variants from encoder headroom (https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499]).
@@ -183,27 +188,47 @@ A request for a third variant stops the variant that the player switched to befo
 * A failed or replaced job attempt of the requested variant does not stop the left variant.
 * A relocation restarts only the requested variant at the requested segment.
 * After a relocation, a variant that is not running starts when the player next requests one of that variant's segments.
-* The configured transcode limit caps how many job attempts run at once across every stream session that transcodes.
+* The configured transcode limit caps how many job attempts that encode video run at once across every stream session.
+A job attempt that copies the video never counts against the limit and takes no worker job slot, even when it encodes audio (link:0044-encoder-headroom-and-the-preset-scale.adoc#decision-copies-take-no-slot[ADR 0044]).
 When a variant must start and the transcode limit leaves no room, the server starts nothing.
 The server answers that request with `503 Service Unavailable`, with no body and no `Retry-After`.
 The server never stops another stream session's requested or played variant to make room.
 A media-segment request stops the stream session's other video variants except the left variant before the server checks the limit, so their job attempts no longer count.
-The left variant's job attempt counts against the limit and takes a worker job slot.
+The left variant's job attempt counts against the limit and takes a worker job slot when it encodes video.
 When no configured transcode slot is free, or no worker that can run the variant has a free worker job slot, and a media-segment request's variant cannot start beside the left variant, the server stops the left variant if the stop frees the slot that the start lacks, and tries the start once more.
-A left variant frees a configured transcode slot when its stream session transcodes.
-A left variant frees a worker job slot when its job attempt runs on a worker that can run the start.
+A left variant frees a configured transcode slot when its job attempt encodes video.
+A left variant frees a worker job slot when its job attempt encodes video and runs on a worker that can run the start.
 Only a worker that advertises a variant's pinned encoder can run that variant's later job attempts.
 The same rule holds when a media-segment request's replacement of a dead or stalled job attempt of the requested variant finds no free worker job slot.
 The replacement runs on one worker, so the left variant frees a worker job slot only on that worker.
 A start that fails for another reason, such as no worker that runs the variant's pinned encoder, leaves the left variant running.
-An initialization request never stops a variant to make room.
-A stream session that only remuxes starts its variants without checking the limit.
+An initialization request never stops a variant to make room, except for a new viewer's first request as the rule below on other stream sessions says.
+A variant that copies the video starts without checking the limit, even when its job attempt encodes audio.
+* A worker refuses a copy while its copy cap is full, and its refusal names that reason with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-memory[ADR 0037], https://github.com/streamarr/streamarr-server/pull/769[streamarr/streamarr-server#769]).
+A left variant whose job attempt copies the video holds one place under the copy cap of the worker that runs it.
+Such a left variant takes no worker job slot and no configured transcode slot, so its stop frees neither.
+A start or replacement that finds no free worker job slot, or no free configured transcode slot, never stops a left variant that copies the video, in its own stream session or in another.
+The server stops such a left variant to make room only when the worker that runs it refuses a copy with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED`.
+A copy that fails to start for any other reason stops no left variant and goes to ordinary recovery.
+When a worker refuses with that value to start a media-segment request's variant that copies the video, and the stream session's left variant copies the video on that worker, the server stops the left variant and tries the start once more.
+The same rule holds when a worker refuses with that value a media-segment request's replacement of a dead or stalled job attempt that copies the video.
+As for slots, an initialization request never stops a variant for a refused copy.
 * A left variant never keeps another stream session from playing.
 When no configured transcode slot is free, or no worker that can run the start has a free worker job slot, the server stops one other stream session's left variant and tries once more.
+When a worker refuses a copy with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` and runs another stream session's left variant that copies the video, the server stops that left variant and tries the copy once more on that worker.
 It does so when a new stream session is refused admission, when a new stream session's first-listed variant cannot start, when a variant cannot start on demand, and when a dead or stalled job attempt cannot be replaced.
+A start on demand here is a media-segment request's start, because an initialization request stops no producer outside a new viewer's first request.
 The server stops another stream session's left variant only while the left variant's job attempt runs and the job attempt of that stream session's requested variant runs.
 While the requested variant has no running job attempt, the left variant is the only variant that can serve that stream session's player.
-The server stops only a left variant whose stop frees the slot that the start lacks.
+The server stops only a left variant whose stop frees the slot, or the place under the copy cap, that the start lacks.
+* A new viewer's first request may stop another stream session's left variant that copies the video on a full worker.
+Before the new stream session's player requests its first media segment, any request of its first-listed variant, an initialization request included, may stop that left variant when a worker refuses the first-listed variant's copy with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED`.
+The server then tries the copy once more on that worker, as for a media-segment request.
+This is the one case in which an initialization request stops a producer.
+The new viewer's first request never stops another stream session's requested or played variant, whether that variant copies or encodes the video.
+When no other stream session's left variant frees what the start lacks, the new viewer gets the capacity error instead.
+`createPlaybackSession` returns `TranscodeCapacityUnavailableError`, a held segment request ends with `503 Service Unavailable`, and the viewer reads the plain capacity message of https://github.com/streamarr/streamarr-server/issues/507[streamarr/streamarr-server#507].
+A capacity shortage uses no format attempt.
 * Apart from the first-listed variant, no variant starts before the player requests one of that variant's segments, unless the headroom model of link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] allows that variant to start early.
 * Until the headroom model is validated, the headroom model allows no variant to start early.
 * The headroom model never starts a lower variant beside a copy in Auto early, and never keeps one running as an extra variant (link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc#decision-lower-variants[ADR 0050]).
@@ -255,6 +280,9 @@ The played variant survives a rapid climb because the player last received media
 A switched variant that has delivered nothing is not a known fallback.
 The left variant must not keep the switched variant from starting, so the left variant gives up its slot when no other slot is free.
 The left variant only insures one player's switch back, so it gives up its slot to any other stream session that finds no free slot.
+A place under a worker's copy cap is a slot for copies, so a left variant that copies the video gives up that place in the same cases.
+The server cannot see a worker's copy cap, so it learns that the cap is full from the worker's `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` refusal, and only that refusal triggers the stop.
+Another refusal says nothing about the copy cap, so stopping a left variant for it would cost a player its fallback and free nothing that the retry can use.
 Unlike a requested or played variant, stopping it stalls no viewer.
 The left variant only helps while it can serve the player's position.
 After a seek past its relocation gap, its output no longer serves the player.
@@ -274,6 +302,12 @@ That viewer's player would then request its segment again, and the new request c
 Stream sessions would keep stopping each other's variants.
 `503 Service Unavailable` gives the player the same clear boundary as exhausted recovery.
 The player's own retry budget and its adaptive-bitrate switch then decide what happens next.
+
+*Why a new viewer's first request may stop another stream session's left copy:* The server cannot see a worker's copy cap, so it learns that the cap is full only when the worker refuses the new stream session's copy.
+The copy starts when the stream session is created, and its player then requests the initialization segment first.
+If only a media-segment request could make room, the refused copy would fail on that initialization request while another player's left copy kept the place.
+A left copy only insures one player's switch back, so it gives up its place to a new viewer.
+A requested or played variant serves a viewer who is watching it, so the new viewer gets the capacity error rather than interrupting that viewer's stream.
 
 *Why other variants wait for a request:* The measurements in this paragraph used libx264 at the `medium` preset, 6 s segments and the four-variant ladder on a 10-core host.
 Starting the four variants together made every variant about 3× slower than starting that variant alone.
@@ -416,6 +450,34 @@ Attempt identity is a write-point fence, not per-request state: `ProducerLifecyc
 Worst-case pre-terminal latency is `budget × stall threshold` plus dispatch overhead; in a large worker pool that can exceed one viewer's patience, which is accepted — every attempt is a genuine recovery chance and the player's variant switch proceeds in parallel.
 Transient upload back-pressure is a self-classifying condition: the producer retries the affected segment with bounded back-off rather than failing the whole variant (worker-side retry tracked in https://github.com/streamarr/streamarr-transcode-worker/issues/1[worker issue #1, transferred from streamarr-server issue #253]; until it lands, a back-pressure failure consumes one replacement attempt).
 
+[[decision-idle-retention]]
+=== An idle stream session keeps its segments for one hour, and a full disk ends the longest-idle stream sessions first
+
+A stream session is idle once the server has received no request for it for the stream session timeout.
+The stream session timeout is 60 s by default, and the server already suspends an idle stream session's job attempts.
+A stream session's idle time counts from the start of its last request.
+When a stream session has been idle for the retention time, the server ends the stream session and deletes its stored segments.
+The retention time is one hour by default.
+A ServerAdmin changes the retention time in the web client's ServerAdmin settings, as for the preset setting of link:0044-encoder-headroom-and-the-preset-scale.adoc#decision-preset-setting[ADR 0044].
+The retention time is at least 5 minutes and at most 7 days.
+The server stores media segments in their own folder, which `STREAMING_SEGMENT_BASE_PATH` names.
+When the disk that holds that folder has less than 10 % free space, the server ends idle stream sessions before their retention time ends.
+The server ends the stream session that has been idle longest first, and checks the free space again after each one.
+It never ends a stream session that is not idle to free space.
+A direct-play stream session stores no segments, so the server never ends one to free space.
+A request that reaches a stream session before the server ends it keeps that stream session.
+A playback token is valid for the media's duration plus the retention time (link:0016-authentication-mechanisms-and-session-security.adoc[ADR 0016]), so a viewer's pauses total at most the retention time within one token.
+When the stream session or the playback token of a player has ended, the player starts again at the viewer's position, with a new stream session and a new playback token, and does not ask the viewer.
+The same holds after a pause, and for a player whose stream session the server ended while the player played a long merged segment from its buffer (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]).
+
+*Why:* The earlier retention of 24 hours kept every abandoned stream session's segments for a day.
+A 2-hour 2160p variant at 20 Mb/s leaves about 18 GB of segments for each viewer.
+One hour covers a viewer who pauses for a short break, who then resumes without new job attempts for the stored segments.
+The ServerAdmin knows the size of the segment disk, so the retention time is the ServerAdmin's setting.
+A fixed retention time cannot protect a small disk during a busy evening, so a short disk ends the stream sessions that are least likely to resume.
+The server already notes the time of each request when the request arrives, so idle time needs no record of which requests the server still holds.
+A player whose stream session ended starts again at the same position, so a stream session that the server ends too early costs a short wait, not the viewer's place.
+
 [[decision-repeating-failures]]
 === A failure that would repeat gets no replacement attempt
 
@@ -450,6 +512,13 @@ The static-playlist obligation makes recovery mandatory rather than optional, an
 Liveness-bounded waits remove the spurious-timeout failure mode under load and slow start.
 Pull-based recovery makes a failed producer invisible to the viewer in the common case: a brief stall while a fresh producer catches up; `503 Service Unavailable` appears only after the finite recovery cycle is exhausted.
 The active playlist structure suite converts structural protocol assumptions into always-on checks; the delivery suite landed with the recovery implementation of https://github.com/streamarr/streamarr-server/issues/252[streamarr/streamarr-server#252].
+A viewer who pauses for longer than the retention time loses the stream session, so playback after that pause starts a new stream session at the same position, with new job attempts.
+A player that plays a long merged segment from its buffer sends no request until it needs the next segment.
+When that gap exceeds the stream session timeout while the segment disk is nearly full, the server can end the stream session, and the player starts again at the same position with new job attempts.
+The server counts idle time from the start of a request, so a stream session whose last request the server holds for longer than the retention time, at least 5 minutes, ends while the request waits.
+That player also starts again at the same position.
+A playback token is valid for the media's duration plus the retention time (link:0016-authentication-mechanisms-and-session-security.adoc[ADR 0016]), so the one-hour default also limits a viewer's pauses to one hour in total within one token.
+The player then starts again at the same position without asking the viewer, so a long pause costs a short wait, not a choice.
 ADR 0008's blanket "RFC 8216 compliance" consequence is narrowed: server-generated playlists remain fully controlled, but on-demand delivery intentionally deviates from §6.2.1 immediate-availability as recorded here.
 The costs are added producer-lifecycle and liveness logic in the streaming layer, per-request liveness evaluation on the segment path, continuity validation across producer boundaries, and additional build and continuous-integration time for the protocol suites.
 When a source ends early, a viewer of an encoded variant sees the last frame with silence from the real end to the advertised end.
@@ -474,6 +543,9 @@ While the left variant runs, the switched variant shares the worker's encoder wi
 The switched variant's first media segment therefore takes longer than under the previous rule, which stopped the left variant at once.
 That cost was not measured.
 When another stream session needs the left variant's slot, the player's switch back starts a new job attempt.
+The same holds for a left variant that copies the video when a worker refuses a copy with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED`.
+A copy that fails to start for any other reason leaves every left variant running.
+On a full worker, a new viewer whose first request finds no left variant to stop gets the capacity error, even when stopping another viewer's running stream would have made room.
 
 The measured sessions started no variant when the stream session was created.
 Starting the first-listed variant at creation was not measured.
@@ -490,6 +562,15 @@ With the `faster` preset, which ADR 0044 makes the default for libx264, hls.js s
 
 == Rejected Alternatives
 
+* Keeping an idle stream session's segments for 24 hours fills the segment disk with stream sessions that no viewer resumes.
+* Deleting a stream session's segments as soon as its player stops requesting them would make a short pause or a dropped connection start new job attempts for media that the server already stored.
+* A retention time that only an environment variable sets would make the ServerAdmin restart the server to change it.
+* Asking the viewer whether to resume after a long pause: the player already knows the position, so the question adds a step and no choice.
+* Counting idle time from the end of the last response, and never while the server holds a request for the stream session.
+The server would have to track each stream session's held requests again, which https://github.com/streamarr/streamarr-server/issues/75[streamarr/streamarr-server#75] removed.
+The rule guards only against a request that the server holds for longer than the retention time, whose minimum is 5 minutes.
+* A protection time of the stream session timeout plus twice the stream session's longest media segment, before which the server never ends a stream session, even when the segment disk is nearly full.
+It adds a rule for a player that plays a long merged segment from its buffer, a case that the player's restart at the same position already covers.
 * Growing or event-type media playlist advertising only produced segments — satisfies §6.2.1 but forfeits instant whole-timeline seek, makes segment production stateful, and complicates recovery for no viewer-visible gain.
 * Low-latency HLS blocking playlist reload as the segment-wait mechanism — presumes a growing live playlist, does not apply to a static on-demand playlist, and specifies no error path for a segment that cannot be produced.
 * A fixed wall-clock segment-wait timeout returning `404` before liveness-driven recovery — converts slow production into spurious failures and papers over the missing recovery instead of providing it.
@@ -540,6 +621,14 @@ One player's insurance for a switch back would refuse another viewer's playback 
 * Stopping the first left variant that any other stream session keeps.
 That stream session's requested variant may have failed to start, and the stop would then leave its player with no running variant.
 The stop may also free a slot on a worker that cannot run the start.
+* Letting a left variant that copies the video keep its place under a worker's copy cap would let a left variant refuse another viewer's copy.
+* Treating every refused copy as a full copy cap of the worker that refused it.
+A copy that fails to start for another reason would stop another player's left copy, and the retry would fail again.
+`JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` names the reason, so only a full copy cap stops a left copy.
+* Letting only a media-segment request stop another stream session's left copy.
+A new viewer's refused copy would fail on its initialization request while the left copy kept its place.
+* Stopping another stream session's requested or played variant for a new viewer's first request on a full worker.
+That would interrupt a viewer's stream in progress to start a stream for someone else.
 * Counting the free worker job slots of every worker that can run the stream session's decision when the variant is pinned to one encoder.
 A free slot on a worker without the pinned encoder would hide the shortage, so the start would never stop a left variant on the worker that runs the pinned encoder.
 * Stopping the stream session's own left variant on any worker when the start lacks a worker job slot.

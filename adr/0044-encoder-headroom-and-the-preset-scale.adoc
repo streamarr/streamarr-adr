@@ -16,6 +16,10 @@ An amendment to link:0032-media-file-probe-results-are-persisted.adoc#probe-capa
 The worker measures production speed and reports each media segment's production time with the segment's upload.
 The server no longer derives production speed from the arrival times of media segments.
 
+A later amendment takes copies out of the playback slots and the server's transcode limit (<<decision-copies-take-no-slot>>).
+A job attempt that copies the video takes no playback slot, even when it encodes audio.
+The same amendment decides what happens when a hardware encoder backend fails during a stream, and stops hardware decoding on that worker until the encoder and the decoder pass their checks again (<<decision-hardware-failure>>).
+
 == Context
 
 In this ADR, a variant is one HLS variant in the sense of RFC 8216's `EXT-X-STREAM-INF`.
@@ -101,6 +105,7 @@ The model sizes a worker's encoder headroom for several users' encodes at once, 
 A seek attempt is a job attempt that starts after media time zero.
 Under link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037], a seek attempt on a VideoToolbox or NVDEC worker decodes in hardware.
 The decoder constant of such a seek attempt is the hardware decoder's constant, not the software decoder's constant.
+While a worker decodes in software after its hardware encoder backend failed (<<decision-hardware-failure>>), every job attempt on that worker takes the software decoder's constant, seek attempts included.
 
 *Why:* With constants fitted per source and preset, the model predicted the CPU of each measured libx264 variant within about 7 %.
 One four-variant ladder at `medium` needed 6.1 CPU seconds per media second.
@@ -367,6 +372,27 @@ Streamarr holds back a producer that runs far ahead of its viewer with the same 
 *Why:* AVPlayer abandons a segment request for which the server has sent no bytes after one segment length.
 A producer that runs well ahead of its viewer does not need the CPU while a seek's first segment is pending.
 
+[[decision-copies-take-no-slot]]
+=== A job attempt that copies the video takes no playback slot
+
+A job attempt that copies the video takes no playback slot on its worker.
+That holds even when the job attempt encodes audio renditions beside the copied video.
+The server's transcode limit, `streaming.max-concurrent-transcodes`, leaves out every such job attempt as well (link:0019-recoverable-jit-hls-segment-delivery.adoc#decision-requested-variant[ADR 0019]).
+A job attempt that encodes video takes a playback slot and counts against the transcode limit, as before.
+Until encoder headroom replaces playback slots (https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499]), a worker runs only as many video encodes at once as its playback slots allow.
+A worker bounds its copies by a copy cap that it sizes from its maximum heap after a 512 MiB reserve (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-memory[ADR 0037]).
+It refuses a copy beyond that cap before FFmpeg starts, as it refuses an encode beyond its slots.
+The copy's refusal names its reason with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` (https://github.com/streamarr/streamarr-server/pull/769[streamarr/streamarr-server#769]), and an encode's refusal stays `JOB_ATTEMPT_FAILURE_STARTUP_FAILED`.
+When the worker that refused with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` runs a left variant that copies the video, the server stops the left variant and tries the copy once more, as it stops a left variant that holds a slot (link:0019-recoverable-jit-hls-segment-delivery.adoc#decision-requested-variant[ADR 0019]).
+Otherwise the server treats that refusal as any refused start, and a copy that fails to start for any other reason stops no left variant.
+Streamarr has no production instances, so the change makes no provision for a worker that still counts a copy against its playback slots.
+The server and the worker that leaves copies out of its playback slots ship together.
+
+*Why:* A copy decodes and encodes no video, so it costs a small part of the CPU of a video encode.
+Each encoded audio language adds about 1.2 CPU seconds per minute of media (link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc[ADR 0043]).
+With the worker's default of one playback slot, one viewer's copy refused a second viewer in the same Household, although the worker had CPU to spare.
+Two video encodes at once still need the headroom model to show that both keep the speed floor.
+
 [[decision-hardware-first]]
 === A hardware encoder backend takes new variants first
 
@@ -389,6 +415,31 @@ Streamarr fixes no bitrate margin for a hardware encoder backend in advance.
 The worker's CPU does not show that limit.
 Automatic gives software H.264 encodes libx264 at `faster`.
 The VMAF comparison therefore shows whether a hardware encoder backend matches that software encode at the ladder's bitrates.
+
+[[decision-hardware-failure]]
+=== A variant whose hardware encoder fails continues on the software encoder of the same codec
+
+When a hardware encoder backend fails during a stream, the server continues that variant's playback with a new variant on the software encoder of the same codec family.
+The new variant runs on any worker that has that software encoder and room for one more video encode.
+The server prefers the worker whose hardware encoder failed.
+When no worker has room, the stream session fails.
+With one worker, the new variant therefore runs on that worker's software encoder, or the stream session fails.
+These rules apply to the variant that the player requests.
+An extra variant or a left variant whose hardware encoder backend fails stops, as it stops when encoder headroom runs out, and the stream session keeps playing.
+The new variant has its own initialization segment, so ADR 0037's rule that a replacement attempt keeps its variant's backend still holds.
+The worker stops offering the failed hardware encoder backend until the backend passes its check again.
+The worker also stops decoding in hardware, so every job attempt on that worker decodes in software, seek attempts included (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-hardware-decode[ADR 0037]).
+The worker decodes in hardware and offers the hardware encoder backend again only when both pass their checks again.
+https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56] settles how the player moves to the new variant, before NVENC encodes any stream.
+
+*Why:* A hardware encoder can fail in the middle of a stream, for example after a driver reset.
+The software encoder of the same codec writes a codec that the client already accepted, so the viewer keeps playing.
+Another worker with room can keep the viewer playing when the failed worker has none.
+The worker whose hardware encoder failed comes first, so the fallback leaves other workers' room to the stream sessions that the server places there.
+A replacement attempt on the software encoder would write a different initialization segment, which ADR 0037 refuses.
+A worker that kept offering a failed backend would send new variants to an encoder that fails again.
+A driver reset that takes down the hardware encoder can take down the hardware decoder on the same device too.
+The fallback prefers the same worker, so a variant on its software encoder that still decoded in hardware would fail again.
 
 === Implementation
 
@@ -472,6 +523,12 @@ libsvtav1 numbers its presets instead of naming them.
 * A fixed number of variants, or free job slots, cannot track the host, the preset, the content or other sessions.
 On the same host, the number of concurrent 1080p encodes that each stayed at 1.2× real time or faster ranged from two at `medium` to six at `veryfast`.
 A grain-heavy clip fits proportionally fewer encodes.
+* Raising the default number of playback slots, so that a copy and an encode fit, would also let two video encodes run on a host too small for both.
+* Ending the stream session whenever a hardware encoder fails stops a viewer whom the software encoder could keep playing.
+* Falling back only on the worker whose hardware encoder failed ends a stream session that another worker could keep playing.
+* A replacement attempt of the same variant on the software encoder writes a different initialization segment, which ADR 0037 refuses.
+* Counting a copy that encodes audio as an encode would refuse viewers for work that costs little CPU.
+* Keeping hardware decoding on a worker whose hardware encoder failed would let a driver reset fail the software fallback on that worker too.
 * Changing a variant's preset mid-stream changes the variant's initialization segment.
 The server refuses a replacement attempt whose initialization segment differs from the variant's initialization segment.
 A mid-stream preset change would therefore amount to a new variant.

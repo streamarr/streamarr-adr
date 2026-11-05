@@ -337,7 +337,7 @@ Evidence: <<evidence-sample-processing>>.
 
 Each job attempt runs one FFmpeg process that writes its output.
 On the path of link:0013-stream-decision-architecture.adoc[ADR 0013] that moves a profile 5 stream's RPUs, a second FFmpeg process feeds that process a fragmented MP4 copy of the source.
-The copy already holds the attempt's audio, copied or encoded from the source, and the process that writes the output copies that audio unchanged.
+The copy carries only video, and the process that writes the output reads the attempt's audio from a second input of the source, which it copies or encodes as a single FFmpeg would.
 The FFmpeg process that writes the output writes the video and every selected audio track to the standard output that link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]'s producer reads.
 The video and each audio track stay separate tracks in that output.
 The worker splits that output into the variant's video segments and each audio rendition's segments.
@@ -348,10 +348,11 @@ Where the segment list merges several 3 s slots of the grid into one media segme
 Each audio sample joins the segment whose interval holds the sample's start time.
 link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] places audio the same way.
 Media time zero stays the source container's start time, whatever tracks a job attempt maps.
-To keep that origin, every FFmpeg that reads the source cancels FFmpeg's start time correction, as link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-media-time-zero[ADR 0037] decides.
+To keep that origin, every FFmpeg that places media time zero cancels FFmpeg's start time correction, as link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-media-time-zero[ADR 0037] decides.
 That FFmpeg passes `-discard none` and `-start_at_zero`, and `-itsoffset` with the start time correction that the probe reports.
 The start time correction does not depend on which tracks a job attempt maps, so every job attempt and every rendition share one origin.
-On the path that moves RPUs, the FFmpeg that reads the source passes those flags, and the FFmpeg that reads its copy keeps the copy's timestamps without `-start_at_zero`, as link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] states.
+On the path that moves RPUs, the FFmpeg that copies the video keeps the source's raw timestamps, without `-start_at_zero` or `-itsoffset`.
+The FFmpeg that writes the output passes those flags for the source, which it reads as its second input, and `-isync 1` moves the copy onto the same media time, as link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-media-time-zero[ADR 0037] states.
 Every audio encode joins its job attempts on its audio frame grid, and the producer never moves a copied track (<<decision-audio-grid>>).
 
 Every running job attempt of every variant writes every selected audio track.
@@ -396,6 +397,11 @@ So consecutive attempts meet without a gap or an overlap, and a FLAC or ALAC enc
 When the source container rounds timestamps, as Matroska rounds them to 1 ms, a seeked attempt takes its decoded audio's start from the source track's own frame grid, counted from the track's probed start, and not from the rounded packet time.
 
 The producer never moves a copied track.
+In an attempt that encodes the video from a later segment, a copied track also starts at most one segment period before the first segment, because the muxer holds every audio packet until the first picture of that segment.
+The copy drops the packets before its input's seek target (`-copypriorss 0`), as the demuxer can land on an earlier keyframe.
+When the attempt's seek lies more than a period before the first segment, as when the server's keyframe lies further back, the FFmpeg that writes the output copies the track from another input of the source.
+That input seeks to one period before the first segment, and `-isync` puts it on the media time of the input that the attempt reads its video from.
+An attempt that holds the last frame encodes its video from its seek, and the muxer would hold every picture until the audio's first packet, so its audio, copied or encoded, starts at that seek.
 link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-audio[ADR 0037] rebuilds each copied sample's duration from its sample count, and its decode time from the running sum.
 A session with two copied tracks whose frames start at different times keeps both, and its encodes count their grids from the default copy's first sample.
 A switch between those two copies accepts a gap or an overlap of up to half a frame, the frame's samples ÷ (2 × the sample rate): 10.7 ms for AAC and 16 ms for AC-3 at 48 kHz.
@@ -875,7 +881,9 @@ Copied audio stays byte-identical across a junction.
 Encoded audio differs from the earlier attempt's encoded audio, because the decoders start on a different packet.
 After decoding, the junction adds at most 0.2 dB to that difference.
 Every encode meets the earlier attempt's output without a gap or an overlap, and a FLAC or ALAC encode of a lossless track decodes to the same samples across the junction.
-* Each encoded track's decode starts one segment period before its attempt's first segment, so every attempt decodes up to one period of audio that it discards.
+* Each encoded track's decode starts one segment period before its attempt's first segment, and each copied track starts at most one period before it, so every attempt reads up to one period of audio that it discards.
+An attempt whose seek lies further back than that reads the source twice when it copies the audio.
+An attempt that holds the last frame decodes and discards everything from its seek.
 * Two copied tracks on different grids meet with a gap or an overlap of up to half a frame when the viewer switches between them.
 * The first 21 ms of an AAC rendition decode without the overlap that the priming frame would supply, at about 3 dB signal-to-noise ratio for a tone.
 No player showed an error.

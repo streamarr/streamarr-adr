@@ -219,12 +219,20 @@ The server cannot play a raw elementary stream today in any case: the probe repo
 
 The two FFmpeg processes are joined by a pipe:
 
-* The first FFmpeg copies the source's video into fragmented MP4, with the attempt's seek and the same timestamps as a single FFmpeg.
+* The first FFmpeg copies only the source's chosen video stream into fragmented MP4, with the attempt's seek.
+The copy keeps the source's raw timestamps, as the source's demuxer reads them: it passes `-copyts` without `-start_at_zero`.
 The copy writes each packet as soon as it has one, in fragments of about one packet, with a new fragment at every keyframe.
 Its movie timescale of one microsecond keeps every timestamp that the source's demuxer reads.
-* The first FFmpeg also writes the job's audio into the copy: it copies the source audio, or encodes it, as a single FFmpeg would.
-Its seek then trims the audio as a single FFmpeg's seek does, and every audio codec that the job copies or encodes works.
-The second FFmpeg copies that audio unchanged.
+* The second FFmpeg reads the copy on its standard input as its first input, and the source as its second input.
+The second input takes the single FFmpeg's seek and input options.
+The second FFmpeg copies the source audio, or encodes it with the single FFmpeg's audio filters, as a single FFmpeg would.
+Every audio codec that the job copies or encodes therefore works.
+When the job copies the audio, holds no last frame, and the attempt's seek lies more than one segment period before its first segment, the second FFmpeg copies the audio from a third input of the source, seeked as link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc#decision-audio-grid[ADR 0043] decides for a copied track, with `-isync 1`.
+* The second FFmpeg passes `-isync 1` with `-start_at_zero`.
+`-isync` shifts the copy's timestamps by the difference between the start times of the two inputs (`apply_sync_offsets` in FFmpeg's `fftools/ffmpeg_opt.c`).
+`-start_at_zero` then subtracts the source's start time from both inputs, so the video and the audio lie on a single FFmpeg's timeline.
+* The second FFmpeg also writes the `framecrc` output of the source's streams, copied from its second input.
+The worker reads where the source's streams end from that output, as it reads a single FFmpeg's.
 * The worker reads the copy and moves the RPUs in its video samples:
 ** An RPU that starts a sample moves to the end of the previous picture's sample, which can lie in an earlier fragment.
 The worker drops such an RPU when it has no previous picture, as for the first RPU after a seek or the first RPU of a file whose start was cut away.
@@ -270,7 +278,7 @@ Auto then falls back to an encode format attempt, as link:0019-recoverable-jit-h
 Two cases instead pass video samples on without moving an RPU, and the attempt goes on:
 
 * The worker holds the previous picture's fragment, and every fragment after it, until the next picture arrives.
-When what it holds passes 32 MiB, as audio past the end of the video can make it, the worker passes those fragments on.
+When what it holds passes 32 MiB, the worker passes those fragments on.
 An RPU that then starts a sample has no previous picture, so the worker drops it.
 * A sample that the worker cannot delimit into NAL units, or that holds more than 4096 of them, keeps its bytes.
 The next sample's leading RPU then has no previous picture either, and the worker drops it.
@@ -285,13 +293,21 @@ So does a timing that runs more than 65,536 packets ahead of the copy.
 
 A sample whose packet has no duration keeps the duration that the muxer wrote.
 
-A stop asks the first FFmpeg to quit, and the second FFmpeg then ends at the end of its input.
+The second FFmpeg reads the source's audio up to the source's end, whatever happens to the copy.
+So a stop asks the first FFmpeg to quit and terminates the second FFmpeg.
+An unexpected failure of the transfer and the worker's refusal of the copy also terminate the second FFmpeg.
+A copy that ends inside a box is such a refusal.
+A first FFmpeg that exits with an error after the whole copy reached the second FFmpeg terminates it too, and so does a failed read of the copy.
+A failed write to the second FFmpeg means that it closed its input, so its own exit decides.
+When the second FFmpeg outlives the grace period after such a termination, the worker ends it forcibly.
 A stall, a failure or a forced end ends both processes.
 The attempt's outcome follows this order:
 
-. An unexpected failure of the transfer between the two processes, or the worker's refusal of the copy.
+. An unexpected failure of the transfer between the two processes, the worker's refusal of the copy, a failed read of the copy, or a first FFmpeg that exited with an error after the whole copy reached the second FFmpeg.
+Each of these failed first and terminated the second FFmpeg, so the second FFmpeg's exit does not decide.
+When the copy ends inside a box and the first FFmpeg exited with an error, that error decides, because it explains the cut.
 . The second FFmpeg's exit, as a single FFmpeg's exit would decide.
-. A copy that did not reach the second FFmpeg whole, or a first FFmpeg that exited with an error, when the second FFmpeg exited cleanly.
+. A copy that did not reach the second FFmpeg whole because a write to it failed, or a first FFmpeg that exited with an error, when the second FFmpeg exited cleanly.
 
 Neither process writes media to a temporary file.
 The socket for the video timing is the attempt's only file, and the worker removes it.
@@ -305,6 +321,8 @@ Either reading of an RPU that starts a sample gives each picture of the other la
 On a variable-frame-rate HEVC source with B-frames, the pipe showed all 48 source pictures in the same sequence as one FFmpeg, and every output packet matched.
 With the durations that the copy's muxer wrote, it showed 43 of the 48.
 Across 108 audio cases, 106 matched the single FFmpeg packet for packet, and the other 2 failed on both paths.
+Those cases wrote the audio into the copy.
+With the audio read from the source's second input instead, the `framecrc` output of the encode was byte-identical to the single FFmpeg's for MP4, Matroska and MPEG-TS sources with B-frames, after seeks to 0, 9.7, 21.5 and 22 s.
 The first media segment arrived about 100 to 120 ms later than from one FFmpeg.
 On a raw HEVC stream with B-frames, 100 pictures long, the copy gave every packet its decoding time as its presentation time, and the encode through the pipe held 98 frames, where one FFmpeg held all 100.
 Through one FFmpeg, 100 raw packets with B-frames from a profile 5 stream whose RPUs follow their pictures gave 100 of 100 distinct pictures, reshaped as the same stream in MP4.
@@ -881,22 +899,35 @@ On a raw profile 5 stream with B-frames whose RPUs lead their samples, the move 
 An input `-r` left all 480 packets of that stream without a presentation time.
 Neither option makes every raw stream copyable either: with the settings of the server's stream copy, FFmpeg 8.1.3's MP4 muxer aborted on two raw FATE streams at an assertion in `movenc.c`, line 1248, with either option, with both and with neither.
 * Requiring Dolby Vision profile 5 by number in the worker's conditions: a compatible base of none already means that no player can show the base without the RPUs, whatever the profile number.
-* A raw HEVC stream between the two FFmpeg processes: a raw stream carries neither the source's timestamps nor its audio.
+* A raw HEVC stream between the two FFmpeg processes: a raw stream does not carry the source's timestamps.
 * A Matroska stream between the two FFmpeg processes: the pinned build's Matroska muxer writes millisecond timestamps, and it changed the durations of the last audio packets.
 The last AAC packet declared 1008 samples instead of 272.
 * A NUT stream between the two FFmpeg processes: the pinned build's NUT muxer refuses a negative presentation timestamp, and its demuxer read ALAC back as an unknown codec tag and E-AC-3 as AC-3.
 After some seeks, the demuxer lost video while FFmpeg exited with status 0, in one attempt delivering 2 of 192 video packets.
 The NUT copy also lost the last packets' durations.
-* Reading the audio from a second input of the source in the second FFmpeg, beside a video-only pipe: the worker would read the source twice.
-On the excerpt, one FFmpeg read 1,699,613 bytes, and the pair read 3,399,226 bytes, although the audio packets held 50,412 bytes.
-A source of 80 Mb/s on network storage would then be read at about 160 Mb/s.
+* Writing the job's audio into the copy, so that the second FFmpeg copies it unchanged and the source is read once.
+FFmpeg's MP4 muxer writes no header until every track has a sample (`libavformat/movenc.c`).
+So a copy that carried audio held back every picture that its demuxer read before the first audio sample.
+On an MP4 source of 512x288 lossless HEVC, about 330 KB per picture, with B-frames and keyframes 10 s apart, the copy's first fragment held 63.8 MB when the copy carried AAC audio and read from 18 s.
+That is over the worker's limit of 32 MiB for what it holds of the copy, so the attempt failed.
+With video alone, the first fragment held 323 KB and the largest 332 KB.
+`-max_interleave_delta 0` does not help, because 0 means that the muxer buffers without a bound.
+The chosen design, which reads the audio from a second input of the source, has the two FFmpeg processes read the source's bytes twice.
+On an excerpt, one FFmpeg read 1,699,613 bytes, and the pair read 3,399,226 bytes, although the audio packets held 50,412 bytes.
+These are bytes that the processes read, not reads from storage.
+The second FFmpeg reads the same part of the source seconds after the first, so the worker host's file cache normally serves the second read, and storage reads the source once.
+The path is also narrow: only a Dolby Vision profile 5 source whose RPUs start their samples takes it, and only when the job encodes.
+Profile 5 is the profile of streaming services' Dolby Vision, whose 4K streams typically stay below 25 Mb/s.
+* Writing the source audio to a second output of the first FFmpeg, on a pipe of its own, so that the source is read once: each muxer writes on its own, so the header problem above does not arise.
+It adds a second pipe between the two processes, and when one pipe fills while an FFmpeg waits on the other, both stall.
+Ruling that out needs its own tests, and the file cache already spares storage the second read on this rare path.
 * Carrying the source audio's sample rate and channel layout in the transcode job, so that the second FFmpeg could declare an MPEG-TS audio track before its first packet: the pinned build refused the sample rate as an MPEG-TS input option, and an audio copy still failed with `sample rate not set`.
 The job also cannot restore a codec's configuration, such as FLAC's or ALAC's, its packet durations or its padding.
 * Clearing the copy's frame rate with `setpts=PTS:strip_fps=1`, so that a variable-frame-rate source keeps its pictures: on the pinned build, each constant-frame-rate source then came out one frame short, with every frame different from a single FFmpeg's.
 * Leaving the copy's video durations as the MP4 muxer writes them: on a variable-frame-rate source with B-frames, the encode showed 43 of 48 source pictures, where one FFmpeg showed all 48.
 * Reading the video timing from the first FFmpeg's standard error: FFmpeg's log writes one line in up to five separate writes, and the `framecrc` output does not take the log's lock, so a timing record could land inside a log line.
 A socket of its own carries nothing else.
-* Changing the durations in place inside a fragment's single track run: the first fragment of a copy with audio holds two video samples, so a changed duration would move the next sample's decoding time.
+* Changing the durations in place inside a fragment's single track run: a fragment can hold more than one video sample, as the first fragment of a copy with audio held two, so a changed duration would move the next sample's decoding time.
 * Pairing each timing with its sample by timestamp: FFmpeg repairs bad timestamps separately for each output, and the `framecrc` output allows timestamps that MP4 does not.
 After a Matroska seek with B-frames, the leading packets carried different timestamps in the two outputs, so a timestamp check refused every such seek.
 * Seeking in the second FFmpeg with an output `-ss` option: FFmpeg subtracts that time from every output timestamp, so the attempt's timeline would no longer match a single FFmpeg's timeline.
@@ -1125,8 +1156,12 @@ After some seeks, the demuxer reported `frame size > 2max_distance and no checks
 In one such attempt, 2 of the 192 expected video packets arrived.
 * Audio from a second input of the source: the second FFmpeg read the video from the pipe and the audio from the source.
 In 94 readable pairs, every packet equaled the single FFmpeg's, with a recipe that keeps the source's timestamps in the pipe.
-The source was read twice: 1,699,613 bytes for one FFmpeg and 3,399,226 bytes for the pair, although the audio packets held 50,412 bytes.
-At a source bitrate of 80 Mb/s, that is about 160 Mb/s of reads at real time.
+The processes read the source's bytes twice: 1,699,613 bytes for one FFmpeg and 3,399,226 bytes for the pair, although the audio packets held 50,412 bytes.
+The second read follows the first by seconds, so the worker host's file cache normally serves it.
+* Audio in the copy, measured on 2026-11-04 with the pinned FFmpeg 8.1.3 on a 512x288 lossless HEVC MP4 source of about 330 KB per picture, with B-frames and keyframes at 0, 10 and 20 s.
+With AAC audio in the copy and a seek to 18 s, the copy's first fragment held 63.8 MB.
+From the keyframe's decode time, 19.917 s, it held 79.0 MB.
+With video alone, the first fragment held 323 KB and the largest 332 KB, from either position.
 * Audio parameters in the job: the pinned build's MPEG-TS demuxer refused an input sample rate (`Option sample_rate not found`).
 Output audio settings with an audio copy still failed with `sample rate not set` and wrote no bytes.
 

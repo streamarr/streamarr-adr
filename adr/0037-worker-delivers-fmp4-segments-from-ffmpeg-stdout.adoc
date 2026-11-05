@@ -11,7 +11,8 @@ Until then, the server keeps serving multiplexed variants as this decision descr
 
 NOTE: An amendment to link:0044-encoder-headroom-and-the-preset-scale.adoc#decision-copies-take-no-slot[ADR 0044] takes copies out of the playback slots.
 A worker that enforces its slot count counts only job attempts that encode video, and a copy never fails because the slots are full.
-Copies share a segment memory budget of their own, under a copy cap that the worker sizes from its container's memory limit after a reserve (<<decision-memory>>, https://github.com/streamarr/streamarr-transcode-worker/issues/151[streamarr/streamarr-transcode-worker#151]).
+Copies share a segment memory budget of their own, under a copy cap that the worker sizes from its maximum heap after a 512 MiB reserve (<<decision-memory>>, https://github.com/streamarr/streamarr-transcode-worker/issues/151[streamarr/streamarr-transcode-worker#151]).
+A worker refuses a copy beyond that cap with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` (https://github.com/streamarr/streamarr-server/pull/769[streamarr/streamarr-server#769]).
 
 NOTE: link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc#amends-0037[ADR 0054] amends this decision.
 The layout of a delivered media segment (<<decision-one-fragment>>) is part of the worker contract, because the server computes each segment's framing from it.
@@ -1145,11 +1146,14 @@ A job attempt that copies the video takes no slot and never fails because the sl
 The contract has no failure value specifically for a worker whose slots are full.
 The segment memory of the job attempts that encode video stays within one worker-wide budget of the slot count times two segment caps.
 Job attempts that copy the video share a second worker-wide budget of the copy cap times two segment caps.
-The copy cap is how many copies the worker's memory holds at two segment caps each.
-The worker sizes it from its container's memory limit, through the maximum heap that the JVM derives from that limit.
-It keeps a reserve for the rest of the worker and leaves room for the encodes' budget (https://github.com/streamarr/streamarr-transcode-worker/issues/151[streamarr/streamarr-transcode-worker#151]).
-A copy that arrives while the copy cap's copies are all active fails with `JOB_ATTEMPT_FAILURE_STARTUP_FAILED` before FFmpeg starts, as an encode does when every slot is full.
-When the worker refuses a copy, the server stops a left variant that copies the video on that worker, which frees that variant's place, and tries the copy once more (link:0019-recoverable-jit-hls-segment-delivery.adoc#decision-requested-variant[ADR 0019]).
+The copy cap is how many copies the worker's heap holds at two segment caps each.
+The worker reads the maximum heap that the JVM derives from its container's memory limit.
+It takes off a 512 MiB reserve for the rest of the worker and the encodes' budget, and divides what is left by two segment caps, never below 0 (https://github.com/streamarr/streamarr-transcode-worker/issues/151[streamarr/streamarr-transcode-worker#151]).
+A copy that arrives while the copy cap's copies are all active fails with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` before FFmpeg starts (https://github.com/streamarr/streamarr-server/pull/769[streamarr/streamarr-server#769]).
+A worker whose heap holds no copy refuses every copy with the same value, so the server's recovery tries another worker.
+`JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` says that this worker's copy cap is full, and another worker may start the job.
+When the worker refuses a copy with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED`, the server stops a left variant that copies the video on that worker, which frees that variant's place, and tries the copy once more (link:0019-recoverable-jit-hls-segment-delivery.adoc#decision-requested-variant[ADR 0019]).
+A copy that fails to start for any other reason stops no left variant.
 The worker reports how full its copy cap is, so that an autoscaler can add workers.
 Every producer counts against its budget until it releases its segments, even after the producer starts stopping.
 FFmpeg's own memory, the kernel pipe buffer and gRPC's flow-control window sit outside those budgets.
@@ -1160,6 +1164,10 @@ A burst of seeks can stop attempts faster than their FFmpeg processes exit.
 Evidence: <<evidence-svt-av1>>.
 A copy takes no slot (link:0044-encoder-headroom-and-the-preset-scale.adoc#decision-copies-take-no-slot[ADR 0044]), so a budget sized from the slots cannot bound the copies' unfinished segments.
 The worker holds those segments on its heap, so the heap that its container's memory limit allows bounds how many copies it can run.
+The raw container limit also covers the JVM's other memory regions, so a cap sized from it would admit copies that the heap cannot hold.
+The 512 MiB reserve keeps heap for gRPC, probes, upload messages and garbage collection.
+The server cannot see the copy cap, so `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` tells it that a refused copy met a full cap rather than a failed start.
+Only then does stopping a left copy on that worker free the place that the retry needs.
 
 === Tests substitute the process
 
@@ -1430,6 +1438,8 @@ The producer must both drain the pipe and cancel the upload.
 
 * Counting copies against the slots' segment memory budget: copies that take no slot could fill it with unfinished segments and starve the encodes.
 * A fixed number of copies, or a setting for it: the memory that a worker can give copies depends on its container's limit, which the worker already knows.
+* Sizing the copy cap from the raw container memory limit: that limit also covers the JVM's other memory regions, so the cap would admit copies that the heap cannot hold.
+* Refusing a copy at a full copy cap with `JOB_ATTEMPT_FAILURE_STARTUP_FAILED`: the server could not tell a full copy cap from a failed start, so it would stop another player's left copy for a failure that the stop cannot fix.
 * A producer that watches the output directory with inotify and treats exit as an event removes the race by ordering the two facts.
 It still keeps two channels, needs a polling fallback on macOS, and the pipe would replace it anyway.
 * A pull-style producer with a `next()` method leaves the read loop with the caller, and a fake producer would have to duplicate the ordering rules.

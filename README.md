@@ -71,6 +71,7 @@ None at present.
 - [ADR 0052: A Failed HLS Copy Falls Back to an Encode, and Original Changes to Auto Whenever It Must Encode](adr/0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc)
 - [ADR 0054: Workers Measure Stream Bitrates Once, and a Video Copy Costs Its Measured Average and Advertises Its Measured Peak](adr/0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc)
 - [ADR 0055: A Viewer's Audio Delay Is a Playback Session Parameter, and the Server Shifts the Audio Renditions by It](adr/0055-a-viewers-audio-delay-is-a-playback-session-parameter-and-the-server-shifts-the-audio-renditions.adoc)
+- [ADR 0056: A Media Title's Profile-Dependent Fields Move under `selectedProfileState`, Which Is Null without a Selected Profile](adr/0056-a-media-titles-profile-dependent-fields-move-under-selected-profile-state.adoc)
 
 ## Domain language
 

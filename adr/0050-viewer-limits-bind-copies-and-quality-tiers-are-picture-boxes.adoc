@@ -298,7 +298,7 @@ A stream session on the local network never counts (<<decision-network-route>>).
 
 When the server serves a counted stream session's multivariant playlist, it leaves out each variant whose average bitrate would take the counted stream sessions over the streams' share.
 The lowest variant always stays.
-When no variant that stays runs or can start now, because no configured transcode slot or worker job slot is free for it, the playlist stays whole.
+When no variant that stays runs or can start now, because no connected worker can run it or every worker that can gives it a memory refusal (link:0019-recoverable-jit-hls-segment-delivery.adoc#decision-requested-variant[ADR 0019]), the playlist stays whole.
 The check runs each time the server serves the playlist and reserves nothing, so the budget is a soft cap.
 
 The budget never refuses playback.
@@ -306,10 +306,10 @@ It never changes or blocks a direct play, never turns a copy into an encode and 
 It only leaves variants out of an HLS multivariant playlist.
 
 When the budget leaves out the first-listed variant as the server creates the stream session, creating the stream session starts the top variant that stays instead of the first-listed variant.
-That variant holds the transcode place that admission found until the player reads its playlist, and it holds the playlist's place as a variant that a served playlist starts does.
+That variant holds the place in a worker's memory budget that admission found until the player reads its playlist, and it holds the playlist's place as a variant that a served playlist starts does.
 So when the budget no longer leaves out the first-listed variant as the server serves the first playlist, a request of the first-listed variant can take that place.
 Each time the server serves a playlist that leaves out the first-listed variant, and no job attempt of a variant that stays runs, it starts the top variant that stays at the current segment before it returns the playlist.
-That variant then holds its place under the transcode limit, so another stream session cannot take the last place before the player requests a variant that stays.
+That variant then holds its place in its worker's memory budget, so another stream session cannot take the last place before the player requests a variant that stays.
 This also covers a playlist that the player fetches again after the budget has left out the copy that it plays.
 When a variant that stays already runs while the player plays a variant that the playlist leaves out, as one that an initialization request started does, the server starts nothing and treats that running variant as the variant that the playlist started.
 When that variant cannot start, the playlist stays whole and lists the first-listed variant again.
@@ -326,16 +326,16 @@ When the budget leaves out no variant, variants start as link:0019-recoverable-j
 When the streams together ask for more than it carries, every one of them stalls, and each player's variant switching sees only its own path.
 Leaving variants out moves a new stream session to a variant that fits, and the decisions of this ADR and of link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045] stay as they are.
 The lowest variant stays, so a player always has a variant to play.
-A playlist with only variants that cannot start would leave the player nothing that plays, while the copy needs no transcode place.
+A playlist with only variants that cannot start would leave the player nothing that plays, while the first-listed variant may still start.
 Averages, not peaks, are counted, because the peaks of several streams rarely come at once, and the 20% that the share leaves out absorbs them.
 A speed test reports the upload that a ServerAdmin can check, so the setting takes that value.
 
 A player starts with the first variant that the playlist lists.
 When the budget leaves out the first-listed variant, the top variant that stays is the variant that the player requests first.
 On demand, that variant would start only at the player's first request.
-Another stream session could take the last transcode place between the playlist and that request, and the request would then fail with `503 Service Unavailable`, although the copy would have played.
+Another stream session could take the last place in the workers' memory budgets between the playlist and that request, and the request would then fail with `503 Service Unavailable`, although the copy would have played.
 Starting the variant as the server serves the playlist closes that gap, as starting the first-listed variant at creation does under ADR 0019.
-The same gap opens earlier, between admission and the first playlist: admission found a free transcode place, and other stream sessions could fill the transcode limit before the player reads its playlist.
+The same gap opens earlier, between admission and the first playlist: admission found a place in a worker's memory budget, and other stream sessions could fill that budget before the player reads its playlist.
 The budget would then keep the playlist whole, and the player's first request of the first-listed variant would fail although admission accepted the stream session.
 Starting the top variant that stays at creation holds the place that admission found, as starting the first-listed variant does when the budget leaves out no variant.
 The budget decides the playlist again each time the server serves it, so each served playlist still starts the top variant that stays when none runs.
@@ -358,7 +358,7 @@ Every format attempt of the playback session keeps the route.
 
 A stream session on the local network never counts against the upload budget, and the budget leaves its playlist whole.
 A false `LOCAL_NETWORK` claim only takes that stream session out of the budget.
-It grants no access: authorization, playback tokens and the transcode limit ignore the route.
+It grants no access: authorization, playback tokens and worker capacity ignore the route.
 
 *Why:* The client knows the address that it reached the server at.
 The server sees only the peer address, which a reverse proxy, a tunnel or hairpin NAT hides.
@@ -1008,8 +1008,8 @@ A viewer on a slow connection relies on the player's variant switching, or on th
 * Under the upload budget, a stream session can play a lower variant than its viewer's own connection carries, because other stream sessions use the upload.
 * The budget reserves nothing, so stream sessions that start at the same moment can together take the counted total over the streams' share.
 * Before its player requests a media segment, a stream session counts at its first-listed variant, even when the budget left that variant out, so the counted total runs high for a moment.
-* When the budget leaves the copy out, a lower variant encodes from the start of playback and takes a transcode place and a worker job slot, where the copy needed neither.
-* When a player keeps requesting the copy after a playlist fetched again left it out, the variant that the playlist started keeps running and holds its transcode place until the player requests another variant.
+* When the budget leaves the copy out, a lower variant encodes from the start of playback and uses a video encode's encoder headroom (link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044]), where the copy decoded and encoded no video.
+* When a player keeps requesting the copy after a playlist fetched again left it out, the variant that the playlist started keeps running and holds its place in its worker's memory budget until the player requests another variant.
 * Handing the playlist's place to another variant stops the variant that the playlist started and then starts the other, as a media-segment request that makes room under link:0019-recoverable-jit-hls-segment-delivery.adoc#decision-requested-variant[ADR 0019] does. Nothing reserves the freed place between the two steps, so another stream session's start can take it, and the request then answers `503 Service Unavailable` while the playlist still leaves the copy out.
 * A player that plays a lower variant while its switch to the copy is pending, when a playlist fetched again leaves the copy out, keeps no place for the playlist: delivering the copy segment stops the lower variant, and another stream session can take its place before the player requests it again.
 * A false `LOCAL_NETWORK` claim takes that stream session out of the budget, so the streams can use more than the share.
@@ -1047,8 +1047,8 @@ A VPN, a reverse proxy or carrier-grade NAT hides the viewer's location from the
 * A server-side cap for cellular viewers cannot see that a connection is metered, because only the device knows.
 * Refusing playback, or encoding instead of copying, when the upload budget is full would turn a soft limit into a playback failure.
 * Counting each variant at its BANDWIDTH peak would leave out variants that fit, because the peaks of several streams rarely come at once.
-* Leaving the top variant that stays to start on the player's first request lets another stream session take the last transcode place before that request.
-* Holding a transcode-limit place for the variants that stay until the player's first request would hold a place that runs no job attempt and needs its own timeout.
+* Leaving the top variant that stays to start on the player's first request lets another stream session take the last place in the workers' memory budgets before that request.
+* Reserving a place in a worker's memory budget for the variants that stay until the player's first request would hold a place that runs no job attempt and needs its own timeout.
 * Counting a direct play at its measured average when its measurements do not cover every video stream counts it below what it sends.
 * Counting a single-label host name as the local network would attest a Tailscale route through MagicDNS's search domain as local.
 * Classifying the network route on the server by the peer address fails behind a reverse proxy, a tunnel or hairpin NAT.

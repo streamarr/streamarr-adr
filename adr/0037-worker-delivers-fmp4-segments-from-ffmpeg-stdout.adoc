@@ -1341,10 +1341,22 @@ On a memory refusal, the server can stop other producers on that worker, whether
 A job attempt that fails to start for any other reason stops no other producer.
 The worker reports how full its copy cap is, so that an autoscaler can add workers.
 Every producer counts against its budget until it releases its segments, even after the producer starts stopping.
-FFmpeg's own memory, the kernel pipe buffer and gRPC's flow-control window sit outside those budgets.
-The container runtime bounds those resources.
 
-*Why:* A hung FFmpeg can take the grace period and a forced kill to exit.
+The worker also keeps a native budget for FFmpeg's own memory.
+The native budget is the worker's memory limit minus the maximum heap and the 512 MiB reserve, never below 0.
+The worker's memory limit is the container's memory limit, or the host's memory when the container has no limit.
+Before FFmpeg starts, the worker reserves the job attempt's expected FFmpeg memory from the native budget in one step.
+The expected FFmpeg memory is a fixed part for each FFmpeg process, plus a part for each megapixel of the decoded source frame, plus a part for each megapixel of each output frame.
+The benchmark measures those three parts from the peak resident memory of its own FFmpeg processes (link:0044-encoder-headroom-and-the-preset-scale.adoc#decision-calibration[ADR 0044]).
+Until a benchmark has measured them, the worker uses the parts that the worker's own tests measured on the pinned FFmpeg build.
+The reservation holds until the FFmpeg process exits, not merely until the producer starts stopping.
+A job attempt whose expected FFmpeg memory the native budget cannot hold fails with `JOB_ATTEMPT_FAILURE_WORKER_MEMORY_FULL` before FFmpeg starts, whether it encodes or copies the video.
+The kernel pipe buffer and gRPC's flow-control window stay outside every budget, and the container runtime bounds them.
+
+*Why:* No count of job attempts bounds FFmpeg's memory any longer.
+A 2160p source decodes full-size frames for every variant, even a 360p variant whose output the output budget holds easily.
+Concurrent requests for such variants would otherwise exhaust the container's memory, and the kernel would kill running encodes or the worker instead of refusing the new job attempt.
+A hung FFmpeg can take the grace period and a forced kill to exit.
 A burst of seeks can stop attempts faster than their FFmpeg processes exit.
 Evidence: <<evidence-svt-av1>>.
 A copy takes no slot (link:0044-encoder-headroom-and-the-preset-scale.adoc#decision-copies-take-no-slot[ADR 0044]), so a budget sized from the slots cannot bound the copies' unfinished segments.

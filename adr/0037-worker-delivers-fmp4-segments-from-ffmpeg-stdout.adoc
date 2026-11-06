@@ -65,7 +65,10 @@ In every variant of that stream session, segment N then starts at the presentati
 Each encoded variant forces its keyframe on the first output frame at or after that start, so an encoded segment starts less than one output frame after the copied segment with the same number.
 Consecutive starts lie at least 2 s apart, and the last start lies at least 2 s before the media's end, so every segment holds a frame of every encoded variant and a sample of every audio track, and a shifted audio segment still takes its audio from two stored segments.
 A copy places each keyframe at its stored tick only when the copy's timeline matches the probe's, so the server refuses a stream copy whose timeline may differ (<<decision-segment-list>>).
-A stream session without a copied variant keeps the plain 3 s grid and sends no list.
+A stream session without a copied variant keeps the plain 3 s grid and sends no list, unless the media ends less than 2 s into the grid's final slot.
+
+NOTE: An amendment merges the plain grid's final slot into the segment before it when the media ends less than 2 s into that slot (<<decision-segment-list>>).
+The plain grid's last segment then lasts at least 2 s, as a list's last segment does, and every job attempt of that stream session carries the grid's starts as a list.
 
 NOTE: An amendment sends the chosen keyframe's presentation time as the seek position of an encoded replacement attempt that reads an MP4 or MOV source (<<decision-seek>>), because FFmpeg's MP4 demuxer seeks by presentation time.
 With the keyframe's decode time, that demuxer lands one keyframe interval early.
@@ -371,6 +374,8 @@ The server's playlists, the worker's forced keyframes and the producer's groupin
 Encoded variants use 3 s media segments.
 A slot is one 3 s step of media time, so slot `k` covers `[k × 3 s, (k + 1) × 3 s)`.
 A stream session that only encodes uses the plain 3 s grid as its segment list, so segment `N` starts at `N × 3 s`.
+When the media ends less than 2 s into the grid's final slot, that slot joins the segment before it, so the plain grid's last segment also lasts at least 2 s.
+Every job attempt of that stream session then carries the plain grid's starts as a list, so the worker groups the final slot's video and audio into the last segment.
 A stream session with a copied variant builds its segment list from 3 s slots once the source's keyframe positions are known.
 In that segment list, a slot that holds no source keyframe merges into the segment before it.
 A merged segment therefore spans several slots.
@@ -411,7 +416,8 @@ The server and the worker share one segment list, because each job attempt carri
 The field lists each segment's start on the zero-based timeline, in ticks of the time base that `TranscodeExecution.segment_start_time_base` holds.
 That time base is the time base of the stored keyframe positions of the source's chosen video stream (link:0032-media-file-probe-results-are-persisted.adoc#keyframe-positions[ADR 0032]).
 Each listed start after segment 0 is a stored keyframe tick, unchanged, so neither the server nor the worker rounds a start.
-A job without a list uses the plain grid, so a stream session whose variants all encode sends neither field.
+A job without a list uses the plain grid, so a stream session whose variants all encode sends neither field, unless its plain grid merges its final slot.
+That list counts each start in whole seconds, in the time base 1/1, because such a stream session has no stored keyframe time base.
 A non-empty list holds one entry for each advertised media segment, starts at 0 and strictly increases.
 A non-empty list always comes with its time base, and an empty list never does.
 The worker refuses any other list with `JOB_ATTEMPT_FAILURE_INVALID_SPECIFICATION`.
@@ -447,6 +453,10 @@ Microseconds and nanoseconds cannot hold every tick exactly.
 An MPEG-TS tick is 1/90000 s, and an AVI time base such as 1001/24000 gives frame times with no terminating decimal.
 A rounded start would need one rounding rule that both repositories match.
 A start rounded past its keyframe would also move that keyframe into the segment before it.
+
+*Why the plain grid merges its final slot:* A synthetic 60 s source at 23.976 frames per second, whose video ends at 60.018 s, made the plain 6 s grid advertise a final segment from 60 s to 60.018 s.
+No output frame and no audio frame starts there.
+A job attempt at that segment encoded no video, so FFmpeg wrote no video edit list, and the server refused the attempt's initialization segment as different (https://github.com/streamarr/streamarr-server/pull/832[streamarr/streamarr-server#832]).
 
 *Why 2 s and a matching timeline:* With source keyframes at 5.986 s and 6 s in adjacent slots, a 24 frames-per-second encode has no frame in the interval from 5.986 s to 6 s.
 A check with FFmpeg 8.0.1 forced the frame at 6 s for both starts, so the encode skipped a segment number.
@@ -1497,7 +1507,7 @@ Tests verify this rule against recorded fixtures so that an FFmpeg upgrade under
 A player that switches variants at a segment boundary repeats or skips less than one frame of media.
 * A job attempt of a stream session with a copied variant carries one tick count for each segment.
 A two-hour source at 3 s slots has at most 2,400 segments, and each tick count takes at most 10 bytes, so the list stays under 24 KB.
-* A stream session without a copied variant keeps the plain grid, and its job attempts carry no list.
+* A stream session without a copied variant keeps the plain grid, and its job attempts carry no list unless the grid merges its final slot.
 * An MPEG-TS, MPEG-PS or Ogg source whose probe outcome carries no start time correction encodes instead of copying.
 * A slot whose keyframes all present less than 2 s after the start of the segment before it, or less than 2 s before the media's end, merges into the segment before it.
 * A stream-copy replacement attempt now starts on the advertised segment boundary, because the producer discards the preroll fragment.

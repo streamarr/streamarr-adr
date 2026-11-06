@@ -227,10 +227,13 @@ The measurement has two parts.
 The first part runs once, before https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499] merges.
 In the first part, several concurrent stream sessions run on real encodes, and every running variant stays above the speed floor.
 The second part runs for each calibration.
-In the second part, the server counts a calibration's constants as validated once they predict the worker's own measured production speeds.
-Those speeds must include speeds of job attempts that ran beside other job attempts.
-A kept calibration keeps its validation.
-A benchmark's constants start without validation.
+In the second part, the server predicts each measured production speed before the server fits that measurement.
+The server counts a calibration's constants as validated while the median error of the calibration's latest 20 predictions is at most 10 %.
+At least 5 of those 20 measurements must come from job attempts that ran beside other job attempts that encode video.
+A calibration whose later predictions miss loses its validation until its predictions agree again.
+A kept calibration keeps its latest predictions, and therefore its validation.
+A benchmark's constants start without predictions, and therefore without validation.
+When the server starts an extra variant, the server keeps every running variant's predicted speed above the speed floor by the largest overprediction among the calibration's latest 20 predictions.
 Until a worker's constants are validated, ADR 0019's on-demand rules apply unconditionally on that worker.
 Until a worker's constants are validated, Automatic also keeps on that worker the fixed meaning that <<decision-preset-setting>> gives Automatic.
 https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499] builds the headroom model and runs both parts of the measurement.
@@ -246,6 +249,9 @@ A Kubernetes Deployment gives each new pod a new worker identifier.
 A calibration kept by worker identifier would therefore make every restarted pod run the benchmark.
 A benchmark runs for a bounded time on the benchmark's own content.
 The worker's own production speeds show whether the constants also fit the content that the worker serves.
+A prediction made before the fit sees its measurement tests the constants on a speed that they did not fit.
+Fitted per source and preset, the model predicted libx264's CPU within about 7 %, so a median error of 10 % leaves room for content that changes between segments.
+Equal parts of the cores predicted up to 21 % faster than the measured speed, so the margin for overprediction keeps a running variant above the speed floor when the model errs in that direction.
 Evidence: <<evidence-model>>, <<evidence-presets>>.
 
 [[decision-eager-start]]
@@ -468,8 +474,9 @@ Until then, a worker runs only as many video encodes at once as its playback slo
 A worker bounds its copies by a copy cap, which is how many copies the worker's memory budget holds at two segment caps each (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-memory[ADR 0037]).
 The worker refuses a copy beyond that cap before FFmpeg starts.
 The copy's refusal names its reason with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` (https://github.com/streamarr/streamarr-server/pull/769[streamarr/streamarr-server#769]).
-When the worker that refused with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` runs a left variant that copies the video, the server stops the left variant and tries the copy once more, as it stops a left variant that holds a slot (link:0019-recoverable-jit-hls-segment-delivery.adoc#decision-requested-variant[ADR 0019]).
-Otherwise the server treats that refusal as any refused start, and a copy that fails to start for any other reason stops no left variant.
+That refusal is a memory refusal, because copies and encodes share the worker's memory budget.
+The server handles a memory refusal as ADR 0019 decides (link:0019-recoverable-jit-hls-segment-delivery.adoc#decision-requested-variant[ADR 0019]).
+A copy that fails to start for any other reason stops no left variant.
 Streamarr has no production instances, so the change makes no provision for a worker that still counts a copy against its playback slots.
 The server and the worker that leaves copies out of its playback slots ship together.
 
@@ -538,7 +545,10 @@ A GPU has three limits that a model of cores and pixel rate does not predict.
 * Some drivers refuse a new encode session past a fixed count while the GPU still has capacity.
 The worker assumes no session limit.
 The worker keeps no list of GPUs or drivers.
-When the driver refuses a session because the session limit is reached, only that one job runs on the software encoder of the same codec.
+When the driver refuses the session of a variant's first job attempt because the session limit is reached, only that one variant encodes on the software encoder of the same codec.
+That variant has no initialization segment yet, so the software encoder becomes the variant's pinned encoder backend.
+A replacement attempt keeps its variant's pinned encoder backend, as ADR 0037 requires.
+When the driver refuses the session of a replacement attempt, the server continues that variant's playback as <<decision-hardware-failure>> decides, with a new variant on the software encoder of the same codec.
 The worker keeps offering the hardware encoder backend.
 The worker learns no cap from the refusal.
 * Running out of GPU memory stalls every stream on that GPU at once.

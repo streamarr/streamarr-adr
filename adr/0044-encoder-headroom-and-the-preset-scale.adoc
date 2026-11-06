@@ -32,6 +32,8 @@ A later amendment picks the seek-priority mechanism from its proof (<<decision-s
 Producers that run well ahead of their viewers pause while a seek's first segment is pending.
 Producers that run far ahead of their viewers are held back until a viewer nears their output (<<decision-hold-back>>).
 
+A further amendment gives the keyframe-verified NVENC encoders, `h264_nvenc` and `hevc_nvenc`, a column in the preset scale (<<decision-preset-scale>>).
+
 == Context
 
 In this ADR, a variant is one HLS variant in the sense of RFC 8216's `EXT-X-STREAM-INF`.
@@ -401,6 +403,7 @@ The web client shows the preset setting on its ServerAdmin settings page.
 The preset setting's default is Automatic.
 A ServerAdmin can replace Automatic with one fixed preset from the preset scale in <<decision-preset-scale>>.
 One fixed preset covers every software encoder: libx264, libx265 and libsvtav1.
+The same fixed preset covers every hardware encoder that has a column in the preset scale.
 A variant's resolved preset is the encoder's own preset that the server derives from the preset setting for that variant.
 Every job carries its variant's resolved preset to the worker.
 The worker has no preset setting.
@@ -410,6 +413,8 @@ Automatic means `faster` for libx264.
 Automatic means `veryfast` for libx265.
 Automatic means preset `10` for libsvtav1.
 On the preset scale, libsvtav1 preset `10` is `faster`.
+An NVENC encoder takes the NVENC preset of its codec family's preset name.
+Automatic therefore means `p4` for `h264_nvenc` and `p3` for `hevc_nvenc`.
 Until a measurement validates the headroom model's constants, Automatic keeps exactly those presets.
 
 Once a measurement validates the headroom model's constants, headroom may move an encoder's preset under load.
@@ -449,19 +454,20 @@ Evidence: <<evidence-presets>>, <<evidence-svt-av1>>.
 The preset scale maps each preset name to one preset of every software encoder.
 libx264 and libx265 use the name itself.
 libsvtav1 uses the number in its column.
+The keyframe-verified NVENC encoders, `h264_nvenc` and `hevc_nvenc`, use the NVENC preset in their column.
 
-[cols="2,2,2,1,4",options="header"]
+[cols="2,2,2,1,1,4",options="header"]
 |===
-|Preset name |libx264 |libx265 |libsvtav1 |Role under Automatic
+|Preset name |libx264 |libx265 |libsvtav1 |NVENC |Role under Automatic
 
-|`superfast` |`superfast` |`superfast` |`12` |Not used
-|`veryfast` |`veryfast` |`veryfast` |`11` |Automatic for libx265, and the choice under load for libx264 and libsvtav1
-|`faster` |`faster` |`faster` |`10` |Automatic for libx264 and libsvtav1
-|`fast` |`fast` |`fast` |`9` |Not used
-|`medium` |`medium` |`medium` |`8` |Not used
-|`slow` |`slow` |`slow` |`7` |Not used
-|`slower` |`slower` |`slower` |`6` |Not used
-|`veryslow` |`veryslow` |`veryslow` |`5` |Not used
+|`superfast` |`superfast` |`superfast` |`12` |`p2` |Not used
+|`veryfast` |`veryfast` |`veryfast` |`11` |`p3` |Automatic for libx265 and `hevc_nvenc`, and the choice under load for libx264, `h264_nvenc` and libsvtav1
+|`faster` |`faster` |`faster` |`10` |`p4` |Automatic for libx264, `h264_nvenc` and libsvtav1
+|`fast` |`fast` |`fast` |`9` |`p5` |Not used
+|`medium` |`medium` |`medium` |`8` |`p6` |Not used
+|`slow` |`slow` |`slow` |`7` |`p7` |Not used
+|`slower` |`slower` |`slower` |`6` |`p7` |Not used
+|`veryslow` |`veryslow` |`veryslow` |`5` |`p7` |Not used
 |===
 
 "Not used" means that Automatic never picks the preset.
@@ -470,7 +476,10 @@ The scale has no name for a libsvtav1 preset below `5`.
 A ServerAdmin therefore cannot fix libsvtav1 at a preset below `5`.
 The scale has no `ultrafast` row, so a ServerAdmin cannot fix `ultrafast` either.
 The scale therefore has no name for libsvtav1 preset `13`.
-A hardware encoder backend gets rows in the preset scale only once that backend is verified.
+The scale has no name for NVENC's `p1`.
+`slow`, `slower` and `veryslow` all take `p7`, NVENC's slowest preset.
+A hardware encoder backend gets a column in the preset scale only once that backend is verified.
+`av1_nvenc` is not keyframe-verified, so `av1_nvenc` takes no preset and runs at FFmpeg's default.
 
 *Why:* libx264's `ultrafast` preset turns off CABAC, 8×8 transforms and B-frames.
 libx264 at `ultrafast` therefore writes the Constrained Baseline profile, even when the job asks for the High profile.
@@ -485,7 +494,20 @@ The documentation names 12 as the fastest preset intended for human use.
 SVT-AV1's default preset is 8.
 The scale places 8 beside `medium`.
 `medium` is the default preset of libx264 and libx265.
-Evidence: <<evidence-svt-av1>>.
+
+The NVENC column places `p4`, FFmpeg's default NVENC preset, beside `faster`.
+Automatic's H.264 preset therefore keeps the encode that `h264_nvenc` wrote while the worker passed no preset.
+The recordings' `p4` initialization segments were byte-identical to those of that earlier encode.
+On an RTX 5090 at 1080p and 5 Mb/s, `p5` to `p7` scored at most 0.15 VMAF above `p4`.
+`p5` and `p6` ran at 54 % to 76 % of `p4`'s speed with `h264_nvenc`.
+`p6` and `p7` ran at 40 % to 51 % of `p4`'s speed with `hevc_nvenc`.
+`p1` scored up to 1 VMAF below `p4` with `h264_nvenc`.
+The scale therefore leaves `p1` out, as it leaves out `ultrafast`.
+`hevc_nvenc` wrote byte-identical output at `p1`, `p2` and `p3`, so Automatic's `veryfast` gives `hevc_nvenc` the encode of NVENC's fastest presets.
+That encode scored at most 0.16 VMAF below `p4`, and still scored above libx264 at `faster` at 1080p.
+The NVENC recordings repeat the keyframe checks of link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] at every NVENC preset in the column.
+Every forced keyframe was a closed IDR sync sample, and every replacement attempt wrote its first attempt's initialization segment.
+Evidence: <<evidence-svt-av1>>, <<evidence-nvenc-presets>>.
 
 [[decision-fixed-preset]]
 === A variant keeps its preset for its whole life
@@ -786,10 +808,10 @@ https://github.com/streamarr/streamarr-server/issues/55[streamarr/streamarr-serv
 [[explicitly-deferred]]
 === Explicitly deferred
 
-* Rows for hardware encoder backends in the preset scale, and their constants and session limits in the headroom model.
-The NVENC rows, constants and session limits come with https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56].
-The VideoToolbox rows, constants and session limits come with https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57].
-Each backend needs its rows, constants and session limits once the backend encodes, because each new variant encodes with the hardware encoder backend first.
+* Columns for hardware encoder backends other than NVENC in the preset scale, and every hardware encoder backend's constants and session limits in the headroom model.
+The NVENC constants and session limits come with https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56].
+The VideoToolbox column, constants and session limits come with https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57].
+Each backend needs its column, constants and session limits once the backend encodes, because each new variant encodes with the hardware encoder backend first.
 The VAAPI, QSV, AMF and RKMPP encoders stay deferred to https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14].
 https://github.com/streamarr/streamarr-server/issues/398[streamarr/streamarr-server#398] still reports which encoder backends a worker has verified.
 * The validated model and its constants.
@@ -877,6 +899,10 @@ On-demand start and the headroom model already decide which variants run.
 Stopping extra variants keeps every viewer playing.
 * Starting new stream sessions at a lower quality during a capacity shortfall lowers a new viewer's quality before the server stops any extra variant.
 * Benchmarking every worker at every registration, before the worker takes jobs, delays every restart of a worker whose hardware and FFmpeg build have not changed.
+* Mapping NVENC's seven presets one to one onto the scale's fastest seven names would put `p1` beside `superfast` and `p4` beside `fast`.
+Automatic's `faster` would then give `h264_nvenc` `p3`, below FFmpeg's default, and `p1` scored up to 1 VMAF below `p4`.
+* Resolving Automatic for each encoder backend, so that `hevc_nvenc` gets `p4` while libx265 keeps `veryfast`, would make the server's preset depend on the worker's encoder and not only on the codec family.
+`hevc_nvenc` at `p3` scored at most 0.16 VMAF below `p4`, so that gain does not justify the change.
 * Taking jobs at once with cautious default constants, and benchmarking when the worker is idle, runs a new worker on constants that no measurement supports.
 A busy worker may also never be idle.
 * A fixed `veryfast` default with a ServerAdmin override ignores the headroom that a worker actually has.
@@ -1119,6 +1145,36 @@ This decision does not rely on that match.
 * Every preset passed the junction check at 20 of 20 junctions.
 The junction check compares a replacement attempt's first segments with the first attempt's segments at the same positions.
 The segments must open at the same times, hold the same frame times and show the same source frames.
+
+[[evidence-nvenc-presets]]
+=== NVENC presets
+
+These measurements ran on an RTX 5090 with NVIDIA driver 615.78.08 and the pinned FFmpeg 8.1.3.
+Each encode ran the worker's own `h264_nvenc` or `hevc_nvenc` command for a 1080p variant at 5 Mb/s, with only `-preset` changed.
+VMAF `vmaf_v0.6.1` scored each encode against its 1080p source.
+The sources were the 52 s Sintel trailer at 24 fps, and three 20 s live-action clips at 30 fps: a driving shot, a roller coaster ride and a bar scene.
+The speed is the whole FFmpeg process's frames per second, decoding included.
+
+[cols="1,2,2,2,2",options="header"]
+|===
+|Preset |`h264_nvenc` VMAF against `p4` |`h264_nvenc` speed |`hevc_nvenc` VMAF against `p4` |`hevc_nvenc` speed
+
+|`p1` |−0.23 to −0.96 |212 to 622 fps |−0.16 to +0.01 |346 to 544 fps
+|`p2` |−0.22 to −0.83 |353 to 657 fps |−0.16 to +0.01 |342 to 423 fps
+|`p3` |−0.09 to −0.24 |347 to 596 fps |−0.16 to +0.01 |339 to 432 fps
+|`p4` |0 |331 to 522 fps |0 |334 to 385 fps
+|`p5` |+0.01 to +0.06 |250 to 284 fps |+0.01 to +0.03 |321 to 385 fps
+|`p6` |0 to +0.05 |249 to 284 fps |+0.03 to +0.11 |167 to 183 fps
+|`p7` |+0.01 to +0.15 |198 to 244 fps |+0.04 to +0.10 |155 to 172 fps
+|===
+
+* `hevc_nvenc` wrote byte-identical output at `p1`, `p2` and `p3` on every source.
+* The speeds at the fastest presets vary with the source's decoding, which ran on the CPU.
+The slowest `p1` result, 212 fps on the driving shot, is one run, and `p2` ran at 353 fps on the same clip.
+* At every rung of the default ladder, `h264_nvenc` at `p4` scored the same as or higher than libx264 at `faster` on all four sources, and `hevc_nvenc` at `p4` scored higher still.
+https://github.com/streamarr/streamarr-transcode-worker/pull/167[streamarr/streamarr-transcode-worker#167] holds that comparison.
+* The NVENC recordings of https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56] ran each encoder at `p4` at every rung, and at `p2`, `p3`, `p5`, `p6` and `p7` at 1080p, all with the extended GOP of ADR 0037.
+At every preset, every forced keyframe was a closed IDR sync sample, the GOP count restarted at a forced keyframe after a missed one, and each replacement attempt's initialization segment was byte-identical to its first attempt's.
 
 [[evidence-svt-av1]]
 === SVT-AV1's preset guidance

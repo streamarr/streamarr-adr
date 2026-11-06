@@ -16,6 +16,14 @@ An amendment to link:0032-media-file-probe-results-are-persisted.adoc#probe-capa
 The worker measures production speed and reports each media segment's production time with the segment's upload.
 The server no longer derives production speed from the arrival times of media segments.
 
+An amendment retires the fixed job limits (<<decision-headroom-decides-encodes>>).
+No count of playback slots and no transcode limit across workers bound the job attempts that encode video.
+A shortfall of encoder headroom never keeps a requested variant from starting, and the headroom model decides which extra variants run.
+The worker's memory budget only guards the worker against runaway output (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-memory[ADR 0037]).
+The same amendment adds the worker's CPU limit to the key of a kept calibration (<<decision-calibration>>).
+The same amendment also states how the server fits and validates the constants, and bounds the benchmark.
+The same amendment sets the rules for a GPU's session limit, memory and video engine (<<decision-gpu-limits>>).
+
 A later amendment takes copies out of the playback slots and the server's transcode limit (<<decision-copies-take-no-slot>>).
 A job attempt that copies the video takes no playback slot, even when it encodes audio.
 The same amendment decides what happens when a hardware encoder backend fails during a stream, and stops hardware decoding on that worker until the encoder and the decoder pass their checks again (<<decision-hardware-failure>>).
@@ -101,6 +109,17 @@ Each job attempt's cost therefore includes its own decode term.
 The model predicts the production speed of every running variant, not only the worker's total CPU.
 The model derives each running variant's production speed from that variant's share of the worker's cores.
 The model sizes a worker's encoder headroom for several users' encodes at once, not for a single session.
+The tone-mapping term is a tone-mapping constant × the source pixel rate.
+The tone-mapping chain selects the tone-mapping constant.
+
+A worker's CPU limit is the share of the host's CPU that the worker and the worker's FFmpeg processes may use.
+For a worker in a container, the container's CPU quota sets the CPU limit.
+A worker that runs without a CPU quota has the whole host's CPU as its CPU limit.
+The worker reports its CPU limit when the worker registers.
+Each job attempt that encodes video on a worker gets an equal part of the worker's CPU limit.
+A job attempt never gets more cores than one job attempt uses when it runs alone on that worker.
+A job attempt that needs fewer cores than its equal part leaves the rest to the other job attempts on that worker.
+The model predicts a running variant's production speed as the variant's share of the cores divided by the variant's cost.
 
 A seek attempt is a job attempt that starts after media time zero.
 Under link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037], a seek attempt on a VideoToolbox or NVDEC worker decodes in hardware.
@@ -119,6 +138,7 @@ Hardware decoding changes a job attempt's CPU cost.
 On an RTX 5090 in the pinned worker image, one 1080p libx264 replacement attempt at `faster` used 16.47 CPU seconds with NVDEC decode, against 19.26 s with software decode.
 That attempt covered 421 frames, and each figure is the median of 5 runs.
 A decoder constant that ignores the hardware decoder would therefore overstate the cost of seek attempts on such a worker.
+Equal parts of the cores predicted the measured production speeds of 180 running variants with a median error of 5 %.
 Evidence: <<evidence-model>>, <<evidence-presets>>, <<evidence-hardware-decode>>.
 
 [[decision-speed-floor]]
@@ -173,24 +193,59 @@ The production time leaves out the worker's waits for earlier uploads, so the sp
 The server derives each job attempt's production speed from those reports.
 The worker's own probe capacity brake uses the same measurement, so Streamarr measures production speed once.
 The server fits each worker's constants to those speeds continuously while sessions play.
-The server keeps each worker's last calibration, together with the hardware and FFmpeg build that the calibration describes.
-A worker that registers again with the same hardware and the same FFmpeg build takes jobs at once.
+Each media segment's production time gives one measurement of the job attempt's cost.
+That cost is the job attempt's share of the cores divided by the job attempt's production speed.
+The fit weighs recent measurements more than old measurements.
+The fit starts from the benchmark's constants or from a kept calibration.
+The fit moves each constant only as far as the measurements support.
+
+A calibration is a worker's fitted constants, together with the hardware, the CPU limit and the FFmpeg build that the constants describe.
+The worker reports its hardware, its CPU limit and its FFmpeg build when the worker registers.
+The hardware is the CPU model, the number of logical CPUs and the model of each GPU.
+The server keeps the last calibration for each combination of hardware, CPU limit and FFmpeg build.
+The server keeps a calibration without the worker's identifier.
+A worker that registers with the hardware, the CPU limit and the FFmpeg build of a kept calibration takes jobs at once.
 The server starts that worker from the kept calibration and keeps calibrating the worker continuously.
-Only a worker with new hardware or a new FFmpeg build runs a short benchmark when the worker registers.
-A worker that registers for the first time counts as a worker with new hardware.
-Such a worker runs the benchmark before the worker accepts any job.
+The server tells the worker whether to run the benchmark when the server accepts the worker's session.
+A worker whose hardware, CPU limit or FFmpeg build matches no kept calibration runs the benchmark before the worker accepts any job.
+A worker that registers for the first time therefore runs the benchmark.
+A ServerAdmin who changes a worker's CPU limit, for example to keep part of a shared host free for other software, therefore makes that worker run the benchmark again.
 The server takes that worker's first constants from the benchmark.
 
+The benchmark runs for a bounded time.
+The benchmark encodes with each verified encoder at each preset that Automatic can pick for that encoder.
+The benchmark measures the decode cost of each source codec that the worker decodes, on each decoder backend that the worker has.
+The benchmark measures how many cores one job attempt uses when the job attempt runs alone.
+The benchmark adds concurrent encodes until a running encode falls below the speed floor or a GPU limit stops the benchmark (<<decision-gpu-limits>>).
+The worker reports the benchmark's results through the worker's capabilities.
+A ServerAdmin can see each worker's last benchmark, including the limit that stopped the benchmark.
+A ServerAdmin can run a worker's benchmark again, for example after a driver update.
+The benchmark's results replace that worker's calibration.
+
 A measurement validates the constants before any early start of an extra variant or any preset choice depends on the constants.
-Until that measurement passes, ADR 0019's on-demand rules apply unconditionally.
-Until that measurement passes, Automatic also keeps the fixed meaning that <<decision-preset-setting>> gives Automatic.
-https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499] builds the headroom model and runs that measurement.
+The measurement has two parts.
+The first part runs once, before https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499] merges.
+In the first part, several concurrent stream sessions run on real encodes, and every running variant stays above the speed floor.
+The second part runs for each calibration.
+In the second part, the server counts a calibration's constants as validated once they predict the worker's own measured production speeds.
+Those speeds must include speeds of job attempts that ran beside other job attempts.
+A kept calibration keeps its validation.
+A benchmark's constants start without validation.
+Until a worker's constants are validated, ADR 0019's on-demand rules apply unconditionally on that worker.
+Until a worker's constants are validated, Automatic also keeps on that worker the fixed meaning that <<decision-preset-setting>> gives Automatic.
+https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499] builds the headroom model and runs both parts of the measurement.
 
 *Why:* The same preset cost different amounts on different content.
 At every variant, a grain-heavy clip cost 1.3× to 1.9× as much per media second as a 24 fps film.
 A single set of constants fitted across four sources missed individual ladders by up to about a quarter.
 With one set of three variants running, 1080p measured 1.19× real time in the first run and 1.39× in a repeated run.
 A benchmark at every registration would delay every restart of a worker whose hardware and FFmpeg build have not changed.
+The CPU limit sets the cores that the model divides among the job attempts.
+Constants measured under one CPU limit therefore predict wrong speeds under another CPU limit.
+A Kubernetes Deployment gives each new pod a new worker identifier.
+A calibration kept by worker identifier would therefore make every restarted pod run the benchmark.
+A benchmark runs for a bounded time on the benchmark's own content.
+The worker's own production speeds show whether the constants also fit the content that the worker serves.
 Evidence: <<evidence-model>>, <<evidence-presets>>.
 
 [[decision-eager-start]]
@@ -242,6 +297,36 @@ ADR 0019's on-demand start and the headroom model decide which variants run when
 
 *Why:* Stopping extra variants frees encoder headroom for every requested variant and keeps every viewer playing.
 The capacity metric tells the ServerAdmin that the worker needs more capacity.
+
+[[decision-headroom-decides-encodes]]
+=== Encoder headroom decides which encodes run, and no fixed count bounds them
+
+No fixed count bounds the job attempts that encode video.
+A worker advertises no playback slots.
+The server has no transcode limit across workers.
+A shortfall of encoder headroom never keeps a requested variant from starting.
+Only a worker that cannot run the variant's job, or a worker's memory budget, keeps a requested variant from starting on that worker.
+The headroom model decides which extra variants run.
+The headroom model also decides which encoder backend each new variant uses (<<decision-hardware-first>>).
+
+The worker's memory budget guards the worker against runaway output (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-memory[ADR 0037]).
+The memory budget does not decide how many encodes run.
+A worker refuses a job attempt whose expected output the worker's memory budget cannot hold.
+That refusal names worker memory with its own failure value.
+The server treats that refusal as a full worker, not as a failed encoder.
+ADR 0019 decides how long the server tries other workers after that refusal (link:0019-recoverable-jit-hls-segment-delivery.adoc#decision-requested-variant[ADR 0019]).
+
+The capacity metric reports each worker's predicted load against the load that the worker can carry, in pixel rate.
+The capacity metric also reports each capacity shortfall and each memory refusal.
+The capacity metric replaces the playback slot metrics.
+
+*Why:* A fixed count either has no effect or overrides the headroom model.
+On the 10-core arm64 host, the most concurrent 1080p encodes that each stayed at 1.2× real time or faster ranged from two at `medium` to six at `veryfast`.
+With the default of one playback slot, a player that switched variants sometimes requested the new variant before the server had stopped the old variant.
+The server then answered that no connected worker could run the variant, although the host had spare CPU.
+A memory refusal shows that the worker's output budget is full.
+A memory refusal does not show that the worker's encoder failed or that the host's CPU is busy.
+Evidence: <<evidence-presets>>.
 
 [[decision-preset-setting]]
 === The preset is Automatic unless a ServerAdmin fixes one
@@ -378,11 +463,11 @@ A producer that runs well ahead of its viewer does not need the CPU while a seek
 A job attempt that copies the video takes no playback slot on its worker.
 That holds even when the job attempt encodes audio renditions beside the copied video.
 The server's transcode limit, `streaming.max-concurrent-transcodes`, leaves out every such job attempt as well (link:0019-recoverable-jit-hls-segment-delivery.adoc#decision-requested-variant[ADR 0019]).
-A job attempt that encodes video takes a playback slot and counts against the transcode limit, as before.
-Until encoder headroom replaces playback slots (https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499]), a worker runs only as many video encodes at once as its playback slots allow.
-A worker bounds its copies by a copy cap that it sizes from its maximum heap after a 512 MiB reserve (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-memory[ADR 0037]).
-It refuses a copy beyond that cap before FFmpeg starts, as it refuses an encode beyond its slots.
-The copy's refusal names its reason with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` (https://github.com/streamarr/streamarr-server/pull/769[streamarr/streamarr-server#769]), and an encode's refusal stays `JOB_ATTEMPT_FAILURE_STARTUP_FAILED`.
+Until https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499] retires the playback slots and the transcode limit (<<decision-headroom-decides-encodes>>), a job attempt that encodes video takes a playback slot and counts against the transcode limit, as before.
+Until then, a worker runs only as many video encodes at once as its playback slots allow.
+A worker bounds its copies by a copy cap, which is how many copies the worker's memory budget holds at two segment caps each (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-memory[ADR 0037]).
+The worker refuses a copy beyond that cap before FFmpeg starts.
+The copy's refusal names its reason with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` (https://github.com/streamarr/streamarr-server/pull/769[streamarr/streamarr-server#769]).
 When the worker that refused with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` runs a left variant that copies the video, the server stops the left variant and tries the copy once more, as it stops a left variant that holds a slot (link:0019-recoverable-jit-hls-segment-delivery.adoc#decision-requested-variant[ADR 0019]).
 Otherwise the server treats that refusal as any refused start, and a copy that fails to start for any other reason stops no left variant.
 Streamarr has no production instances, so the change makes no provision for a worker that still counts a copy against its playback slots.
@@ -420,7 +505,8 @@ The VMAF comparison therefore shows whether a hardware encoder backend matches t
 === A variant whose hardware encoder fails continues on the software encoder of the same codec
 
 When a hardware encoder backend fails during a stream, the server continues that variant's playback with a new variant on the software encoder of the same codec family.
-The new variant runs on any worker that has that software encoder and room for one more video encode.
+The new variant runs on any worker that has that software encoder and whose memory budget can hold the new variant's job attempt (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-memory[ADR 0037]).
+A worker with room is such a worker.
 The server prefers the worker whose hardware encoder failed.
 When no worker has room, the stream session fails.
 With one worker, the new variant therefore runs on that worker's software encoder, or the stream session fails.
@@ -441,6 +527,39 @@ A worker that kept offering a failed backend would send new variants to an encod
 A driver reset that takes down the hardware encoder can take down the hardware decoder on the same device too.
 The fallback prefers the same worker, so a variant on its software encoder that still decoded in hardware would fail again.
 
+[[decision-gpu-limits]]
+=== A GPU's session limit, memory and video engine limit its hardware encoder backend
+
+The headroom model charges a job attempt on a hardware encoder backend in two places.
+The encode term counts against that hardware encoder backend's own capacity.
+The decode and tone-mapping terms count against the worker's cores, unless the job attempt decodes in hardware.
+A GPU has three limits that a model of cores and pixel rate does not predict.
+
+* Some drivers refuse a new encode session past a fixed count while the GPU still has capacity.
+The worker assumes no session limit.
+The worker keeps no list of GPUs or drivers.
+When the driver refuses a session because the session limit is reached, only that one job runs on the software encoder of the same codec.
+The worker keeps offering the hardware encoder backend.
+The worker learns no cap from the refusal.
+* Running out of GPU memory stalls every stream on that GPU at once.
+The worker counts GPU memory as a hard limit.
+The worker refuses a new GPU job when the GPU's memory cannot hold that job.
+* A full video engine counts as a full hardware encoder backend, even while the CPU and the GPU's memory have room.
+
+A job attempt that decodes on the GPU keeps its decoded frames on the GPU.
+A silent fallback to software decoding then fails the job attempt instead of costing CPU that the model does not charge.
+The job's replacement attempt decodes in software.
+The benchmark stops at the first of these limits that the worker reaches.
+The ServerAdmin's view of the benchmark names that limit (<<decision-calibration>>).
+
+*Why:* In 2026, testers of the hardware checks of established media servers hit each of these limits.
+Consumer NVIDIA drivers refused a 13th encode session on an RTX 3060 or 3080 while the GPU still had capacity.
+Workstation cards and patched drivers have no such limit.
+An RTX 5090 with NVIDIA driver 615.78.08 refused the 13th concurrent NVENC session (https://github.com/streamarr/streamarr-transcode-worker/pull/166[streamarr/streamarr-transcode-worker#166]).
+On an Intel Arc A380, running out of GPU memory dropped every stream to 0 fps together.
+On Intel integrated graphics, the video engine reached 100 % before the CPU or the memory did.
+A cap learned from one refusal would leave the hardware encoder backend idle after a driver update raises or removes the limit.
+
 === Implementation
 
 https://github.com/streamarr/streamarr-server/issues/497[streamarr/streamarr-server#497] adds the preset setting, with Automatic as its default.
@@ -451,6 +570,9 @@ The web client shows the preset setting on its ServerAdmin settings page.
 https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499] adds pixel rate, the headroom model, the continuous measurement of each worker's constants, the kept calibrations and the benchmark.
 The same issue adds the speed floor, the extra variants and the capacity metric.
 The same issue also sends new variants to a hardware encoder backend first.
+The same issue retires the playback slots and the transcode limit, and adds the capacity metric.
+The same issue sizes the worker's memory budget from the worker's heap.
+The same issue adds the GPU limits and the ServerAdmin's view of the benchmark.
 That issue validates the constants by measurement before anything depends on them.
 The headroom-driven Automatic preset is the last step of that issue.
 https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56] adds the NVENC encoders.
@@ -491,12 +613,15 @@ AVPlayer's 1.70× floor would have admitted about 24 % more load per worker.
 That lower floor would leave Safari's native player below Safari's own floor.
 * The server now owns the production speed of each attempt and the constants of each worker.
 The server needs the production time that the worker reports with each media segment to fit each worker's constants.
-A worker that returns with the same hardware and FFmpeg build starts from the server's kept calibration.
-Only new hardware or a new FFmpeg build delays a worker's first job by a short benchmark.
-Free job slots still bound how many jobs a worker accepts.
+A worker that returns with the same hardware, CPU limit and FFmpeg build starts from the server's kept calibration.
+Only new hardware, a new CPU limit or a new FFmpeg build delays a worker's first job by a short benchmark.
+No fixed count bounds how many jobs a worker accepts.
 Headroom decides which extra variants run.
 Headroom also decides which preset Automatic picks within an encoder's range.
 Headroom also decides when new variants move from a hardware encoder backend to the software encoder for the same codec.
+* A worker's memory budget, not a count, bounds how many job attempts the worker runs.
+A ServerAdmin sizes a worker's encoding load through the worker's CPU limit, not through a number of jobs.
+* A GPU worker that hits its driver's session limit encodes the refused job in software and keeps encoding new jobs on the GPU.
 * On a worker with a verified hardware encoder backend, one codec's variants can come from two encoder backends at once.
 Each of those variants keeps one encoder backend for every replacement attempt.
 * A hardware encoder backend that scores below libx264 at `faster` gets higher bitrates, so the backend's variants cost more bandwidth.
@@ -577,6 +702,16 @@ Those running producers hold the CPU that a seek's first segment needs.
 * The same ladder bitrates for every encoder, hardware or software, would give a lower picture quality wherever a hardware encoder backend scores below libx264 at `faster`.
 * Sending only some jobs to a hardware encoder backend leaves the hardware encoder backend's headroom unused while software encodes take the worker's CPU.
 * A ServerAdmin setting on each worker that picks hardware or software asks the ServerAdmin to make a choice that the headroom model can predict.
+* Keeping the playback slots as an upper bound beside the headroom model either has no effect or refuses an encode that the model predicts every running variant can carry.
+* Keeping the server's transcode limit has the same effect across workers.
+* Keeping a calibration by worker identifier makes every restarted pod of a Kubernetes Deployment run the benchmark.
+* Leaving the CPU limit out of a kept calibration's key lets a worker whose CPU limit changed start from constants that predict the worker's old share of the host.
+* Validating the constants once for every worker trusts each worker's benchmark on content that the benchmark did not encode.
+* Assuming a session limit from a list of GPUs and drivers refuses sessions on workstation cards and patched drivers that have no limit.
+* Learning a session cap from one refusal leaves the hardware encoder backend idle after a driver update raises or removes the limit.
+* Turning a hardware encoder backend off after a session-limit refusal sends every later job to software, although the GPU still has capacity.
+* Charging GPU memory in pixel rate cannot predict a stall that stops every stream on the GPU at once.
+* Letting a GPU decode fall back to software silently costs CPU that the headroom model does not charge.
 
 == Evidence
 
@@ -688,6 +823,11 @@ Only two of those ladders ran with 1080p at real time.
 * In every ladder run, each FFmpeg process received an equal share of the cores.
 The 1080p variant was always the slowest variant.
 In the single-ladder runs, the 360p variant ran at 3.6× to 4.2× real time.
+* Equal parts of the cores predicted the production speeds of the capacity runs.
+The fit used the 24 clean capacity runs of the 24 fps film at five libx264 presets, with 2 to 16 variants running at once.
+One encode constant for each preset and one decoder constant predicted the 180 running variants' production speeds with a median error of 5 % and a largest error of 21 %.
+That fit is derived from the measured speeds.
+The largest errors came at `superfast` and `veryfast` with 10 to 16 variants running at once, where the model predicted up to 21 % faster than the measured speed.
 
 [[evidence-tonemap]]
 === Tone-mapping cost

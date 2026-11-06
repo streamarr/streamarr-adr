@@ -446,7 +446,7 @@ One output format that the server chooses within a playback session. Each format
 _Avoid_: fallback stream, replacement (unqualified)
 
 **Encoder backend**:
-An encoder that a worker runs for a codec family, together with whether it is hardware or software. A worker can run a hardware and a software backend for the same codec family, so the variants of one codec family can come from two backends at once (ADR 0044). When a connected worker has a hardware backend for the chosen codec family, the server dispatches each variant to a worker with that hardware backend first, and to a software backend only when no such worker has a free playback slot (ADR 0009). Every replacement attempt for a variant must use the backend of the job attempt that produced the variant's initialization segment (ADR 0037). When a hardware backend fails during a stream, playback continues on a new variant from the software backend of the same codec family on any worker with room, the failed worker first, and the worker stops offering the failed backend, and decodes in software, until the backend and the hardware decoder pass their checks again (ADR 0044).
+An encoder that a worker runs for a codec family, together with whether it is hardware or software. A worker can run a hardware and a software backend for the same codec family, so the variants of one codec family can come from two backends at once (ADR 0044). When a connected worker has a hardware backend for the chosen codec family, the server dispatches each variant to a worker with that hardware backend first, and to a software backend only when the headroom model predicts that no such worker's hardware backend has headroom left (ADR 0009, ADR 0044). Every replacement attempt for a variant must use the backend of the job attempt that produced the variant's initialization segment (ADR 0037). When a hardware backend fails during a stream, playback continues on a new variant from the software backend of the same codec family on any worker with room, the failed worker first, and the worker stops offering the failed backend, and decodes in software, until the backend and the hardware decoder pass their checks again (ADR 0044).
 _Avoid_: encoder capability, codec
 
 **Completed attempt**:
@@ -460,12 +460,20 @@ Width × height × frames per second. Streamarr models, compares and reports enc
 _Avoid_: resolution or preset name as a measure of load, pixel count
 
 **Speed floor**:
-The production speed, in media seconds per second of wall-clock time, that every running variant must keep. It is the larger of 1.35× real time, below which hls.js switches down, and the neediest Apple player's floor at the stream session's segment length. At 3 s segments, the speed floor is about 2.10× real time, the floor of Safari's native player. A stream session with merged-slot segments uses its 3 s slot length.
+The production speed, in media seconds per second of wall-clock time, that every running variant must keep. It is the larger of 1.35× real time, below which hls.js switches down, and the neediest Apple player's floor at the stream session's segment length. At 3 s segments, the speed floor is about 2.10× real time, the floor of Safari's native player. A stream session with merged-slot segments uses its 3 s slot length. During a capacity shortfall, the requested variant keeps running even below the speed floor, and the extra variants stop (ADR 0044).
 _Avoid_: hold threshold, real time (as the speed to keep)
 
 **Encoder headroom**:
 The encoding load that a worker can still take on. After the worker takes on that load, every running variant in every session that the worker serves must stay at or above the speed floor.
 _Avoid_: free slots, spare capacity (unqualified)
+
+**CPU limit**:
+The share of the host's CPU that a worker and its FFmpeg processes may use. A container's CPU quota sets it, and a worker without a quota has the whole host's CPU. The headroom model divides the CPU limit among the job attempts that encode video on that worker (ADR 0044).
+_Avoid_: cores (as a setting), slots
+
+**Calibration**:
+A worker's fitted headroom constants, together with the hardware, the CPU limit and the FFmpeg build that the constants describe. The server keeps the last calibration for each combination of the three. A worker that matches a kept calibration takes jobs at once. Any other worker runs a benchmark of bounded duration first. The server refits the constants from the production speeds while sessions play (ADR 0044).
+_Avoid_: profile, benchmark (the measurement that starts a calibration)
 
 **Production speed**:
 The media seconds that a job attempt produces per second of wall-clock time. The worker measures it from each media segment's production time, which leaves out the worker's waits for earlier uploads, and reports the production time with the segment's upload (ADR 0032, ADR 0044).
@@ -480,12 +488,8 @@ _Avoid_: speed, quality setting, profile (a codec profile is a different fact)
 ### Worker capacity
 
 **Capacity**:
-The number of items of one kind that a worker accepts at once. Each worker grants its own capacities, and the server never sends an item beyond a granted capacity (ADR 0032). A capacity of 0 accepts nothing of that kind.
-_Avoid_: limit (unqualified), quota, concurrency
-
-**Playback slots**:
-The capacity for job attempts that encode video. A worker setting fixes it until encoder headroom replaces it. A job attempt that copies the video takes no playback slot, even when it encodes audio, and the server's transcode limit leaves it out too (ADR 0044). A worker bounds its copies by a copy cap that it sizes from its maximum heap after a reserve instead, and refuses a copy beyond it with its own failure value (ADR 0037). Probes never use a playback slot.
-_Avoid_: slots for probes, shared slots, free slots (as encoder headroom)
+The number of probes of one kind that a worker accepts at once: playback probes, background probes, or keyframe packet scans and bitrate scan chunks. Each worker grants its own capacities, and the server never sends a probe beyond a granted capacity (ADR 0032). A capacity of 0 accepts nothing of that kind. Job attempts have no capacity: encoder headroom decides which encodes run, and the worker's memory budget only guards against runaway output (ADR 0044, ADR 0037).
+_Avoid_: limit (unqualified), quota, concurrency, playback slots, job slots
 
 **Playback probe**:
 A probe that a playback request waits for. It uses the playback probe capacity, or a free unit of the background probe capacity, and runs at normal CPU priority.

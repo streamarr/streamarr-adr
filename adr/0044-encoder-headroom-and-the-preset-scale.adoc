@@ -28,6 +28,10 @@ A later amendment takes copies out of the playback slots and the server's transc
 A job attempt that copies the video takes no playback slot, even when it encodes audio.
 The same amendment decides what happens when a hardware encoder backend fails during a stream, and stops hardware decoding on that worker until the encoder and the decoder pass their checks again (<<decision-hardware-failure>>).
 
+A later amendment picks the seek-priority mechanism from its proof (<<decision-seek-priority>>).
+Producers that run well ahead of their viewers pause while a seek's first segment is pending.
+Producers that run far ahead of their viewers are held back until a viewer nears their output (<<decision-hold-back>>).
+
 == Context
 
 In this ADR, a variant is one HLS variant in the sense of RFC 8216's `EXT-X-STREAM-INF`.
@@ -499,23 +503,149 @@ The initialization segment differed between `medium`, `fast`, `faster` and `very
 Evidence: <<evidence-init>>.
 
 [[decision-seek-priority]]
-=== Producers well ahead of their viewers give up CPU to a seek
+=== Producers well ahead of their viewers pause while a seek's first segment is pending
 
 A producer is the worker module that owns one job attempt's FFmpeg process.
-A producer runs ahead of its viewer when the producer has delivered media segments that the viewer's player has not requested yet.
-A producer whose encode is faster than real time keeps adding to that lead.
 A seek's first segment is the first media segment that a player needs after a seek.
-While a seek's first segment is pending on a busy worker, producers that run well ahead of their own viewers give up CPU.
-Two mechanisms can make those producers give up CPU.
-The first mechanism lowers those producers' CPU priority.
-The second mechanism pauses those producers until the seek's first segment is complete.
-One proof compares both mechanisms, with real encodes on one worker and three viewers.
-The proof then picks one mechanism.
-The change that implements the picked mechanism writes the rule into this ADR.
-Streamarr holds back a producer that runs far ahead of its viewer with the same mechanism that the proof picks.
+The seek's first segment is pending from the relocation that starts the seek's job attempt until the server delivers that segment to the player.
 
-*Why:* AVPlayer abandons a segment request for which the server has sent no bytes after one segment length.
-A producer that runs well ahead of its viewer does not need the CPU while a seek's first segment is pending.
+A job attempt's lead is the media that the server has stored for its variant without a gap after the media segment at its viewer's position, measured in time.
+A job attempt that started past that media has no lead.
+A job attempt that starts before media that is already stored, after a relocation, a recovery replacement or an on-demand restart of a stopped variant, reproduces that media before it makes anything new.
+That media counts toward its lead only as the job attempt's own uploads store it again.
+The server attributes each stored media segment to the job attempt whose upload stored it, so an upload of another job attempt, even one that a disconnected worker finishes late, counts toward no other job attempt's lead.
+Stored media that lies beyond the following gap never counts, because the job attempt would reach it only by reproducing it too.
+The viewer's position comes from the viewer's latest timeline report.
+While the viewer plays, the server advances that position with its clock from the time the report arrived.
+A segment request does not renew the report.
+The server uses the report only while the report is at most 30 s old and arrived after the stream session's latest relocation.
+The viewer's position is the farther of that report's position and the highest media segment that the player has requested since that relocation, starting with the relocation's own segment or a newer request's, since an older request can relocate after a newer one.
+A seek within stored media relocates nothing, so the player's requests can run ahead of its last report.
+A job attempt whose own output has reached a later island of stored media is never paused for the rest of its run, because its next work is reproducing that media rather than the segment that its lead budgets.
+
+While a seek's first segment is pending, the worker that runs the seek's job attempt pauses some of its other job attempts.
+It pauses every job attempt on it, of any stream session, whose lead outlasts the hold limit, the longest segment from the job attempt's next one to the end of the media and a position margin of 3 s together.
+On the plain 3 s grid that is a lead of more than 3 media segments.
+A merged segment ahead keeps the job attempt running until its lead covers that segment too.
+It never pauses a job attempt that a player's segment request waits on.
+A request that starts to wait on a paused job attempt resumes it at once.
+A request that moves the viewer past a paused job attempt's lead, such as one within stored media, also resumes it at once.
+When the seek's job attempt is replaced, the pending seek moves with the replacement to the replacement's worker.
+When the seek's variant stops, the seek is no longer pending.
+The server names those job attempts in a command to that worker.
+The server names them again at every new seek on that worker.
+Once a pending segment is delivered, the server sends the list that the seeks still pending on that worker need.
+That list is empty when no seek remains pending there.
+Each command replaces the list of the previous one.
+
+The worker pauses a job attempt by stopping every FFmpeg process of the job attempt with SIGSTOP.
+The worker signals only through a Linux pidfd that names the FFmpeg process and that the pause keeps until it resumes.
+A signal therefore never reaches a process that reused the pid of an FFmpeg process that has exited.
+A job attempt whose FFmpeg no pidfd names keeps running, on another system or when the kernel opens no pidfd.
+The worker resumes the job attempt with SIGCONT when a later command leaves the job attempt out.
+The worker also resumes the job attempt 3 s after the command that paused it, even when no later command arrives.
+A later command that names a job attempt that is still paused keeps that deadline, so a pause lasts at most 3 s however many seeks name the job attempt.
+After a job attempt resumes, early or at its deadline, the worker keeps it running, even when a command names it, until it has run for as long as it was paused and has delivered a media segment whose delivery began after the resume.
+A delivery in flight across the pause does not count, because the server may have stored its segment before the pause.
+The worker measures time on its own monotonic clock, so a delayed command cannot shorten that run.
+A job attempt whose FFmpeg no signal stops, because no pidfd names it or the kernel refuses the signal, counts as never paused.
+The worker resumes a paused job attempt before it asks FFmpeg to quit, before it terminates FFmpeg and once FFmpeg's output ends.
+The time FFmpeg spends paused counts neither as production time (<<decision-calibration>>) nor toward the worker's encoder stall timeout.
+
+Streamarr holds back a producer that runs far ahead of its viewer with the same pause under its own command (<<decision-hold-back>>).
+
+*Why:* Pausing delivered a seek's first segment sooner than lowering the producers' CPU priority, and as soon as a seek on an idle worker.
+Three viewers ran real 1080p libx264 encodes at `faster` on one host, limited to 10 CPUs.
+Two viewers played steadily while their producers ran ahead, and the third viewer seeked.
+The first segment after the seek arrived after a median of 2.74 s with no change.
+It arrived after 1.52 s when the steady producers ran at nice 19, and after 0.98 s when they were paused.
+A seek with no other producer on the same 10 CPUs took 1.10 s.
+No steady viewer's producer fell behind playback in any run.
+
+Lowering the priority is also one-way for an unprivileged worker.
+Raising a process's priority again needs `CAP_SYS_NICE` or a raised `RLIMIT_NICE`.
+A default container grants neither.
+A producer held back by a lower priority would therefore stay slow for the rest of its life.
+SIGSTOP and SIGCONT need no privilege for the worker's own child processes.
+
+A pause lasts at most the 3 s hold limit, which is how long AVPlayer waits for a segment at 3 s segments.
+After the pause, a producer that runs at least at real time needs at most a segment's duration to produce it.
+A lead longer than the hold limit and the longest segment ahead together therefore keeps the viewer playing through the worst pause.
+Budgeting only the next segment would let a run of seeks wear the lead down until a long merged segment after it came too late.
+The 3 s margin on top covers errors in the server's estimate of the viewer's position.
+Because a later command keeps the first deadline, seeks in quick succession never chain pauses into one that outlasts the hold limit.
+The run between pauses also keeps them from taking more than half of a producer's time, and a short pause needs only a short run.
+The delivered segment between pauses means that at most one pause falls between two of a job attempt's media segments.
+The worker enforces both bounds because only the worker knows when a pause began and ended; the server's view lags by the command's delivery time.
+Each new pause starts from a lead that the server measures again.
+The arithmetic assumes that the producer runs at least at real time.
+A producer slower than real time falls behind a playing viewer with or without a pause.
+A pause can then bring that rebuffer forward by several segments, not only by the hold limit, because every later segment arrives later by the paused time while the viewer's buffer shrinks.
+Budgeting the next segments at the producer's measured speed (<<decision-calibration>>) instead of real time is left to the server's production speed model.
+The server's stall clock (link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]) measures from the job attempt's latest stored segment and keeps running through a pause.
+Because at most one pause falls between two media segments, pauses shorten that clock by at most the 3 s hold limit against the 10 s stall threshold, however many seeks follow one another.
+A hold-back (<<decision-hold-back>>) never counts toward that clock.
+The server finds a segment that a job attempt published when a segment request that waits on the variant finds it stored, and restarts the stall clock then.
+A hold begins at a segment that the job attempt publishes while no request waits on it, so that segment is still unfound when the first request that waits on the job attempt releases the hold.
+That request finds the segment and restarts the stall clock as the hold ends.
+A count of segments alone would not hold for a stream copy's merged segments, which can span many slots (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-segment-list[ADR 0037]).
+A report older than the latest seek or older than 30 s would misplace the viewer.
+The highest requested segment lies at or ahead of the viewer's playhead, so it can only understate the lead.
+Evidence: <<evidence-seek-priority>>.
+
+[[decision-hold-back]]
+=== Producers far ahead of their viewers are held back until a viewer nears their output
+
+A job attempt's own lead is the media that its own uploads stored without a gap after the media segment at its viewer's position, measured in time.
+The viewer's position is the one that seek priority uses (<<decision-seek-priority>>).
+A job attempt has no own lead when a stored segment that is not its own output follows that media.
+When a job attempt's own lead exceeds the high-water mark, 60 s by default, the server holds it back.
+The hold lasts until the own lead falls to the low-water mark, 30 s by default.
+Both marks are server settings.
+The high-water mark must exceed the low-water mark, and the low-water mark must cover the target segment duration, a seek's pause and the position margin.
+When the longest media segment from the job attempt's next one to the end of the media outlasts the target segment duration, as a long merged segment can, both marks rise by the difference for that job attempt.
+
+The server lists each held job attempt in a hold-back command to the job attempt's worker, with a release time.
+The release time is how long a viewer playing at real time takes to reach the low-water mark.
+The worker pauses each listed job attempt with the same SIGSTOP as a seek's pause, and resumes it with SIGCONT at its release time even when no later command arrives.
+A later command that lists a held job attempt can only move its release time earlier, and a command that leaves it out resumes it at once.
+A job attempt whose hold ended at its release time stays unheld, whatever later commands list it, until a command leaves it out.
+The server sends a release time earlier than the one it sent when the viewer moves ahead faster than real time.
+Each hold-back command replaces the list of the previous one.
+The worker keeps a job attempt paused while either a seek's command or a hold-back command lists it.
+A released hold is followed by no run: the run after a pause belongs to seek priority alone.
+
+The server releases a held job attempt at once when a player's segment request waits on it, when it has no own lead, when it stops and when its stream session ends.
+The server decides the holds again at every stored media segment, segment request, waiting request, variant change and stream session end.
+It sends a worker a new list only when the list differs from the last one it sent, by its job attempts or by a release time at least 1 s earlier.
+A hold whose release time the server counts as past stays in the last list sent, so a waiting request still sends its release to a worker that received the hold late.
+Once the worker resumes a job attempt at its release time, the job attempt is held again at its next stored media segment while its own lead still exceeds the high-water mark.
+That new hold follows a command that leaves the job attempt out.
+A hold is not a viewer's activity, so idle and paused stream sessions are still suspended after the session timeout.
+
+*Why:* A seek's pause lasts at most 3 s and is followed by a run as long, so a producer held with it would still run half the time, and a 3× encoder would keep running ahead at 1.5×.
+A hold-back needs a long release time for each job attempt, a new hold once that time passes, and no run after it.
+The pause itself is the one that the seek-priority proof chose, so a hold stops no job attempt and starts none at an offset.
+
+Releasing at 30 s leaves a viewer 2.5 times what a resume needs.
+A resume needs 12 s: the next 6 s segment at real time, the 3 s position margin and a seek's 3 s pause.
+ADR 0037 bounds no merged segment's duration, so a fixed low-water mark alone could release a producer too late to produce its next segment.
+A hold delays every segment that the producer makes after it, so a long merged segment beyond the next one would reach the viewer too late as well.
+Raising both marks by the longest such segment's excess keeps the same 18 s beyond what a resume needs for every segment ahead.
+Holding above 60 s keeps the lead at the low end of the 60 s to 180 s that established media servers keep ahead, which frees worker capacity sooner.
+At 3× real time, the speed measured for 1080p libx264 at `medium`, a held producer runs about 15 s and then rests about 30 s, so its worker receives a few commands a minute.
+The release time travels in the command, so a lost command still resumes the job attempt before its viewer reaches the low-water mark.
+A late first command delays the hold itself, while the producer still runs and its lead grows.
+A late later command cannot extend a hold, because it can only move a release time earlier.
+A command sent before a release time but received after it cannot start a hold again, because the worker waits for a command that leaves the job attempt out.
+The server sends hold-back and seek commands without waiting for a segment that another upload is publishing, so a request that releases a hold never waits on another job attempt's file I/O.
+The server cannot tell whether its worker still keeps a hold that the server counts as past, so it sends that command before every new hold of the job attempt.
+The bounds in this decision and in seek priority assume that a worker session delivers each command promptly.
+A command carries no time after which it no longer applies, so a command that a worker session delivers seconds late acts on a lead that the server measured before the delay.
+A late new hold keeps a job attempt paused through the delay, and late seek commands can start pauses that the lead no longer covers.
+A viewer can then wait for a segment, and a player's request that waits releases the job attempt at once.
+Proving that the worker resumed before a new hold would need a report from the worker, because a segment that a paused job attempt uploads may have been produced before the pause.
+A viewer who moves ahead faster than real time gets an earlier release time at once.
 
 [[decision-copies-take-no-slot]]
 === A job attempt that copies the video takes no playback slot
@@ -648,9 +778,10 @@ The headroom-driven Automatic preset is the last step of that issue.
 https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56] adds the NVENC encoders.
 https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57] adds the VideoToolbox encoders.
 Each of those issues measures VMAF against libx264 at `faster` and adds the backend's rows to the preset scale.
-https://github.com/streamarr/streamarr-transcode-worker/issues/52[streamarr/streamarr-transcode-worker#52] runs the seek-priority proof and implements the picked mechanism.
-https://github.com/streamarr/streamarr-server/issues/500[streamarr/streamarr-server#500] tells the worker which producers can give up CPU and when a seek's first segment is pending.
-https://github.com/streamarr/streamarr-server/issues/55[streamarr/streamarr-server#55] holds back producers that run far ahead of their viewers with the same mechanism.
+https://github.com/streamarr/streamarr-transcode-worker/issues/52[streamarr/streamarr-transcode-worker#52] ran the seek-priority proof and pauses the job attempts that the server names.
+https://github.com/streamarr/streamarr-server/issues/500[streamarr/streamarr-server#500] names the job attempts to pause while a seek's first segment is pending.
+The worker contract carries the names, and the 3 s limit on each pause, in one command that replaces the previous list.
+https://github.com/streamarr/streamarr-server/issues/55[streamarr/streamarr-server#55] holds back producers that run far ahead of their viewers with the same pause and a hold-back command that carries each job attempt's release time.
 
 [[explicitly-deferred]]
 === Explicitly deferred
@@ -667,8 +798,9 @@ The measurements cover libx264 only.
 libx265 and libsvtav1 presets have not been measured on a ladder.
 * Any headroom-driven move of libx265 away from `veryfast`, until libx265's seek waits are measured.
 * Any libsvtav1 preset slower than `10` under Automatic, until libsvtav1's seek waits are measured.
-* The seek-priority mechanism, until the proof in https://github.com/streamarr/streamarr-transcode-worker/issues/52[streamarr/streamarr-transcode-worker#52] picks lowered CPU priority or paused producers.
 * The rate-control choices, including any CRF values.
+* Bounding the age of a seek or hold-back command.
+A command that the worker could check, such as one that names the last segment the server saw the job attempt deliver, would keep a late command from pausing a job attempt on a lead that no longer holds.
 
 == Consequences
 
@@ -769,6 +901,16 @@ Automatic never picked `ultrafast`, and no measurement in this ADR covers `ultra
 That special case would ship the lowest picture quality that the scale allows.
 * Applying seek priority only when a worker accepts a new job leaves running producers untouched.
 Those running producers hold the CPU that a seek's first segment needs.
+* Lowering the CPU priority of the producers ahead of their viewers, with nice 19, delivered the seek's first segment after 1.52 s, against 0.98 s with paused producers.
+An unprivileged worker also cannot raise that priority again.
+* Pausing every other producer on the worker would stall a viewer whose producer runs barely ahead of playback.
+* Letting the worker decide which producers pause would need every viewer's position, which only the server knows.
+* Separate pause and resume commands could leave a producer paused when a resume is lost.
+One command that replaces the whole list, and a limit on every pause, cannot.
+* Holding back a producer far ahead of its viewer with the seek's command would cap each hold at 3 s and follow it with a run as long.
+A 3× encoder would still run ahead of its viewer at 1.5×.
+* A hold-back without a release time in the command would leave a producer paused when the release command is lost, and its viewer would stall.
+* A later command that sets a held job attempt's release time anew would extend the hold by the command's delay.
 * The same ladder bitrates for every encoder, hardware or software, would give a lower picture quality wherever a hardware encoder backend scores below libx264 at `faster`.
 * Sending only some jobs to a hardware encoder backend leaves the hardware encoder backend's headroom unused while software encodes take the worker's CPU.
 * A ServerAdmin setting on each worker that picks hardware or software asks the ServerAdmin to make a choice that the headroom model can predict.
@@ -864,6 +1006,36 @@ Both counts are derived.
 * From the ratio of the two floors, AVPlayer's lower floor would admit about 24 % more load per worker.
 That figure is derived.
 The 2.10× floor protects both Apple players.
+
+[[evidence-seek-priority]]
+=== Seek priority
+
+* The proof ran on a 16-core, 32-thread x86-64 host in the pinned FFmpeg 8.1.3, in two configurations: limited to 10 cores and with all 32 threads.
+* The source was a synthetic 7-minute 1080p24 H.264 file with temporal noise and a 5 s GOP.
+* Each producer ran the worker's encode: libx264 at `faster`, 5 Mb/s, a forced keyframe every 3 s, fragmented MP4 on its output, one fragment for each 3 s segment, and no audio.
+* Two steady producers started from the beginning and ran for 8 s, so they led their viewers by many segments.
+A median steady producer led its viewer by 17 s with 10 cores and by 37 s with 32 threads when the seek started.
+* The seek's producer then started at a random 3 s boundary between 150 s and 327 s.
+The time to the seek's first segment ran from that start to the end of the segment's last byte on the producer's output.
+* With nice 19, the steady producers stayed at nice 19 to the end of each run, because the measuring process could not raise their priority again.
+With pausing, they paused at the seek's start and resumed once the seek's first segment was complete.
+* Each configuration ran each case 15 times, in a shuffled order within each of 15 rounds.
+* Other builds shared the host.
+The 1-minute load average ranged from 26 to 69.
+Before each run started, 2 to 31 of the 32 threads were busy with other work.
+
+[cols="1,1,1,1",options="header"]
+|===
+|Case |10 cores, median (middle half) |32 threads, median (middle half) |Steady viewers that stalled
+|Seek alone |1.10 s (0.72 s to 1.33 s) |0.94 s (0.81 s to 1.08 s) |—
+|No change |2.74 s (2.16 s to 3.33 s) |1.94 s (1.39 s to 2.60 s) |0 of 60
+|Nice 19 |1.52 s (1.06 s to 1.66 s) |1.24 s (0.97 s to 1.80 s) |0 of 60
+|Paused |0.98 s (0.68 s to 1.37 s) |1.17 s (0.62 s to 1.59 s) |0 of 60
+|===
+
+* The no-change median with 10 cores, 2.74 s, matches the earlier measurement of three concurrent seeks on the 10-core arm64 host.
+* With 10 cores, a pause lasted a median of 0.98 s and at most 1.64 s.
+* The smallest lead of any steady producer over its viewer, from the seek to 6 s after the seek's first segment, was 5.7 s with no change and 9.8 s with pausing, with 10 cores.
 
 [[evidence-presets]]
 === Preset cost and capacity
@@ -974,6 +1146,8 @@ SVT-AV1 names 12 as the highest preset intended for human use.
 * https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399] — the playback capabilities epic.
 * https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499] — the headroom model, its calibration, the speed floor, extra variants and presets under Automatic.
 * https://github.com/streamarr/streamarr-transcode-worker/issues/52[streamarr/streamarr-transcode-worker#52] — the proof and implementation of seek priority.
+* https://man7.org/linux/man-pages/man2/setpriority.2.html[setpriority(2)] — lowering a nice value needs `CAP_SYS_NICE` or `RLIMIT_NICE`.
+* https://man7.org/linux/man-pages/man7/signal.7.html[signal(7)] — SIGSTOP and SIGCONT.
 * https://github.com/streamarr/streamarr-server/issues/500[streamarr/streamarr-server#500] — the facts that tell a busy worker which producers can give up CPU to a seek.
 * https://github.com/streamarr/streamarr-server/issues/55[streamarr/streamarr-server#55] — holding back producers that run far ahead of their viewers.
 * https://github.com/streamarr/streamarr-server/issues/398[streamarr/streamarr-server#398] — verified encoder backends and the pinned backend for replacement attempts.

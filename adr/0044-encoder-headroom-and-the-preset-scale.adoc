@@ -453,18 +453,22 @@ A job attempt has no own lead when a stored segment that is not its own output f
 When a job attempt's own lead exceeds the high-water mark, 60 s by default, the server holds it back.
 The hold lasts until the own lead falls to the low-water mark, 30 s by default.
 Both marks are server settings, and the high-water mark must exceed the low-water mark.
+A resume needs the job attempt's next segment produced at real time, a seek's pause and the position margin.
+When that need exceeds the low-water mark, as a long merged segment's can, both marks rise by the difference for that job attempt.
 
 The server lists each held job attempt in a hold-back command to the job attempt's worker, with a release time.
 The release time is how long a viewer playing at real time takes to reach the low-water mark.
 The worker pauses each listed job attempt with the same SIGSTOP as a seek's pause, and resumes it with SIGCONT at its release time even when no later command arrives.
-A later command that lists the job attempt again sets its release time anew, and a command that leaves it out resumes it at once.
+A later command that lists a held job attempt can only move its release time earlier, and a command that leaves it out resumes it at once.
+The server sends a release time earlier than the one it sent when the viewer moves ahead faster than real time.
 Each hold-back command replaces the list of the previous one.
 The worker keeps a job attempt paused while either a seek's command or a hold-back command lists it.
 A released hold is followed by no run: the run after a pause belongs to seek priority alone.
 
 The server releases a held job attempt at once when a player's segment request waits on it, when it has no own lead, when it stops and when its stream session ends.
 The server decides the holds again at every stored media segment, segment request, waiting request, variant change and stream session end.
-It sends a worker a new list only when the list's job attempts change or a release time moves earlier by at least 1 s.
+It sends a worker a new list only when the list differs from the last one it sent, by its job attempts or by a release time at least 1 s earlier.
+A hold whose release time the server counts as past stays in the last list sent, so a waiting request still sends its release to a worker that received the hold late.
 Once the worker resumes a job attempt at its release time, the job attempt is held again at its next stored media segment while its own lead still exceeds the high-water mark.
 A hold is not a viewer's activity, so idle and paused stream sessions are still suspended after the session timeout.
 
@@ -474,9 +478,12 @@ The pause itself is the one that the seek-priority proof chose, so a hold stops 
 
 Releasing at 30 s leaves a viewer 2.5 times what a resume needs.
 A resume needs 12 s: the next 6 s segment at real time, the 3 s position margin and a seek's 3 s pause.
+ADR 0037 bounds no merged segment's duration, so a fixed low-water mark alone could release a producer too late to produce its next segment.
 Holding above 60 s keeps the lead at the low end of the 60 s to 180 s that established media servers keep ahead, which frees worker capacity sooner.
 At 3× real time, the speed measured for 1080p libx264 at `medium`, a held producer runs about 15 s and then rests about 30 s, so its worker receives a few commands a minute.
-The release time travels in the command, so a lost or late command still resumes the job attempt before its viewer reaches the low-water mark.
+The release time travels in the command, so a lost command still resumes the job attempt before its viewer reaches the low-water mark.
+A late first command delays the hold itself, while the producer still runs and its lead grows.
+A late later command cannot extend a hold, because it can only move a release time earlier.
 A viewer who moves ahead faster than real time gets an earlier release time at once.
 
 [[decision-copies-take-no-slot]]
@@ -690,6 +697,7 @@ One command that replaces the whole list, and a limit on every pause, cannot.
 * Holding back a producer far ahead of its viewer with the seek's command would cap each hold at 3 s and follow it with a run as long.
 A 3× encoder would still run ahead of its viewer at 1.5×.
 * A hold-back without a release time in the command would leave a producer paused when the release command is lost, and its viewer would stall.
+* A later command that sets a held job attempt's release time anew would extend the hold by the command's delay.
 * The same ladder bitrates for every encoder, hardware or software, would give a lower picture quality wherever a hardware encoder backend scores below libx264 at `faster`.
 * Sending only some jobs to a hardware encoder backend leaves the hardware encoder backend's headroom unused while software encodes take the worker's CPU.
 * A ServerAdmin setting on each worker that picks hardware or software asks the ServerAdmin to make a choice that the headroom model can predict.

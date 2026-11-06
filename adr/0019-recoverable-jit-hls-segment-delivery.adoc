@@ -12,6 +12,8 @@ For now, variants start on demand.
 <<decision-requested-variant>> gives the rules for when each variant starts and stops.
 The headroom model of link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] decides when extra variants may start early.
 Extra variants are variants that the player has not requested.
+An amendment retires the transcode limit and the worker job slots (link:0044-encoder-headroom-and-the-preset-scale.adoc#decision-headroom-decides-encodes[ADR 0044]).
+The same amendment lets the server try other workers for a bounded time after a worker refuses a job attempt for lack of memory, without using the variant's recovery (<<decision-requested-variant>>).
 An amendment stops replacement attempts after a failure that would repeat (<<decision-repeating-failures>>).
 An amendment lets only the newest request that positioned a variant relocate or resume that variant (<<decision-newest-request>>).
 An amendment makes the current segment the media segment that the player needs next (<<decision-requested-variant>>).
@@ -44,6 +46,7 @@ https://github.com/streamarr/streamarr-server/pull/747[streamarr/streamarr-serve
 The server does not yet publish the preparing-or-ready state (https://github.com/streamarr/streamarr-server/issues/507[streamarr/streamarr-server#507]).
 The worker does not yet pad an encoded variant past a source that ends early (https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511]).
 The server does not yet start extra variants from encoder headroom (https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499]).
+The server keeps the transcode limit and the worker job slots until https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499] retires them.
 
 == Context
 
@@ -85,7 +88,7 @@ When no padded segment is stored yet, the server starts a job attempt at the las
 That job attempt pads the segments up to the advertised end.
 A source that ends early adds no exception to the rule that a listed segment is an obligation.
 `503 Service Unavailable` stays the only way that the server refuses an advertised segment.
-The server answers `503 Service Unavailable` after exhausted recovery, or when a full transcode limit keeps a variant from starting (<<decision-requested-variant>>).
+The server answers `503 Service Unavailable` after exhausted recovery, or when no worker starts a variant's job attempt within the wait for worker memory (<<decision-requested-variant>>).
 A copied variant cannot be padded.
 link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] makes a copied variant that runs short a format error when some source stream still has media after the copy's last segment.
 When the whole source has ended, link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052] ends playback normally at the real end, and the client stops the player there.
@@ -188,43 +191,44 @@ A request for a third variant stops the variant that the player switched to befo
 * A failed or replaced job attempt of the requested variant does not stop the left variant.
 * A relocation restarts only the requested variant at the requested segment.
 * After a relocation, a variant that is not running starts when the player next requests one of that variant's segments.
-* The configured transcode limit caps how many job attempts that encode video run at once across every stream session.
-A job attempt that copies the video never counts against the limit and takes no worker job slot, even when it encodes audio (link:0044-encoder-headroom-and-the-preset-scale.adoc#decision-copies-take-no-slot[ADR 0044]).
-When a variant must start and the transcode limit leaves no room, the server starts nothing.
-The server answers that request with `503 Service Unavailable`, with no body and no `Retry-After`.
+* No transcode limit and no worker job slot keep a variant from starting (link:0044-encoder-headroom-and-the-preset-scale.adoc#decision-headroom-decides-encodes[ADR 0044]).
+A shortfall of encoder headroom never keeps a requested variant from starting.
+* A memory refusal is a worker's refusal of a job attempt whose expected output the worker's memory budget cannot hold (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-memory[ADR 0037]).
+A worker refuses a job attempt that encodes video with `JOB_ATTEMPT_FAILURE_WORKER_MEMORY_FULL`.
+A worker refuses a job attempt that copies the video with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` (https://github.com/streamarr/streamarr-server/pull/769[streamarr/streamarr-server#769]).
+Copies and encodes share the worker's memory budget, so either value says that the budget is full.
+The server treats a memory refusal as a full worker, not as a failed job attempt.
+A memory refusal uses none of the variant's recovery and does not mark the worker as tried.
+On a memory refusal, the server stops the extra variants on the refusing worker, in every stream session, and tries every other worker that can run the job.
+The server can try the refusing worker again after that worker frees memory.
+The server waits at most the stall threshold plus one target segment duration, counted from the first memory refusal of the start.
+A later memory refusal does not restart that wait.
+The extra variants that the server stops copy or encode the video alike.
+When no worker starts the job attempt within that wait, the server answers the request with `503 Service Unavailable`, with no body and no `Retry-After`.
 The server never stops another stream session's requested or played variant to make room.
-A media-segment request stops the stream session's other video variants except the left variant before the server checks the limit, so their job attempts no longer count.
-The left variant's job attempt counts against the limit and takes a worker job slot when it encodes video.
-When no configured transcode slot is free, or no worker that can run the variant has a free worker job slot, and a media-segment request's variant cannot start beside the left variant, the server stops the left variant if the stop frees the slot that the start lacks, and tries the start once more.
-A left variant frees a configured transcode slot when its job attempt encodes video.
-A left variant frees a worker job slot when its job attempt encodes video and runs on a worker that can run the start.
+Once a producer starts, the liveness rules of this ADR apply.
+A media-segment request stops the stream session's other video variants except the left variant before the server dispatches the start.
+When a worker gives a memory refusal to a media-segment request's variant, and the stream session's left variant runs on that worker, the server stops the left variant and tries the start once more on that worker.
+That holds whether the left variant copies or encodes the video.
 Only a worker that advertises a variant's pinned encoder can run that variant's later job attempts.
-The same rule holds when a media-segment request's replacement of a dead or stalled job attempt of the requested variant finds no free worker job slot.
-The replacement runs on one worker, so the left variant frees a worker job slot only on that worker.
+The same rule holds when a worker gives a memory refusal to a media-segment request's replacement of a dead or stalled job attempt of the requested variant.
 A start that fails for another reason, such as no worker that runs the variant's pinned encoder, leaves the left variant running.
-An initialization request never stops a variant to make room, except for a new viewer's first request as the rule below on other stream sessions says.
-A variant that copies the video starts without checking the limit, even when its job attempt encodes audio.
-* A worker refuses a copy while its copy cap is full, and its refusal names that reason with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-memory[ADR 0037], https://github.com/streamarr/streamarr-server/pull/769[streamarr/streamarr-server#769]).
-A left variant whose job attempt copies the video holds one place under the copy cap of the worker that runs it.
-Such a left variant takes no worker job slot and no configured transcode slot, so its stop frees neither.
-A start or replacement that finds no free worker job slot, or no free configured transcode slot, never stops a left variant that copies the video, in its own stream session or in another.
-The server stops such a left variant to make room only when the worker that runs it refuses a copy with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED`.
-A copy that fails to start for any other reason stops no left variant and goes to ordinary recovery.
-When a worker refuses with that value to start a media-segment request's variant that copies the video, and the stream session's left variant copies the video on that worker, the server stops the left variant and tries the start once more.
-The same rule holds when a worker refuses with that value a media-segment request's replacement of a dead or stalled job attempt that copies the video.
-As for slots, an initialization request never stops a variant for a refused copy.
+An initialization request never stops a variant to make room, except an extra variant after a memory refusal, and except for a new viewer's first request as the rule below on other stream sessions says.
+* A left variant holds memory in the memory budget of the worker that runs it, whether its job attempt copies or encodes the video.
+The server stops a left variant to make room only after a memory refusal from the worker that runs it.
+A job attempt that fails to start for any other reason stops no left variant and goes to ordinary recovery.
+An initialization request never stops a left variant of its own stream session after a memory refusal.
 * A left variant never keeps another stream session from playing.
-When no configured transcode slot is free, or no worker that can run the start has a free worker job slot, the server stops one other stream session's left variant and tries once more.
-When a worker refuses a copy with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` and runs another stream session's left variant that copies the video, the server stops that left variant and tries the copy once more on that worker.
+When a worker gives a start a memory refusal and runs another stream session's left variant, the server stops that left variant and tries the start once more on that worker.
 It does so when a new stream session is refused admission, when a new stream session's first-listed variant cannot start, when a variant cannot start on demand, and when a dead or stalled job attempt cannot be replaced.
 A start on demand here is a media-segment request's start, because an initialization request stops no producer outside a new viewer's first request.
 The server stops another stream session's left variant only while the left variant's job attempt runs and the job attempt of that stream session's requested variant runs.
 While the requested variant has no running job attempt, the left variant is the only variant that can serve that stream session's player.
-The server stops only a left variant whose stop frees the slot, or the place under the copy cap, that the start lacks.
-* A new viewer's first request may stop another stream session's left variant that copies the video on a full worker.
-Before the new stream session's player requests its first media segment, any request of its first-listed variant, an initialization request included, may stop that left variant when a worker refuses the first-listed variant's copy with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED`.
-The server then tries the copy once more on that worker, as for a media-segment request.
-This is the one case in which an initialization request stops a producer.
+The server stops only a left variant that runs on the refusing worker, so that the stop frees the memory, or the place under the copy cap, that the start lacks.
+* A new viewer's first request may stop another stream session's left variant on a full worker.
+Before the new stream session's player requests its first media segment, any request of its first-listed variant, an initialization request included, may stop that left variant when that worker gives the first-listed variant a memory refusal.
+The server then tries the first-listed variant once more on that worker, as for a media-segment request.
+Apart from extra variants after a memory refusal, this is the one case in which an initialization request stops a producer.
 The new viewer's first request never stops another stream session's requested or played variant, whether that variant copies or encodes the video.
 When no other stream session's left variant frees what the start lacks, the new viewer gets the capacity error instead.
 `createPlaybackSession` returns `TranscodeCapacityUnavailableError`, a held segment request ends with `503 Service Unavailable`, and the viewer reads the plain capacity message of https://github.com/streamarr/streamarr-server/issues/507[streamarr/streamarr-server#507].
@@ -278,11 +282,11 @@ So the left variant takes CPU from the switched variant only while the switched 
 The gap-based stop and the idle grace period, which this ADR rejects, kept producers running beside the requested variant for much longer.
 The played variant survives a rapid climb because the player last received media from it.
 A switched variant that has delivered nothing is not a known fallback.
-The left variant must not keep the switched variant from starting, so the left variant gives up its slot when no other slot is free.
-The left variant only insures one player's switch back, so it gives up its slot to any other stream session that finds no free slot.
-A place under a worker's copy cap is a slot for copies, so a left variant that copies the video gives up that place in the same cases.
-The server cannot see a worker's copy cap, so it learns that the cap is full from the worker's `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` refusal, and only that refusal triggers the stop.
-Another refusal says nothing about the copy cap, so stopping a left variant for it would cost a player its fallback and free nothing that the retry can use.
+The left variant must not keep the switched variant from starting, so the left variant stops when its worker refuses the switched variant for lack of memory.
+The left variant only insures one player's switch back, so the left variant also stops when its worker refuses another stream session's start for lack of memory.
+Copies and encodes share a worker's memory budget, so a left variant gives up its memory in the same cases whether it copies or encodes the video.
+The server cannot see a worker's memory budget, so the server learns that the budget is full from a memory refusal, and only a memory refusal triggers the stop.
+Another refusal says nothing about the memory budget, so stopping a left variant for it would cost a player its fallback and free nothing that the retry can use.
 Unlike a requested or played variant, stopping it stalls no viewer.
 The left variant only helps while it can serve the player's position.
 After a seek past its relocation gap, its output no longer serves the player.
@@ -296,17 +300,22 @@ AVPlayer and WebKit's native player each failed every attempt to switch up after
 Later simulations compared variant orders and segment lengths under the stop rule that this ADR adopts.
 No AVPlayer session in those later simulations timed out or failed, over 3 sessions for each tested combination.
 
-*Why a full transcode limit answers 503 instead of stopping another stream session's variant:* Another stream session's running variant serves a viewer who is watching it.
+*Why a memory refusal uses no recovery and waits a bounded time:* A memory refusal shows that a worker's output budget is full, not that the job fails.
+Recovery spent on memory refusals would use up a variant's replacements while every worker is busy.
+A producer that delivers a segment frees memory, so a worker that refused can take the job soon after.
+The wait is the startup budget that a starting job attempt already has, so a memory shortage makes a player wait no longer than a slow start does.
+
+*Why a memory shortage answers 503 instead of stopping another stream session's variant:* Another stream session's running variant serves a viewer who is watching it.
 Stopping that variant would stall that viewer to start a variant for someone else.
 That viewer's player would then request its segment again, and the new request could stop a third stream session's variant.
 Stream sessions would keep stopping each other's variants.
 `503 Service Unavailable` gives the player the same clear boundary as exhausted recovery.
 The player's own retry budget and its adaptive-bitrate switch then decide what happens next.
 
-*Why a new viewer's first request may stop another stream session's left copy:* The server cannot see a worker's copy cap, so it learns that the cap is full only when the worker refuses the new stream session's copy.
-The copy starts when the stream session is created, and its player then requests the initialization segment first.
-If only a media-segment request could make room, the refused copy would fail on that initialization request while another player's left copy kept the place.
-A left copy only insures one player's switch back, so it gives up its place to a new viewer.
+*Why a new viewer's first request may stop another stream session's left variant:* The server cannot see a worker's memory budget, so the server learns that the budget is full only when the worker refuses the new stream session's first-listed variant.
+The first-listed variant starts when the stream session is created, and its player then requests the initialization segment first.
+If only a media-segment request could make room, the refused variant would fail on that initialization request while another player's left variant kept the memory.
+A left variant only insures one player's switch back, so the left variant gives up its memory to a new viewer.
 A requested or played variant serves a viewer who is watching it, so the new viewer gets the capacity error rather than interrupting that viewer's stream.
 
 *Why other variants wait for a request:* The measurements in this paragraph used libx264 at the `medium` preset, 6 s segments and the four-variant ladder on a 10-core host.
@@ -544,9 +553,9 @@ Streamarr accepts a slower AVPlayer start or first seek only if no alternative i
 While the left variant runs, the switched variant shares the worker's encoder with it.
 The switched variant's first media segment therefore takes longer than under the previous rule, which stopped the left variant at once.
 That cost was not measured.
-When another stream session needs the left variant's slot, the player's switch back starts a new job attempt.
-The same holds for a left variant that copies the video when a worker refuses a copy with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED`.
-A copy that fails to start for any other reason leaves every left variant running.
+When a memory refusal stops the left variant, the player's switch back starts a new job attempt.
+That holds whether the left variant copies or encodes the video.
+A job attempt that fails to start for any other reason leaves every left variant running.
 On a full worker, a new viewer whose first request finds no left variant to stop gets the capacity error, even when stopping another viewer's running stream would have made room.
 
 The measured sessions started no variant when the stream session was created.

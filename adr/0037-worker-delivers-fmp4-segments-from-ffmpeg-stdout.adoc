@@ -112,6 +112,16 @@ A queued segment still counts against the producer's and the worker's memory bud
 The server marks a refusal at the per-worker limit with `SegmentUploadLimitReached`, and the worker queues that segment again.
 A refusal at the server's fleet-wide limits carries no marker and still fails the job attempt.
 
+NOTE: An amendment retires the slot count (link:0044-encoder-headroom-and-the-preset-scale.adoc#decision-headroom-decides-encodes[ADR 0044], <<decision-memory>>).
+The worker advertises no slot count, and no count of job attempts refuses a job.
+The worker sizes one worker-wide memory budget from its maximum heap after a 512 MiB reserve.
+Every producer counts against that budget, whether its job attempt encodes or copies the video, so copies no longer keep a budget of their own.
+Before FFmpeg starts, the worker reserves the job attempt's expected output from that budget in one step.
+An encode expects two segments at the job's own segment durations and bitrates, and a copy expects two segment caps.
+The worker refuses an encode whose expected output the budget cannot hold with `JOB_ATTEMPT_FAILURE_WORKER_MEMORY_FULL`.
+A copy's refusal stays `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED`.
+A producer that outgrows its reservation waits for unreserved bytes only while one of the worker's segments is queued or uploading, and at most until the upload acknowledgment timeout.
+
 == Context
 
 This section describes the system before the changes required by this decision.
@@ -1320,36 +1330,66 @@ Before it builds the samples a `moof` describes, it also reserves a fixed heap c
 A `trun` can describe a sample in one byte, so counting box bytes alone would let a crafted source fill the heap.
 Before it writes a rebuilt segment's `moof`, it reserves that `moof`'s bytes against both its own budget and the worker's budget.
 When its own budget cannot hold that `moof`, the producer fails the attempt with `SEGMENT_CAP_EXCEEDED`.
-The worker enforces the slot count it advertises.
-A job that encodes video and arrives while every slot holds an active job attempt that encodes video fails with `JOB_ATTEMPT_FAILURE_STARTUP_FAILED` before FFmpeg starts.
-A job attempt that copies the video takes no slot and never fails because the slots are full, even when it encodes audio (link:0044-encoder-headroom-and-the-preset-scale.adoc#decision-copies-take-no-slot[ADR 0044]).
-`JOB_ATTEMPT_FAILURE_STARTUP_FAILED` says that this worker could not start the attempt.
-`JOB_ATTEMPT_FAILURE_INVALID_SPECIFICATION` would instead say that no worker could run the job.
-The contract has no failure value specifically for a worker whose slots are full.
-The segment memory of the job attempts that encode video stays within one worker-wide budget of the slot count times two segment caps.
-Job attempts that copy the video share a second worker-wide budget of the copy cap times two segment caps.
-The copy cap is how many copies the worker's heap holds at two segment caps each.
+
+The worker keeps one worker-wide budget for the segment memory of every producer.
 The worker reads the maximum heap that the JVM derives from its container's memory limit.
-It takes off a 512 MiB reserve for the rest of the worker and the encodes' budget, and divides what is left by two segment caps, never below 0 (https://github.com/streamarr/streamarr-transcode-worker/issues/151[streamarr/streamarr-transcode-worker#151]).
-A copy that arrives while the copy cap's copies are all active fails with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` before FFmpeg starts (https://github.com/streamarr/streamarr-server/pull/769[streamarr/streamarr-server#769]).
+The worker takes off a 512 MiB reserve for the rest of the worker, and the worker-wide budget is what is left, never below 0.
+Every producer counts against the worker-wide budget, whether the producer's job attempt encodes or copies the video.
+No count of job attempts refuses a job (link:0044-encoder-headroom-and-the-preset-scale.adoc#decision-headroom-decides-encodes[ADR 0044]).
+Before FFmpeg starts, the worker reserves the job attempt's expected output from the worker-wide budget in one step.
+A job attempt that encodes video expects two segments at the job's own segment durations, merged segments included.
+That expected output also covers the job's audio, the box overhead and a margin for bitrate peaks.
+A job attempt that copies the video expects two segment caps.
+A producer's allocations use the producer's reservation first, without counting the bytes twice.
+Allocations beyond the reservation use the worker-wide budget's unreserved bytes, up to the producer's own budget of two segment caps.
+When the unreserved bytes run out, the producer waits only while one of the worker's segments is queued or uploading, because only a delivered segment frees memory.
+That wait ends at the upload acknowledgment timeout.
+When no segment is queued or uploading, or the wait ends, the producer fails the job attempt with `JOB_ATTEMPT_FAILURE_WORKER_MEMORY_FULL`.
+A job attempt that encodes video fails with `JOB_ATTEMPT_FAILURE_WORKER_MEMORY_FULL` before FFmpeg starts when the worker-wide budget cannot hold the job attempt's expected output.
+`JOB_ATTEMPT_FAILURE_WORKER_MEMORY_FULL` says that this worker's output budget is full, and another worker may start the job.
+`JOB_ATTEMPT_FAILURE_WORKER_MEMORY_FULL` does not say that the host has run out of physical memory.
+`JOB_ATTEMPT_FAILURE_STARTUP_FAILED` says that this worker could not start the attempt for another reason.
+`JOB_ATTEMPT_FAILURE_INVALID_SPECIFICATION` would instead say that no worker could run the job.
+The copy cap is how many copies the worker-wide budget's unreserved bytes hold at two segment caps each (https://github.com/streamarr/streamarr-transcode-worker/issues/151[streamarr/streamarr-transcode-worker#151]).
+A copy that the worker-wide budget cannot hold fails with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` before FFmpeg starts (https://github.com/streamarr/streamarr-server/pull/769[streamarr/streamarr-server#769]).
 A worker whose heap holds no copy refuses every copy with the same value, so the server's recovery tries another worker.
 `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` says that this worker's copy cap is full, and another worker may start the job.
-When the worker refuses a copy with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED`, the server stops a left variant that copies the video on that worker, which frees that variant's place, and tries the copy once more (link:0019-recoverable-jit-hls-segment-delivery.adoc#decision-requested-variant[ADR 0019]).
-A copy that fails to start for any other reason stops no left variant.
+Copies and encodes share the worker-wide budget, so a refusal with either `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` or `JOB_ATTEMPT_FAILURE_WORKER_MEMORY_FULL` is a memory refusal.
+On a memory refusal, the server can stop other producers on that worker, whether they copy or encode the video, and try the job attempt once more (link:0019-recoverable-jit-hls-segment-delivery.adoc#decision-requested-variant[ADR 0019]).
+A job attempt that fails to start for any other reason stops no other producer.
 The worker reports how full its copy cap is, so that an autoscaler can add workers.
 Every producer counts against its budget until it releases its segments, even after the producer starts stopping.
-FFmpeg's own memory, the kernel pipe buffer and gRPC's flow-control window sit outside those budgets.
-The container runtime bounds those resources.
 
-*Why:* A hung FFmpeg can take the grace period and a forced kill to exit.
+The worker also keeps a native budget for FFmpeg's own memory.
+The native budget is the worker's memory limit minus the maximum heap and the 512 MiB reserve, never below 0.
+The worker's memory limit is the container's memory limit, or the host's memory when the container has no limit.
+Before FFmpeg starts, the worker reserves the job attempt's expected FFmpeg memory from the native budget in one step.
+The expected FFmpeg memory is a fixed part for each FFmpeg process, plus a part for each megapixel of the decoded source frame, plus a part for each megapixel of each output frame.
+The benchmark measures those three parts from the peak resident memory of its own FFmpeg processes (link:0044-encoder-headroom-and-the-preset-scale.adoc#decision-calibration[ADR 0044]).
+Until a benchmark has measured them, the worker uses the parts that the worker's own tests measured on the pinned FFmpeg build.
+A job attempt that reshapes Dolby Vision profile 5 with `tonemapx` also reserves the memory that `tonemapx` keeps for each such frame (link:0013-stream-decision-architecture.adoc[ADR 0013]), for every frame from the attempt's start position to the end of the source.
+The reservation holds until the FFmpeg process exits, not merely until the producer starts stopping.
+A job attempt whose expected FFmpeg memory the native budget cannot hold fails with `JOB_ATTEMPT_FAILURE_WORKER_MEMORY_FULL` before FFmpeg starts, whether it encodes or copies the video.
+The kernel pipe buffer and gRPC's flow-control window stay outside every budget, and the container runtime bounds them.
+
+*Why:* No count of job attempts bounds FFmpeg's memory any longer.
+A 2160p source decodes full-size frames for every variant, even a 360p variant whose output the output budget holds easily.
+Concurrent requests for such variants would otherwise exhaust the container's memory, and the kernel would kill running encodes or the worker instead of refusing the new job attempt.
+A hung FFmpeg can take the grace period and a forced kill to exit.
 A burst of seeks can stop attempts faster than their FFmpeg processes exit.
 Evidence: <<evidence-svt-av1>>.
 A copy takes no slot (link:0044-encoder-headroom-and-the-preset-scale.adoc#decision-copies-take-no-slot[ADR 0044]), so a budget sized from the slots cannot bound the copies' unfinished segments.
 The worker holds those segments on its heap, so the heap that its container's memory limit allows bounds how many copies it can run.
 The raw container limit also covers the JVM's other memory regions, so a cap sized from it would admit copies that the heap cannot hold.
 The 512 MiB reserve keeps heap for gRPC, probes, upload messages and garbage collection.
-The server cannot see the copy cap, so `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` tells it that a refused copy met a full cap rather than a failed start.
-Only then does stopping a left copy on that worker free the place that the retry needs.
+Two segment caps reserve 256 MiB for each encode.
+Two segments of a 1080p variant at 5 Mb/s and 3 s hold 3.75 MB of video.
+A budget of a slot count times two segment caps would therefore decide how many encodes run, which encoder headroom decides instead.
+A copy's segments follow the source's keyframes and bitrate, so a copy reserves the two segment caps that bound them.
+A producer that briefly outgrows its reservation can continue while a delivery will free memory, and the deadline keeps the producer from waiting on memory that no delivery frees.
+The server cannot see the worker-wide budget, so a memory refusal tells the server that a refused job attempt met a full budget rather than a failed start.
+Only then does stopping another producer on that worker free the memory that the retry needs.
+A copy and an encode draw on the same bytes, so stopping a producer that encodes can free the memory that a refused copy needs, and stopping a copy can free the memory that a refused encode needs.
 
 === Tests substitute the process
 
@@ -1565,7 +1605,7 @@ The measurements did not isolate the cause, and the delay did not grow at the au
 * Each producer holds up to two segment caps in memory.
 One segment awaits acknowledgment while the producer assembles the next.
 The previous worker instead keeps the closed segment on disk while it uploads that segment.
-The worker holds at most the slot count plus the copy cap, times two segment caps.
+The worker holds at most its worker-wide budget, which the worker's heap sets.
 * Variable-frame-rate sources are still padded to a constant rate.
 The worker now uses the output frame rate instead of FFmpeg's guess.
 The frame-count GOP and the output rate therefore cannot disagree.
@@ -1609,7 +1649,7 @@ On a plain grid, only a media file longer than 18.7 hours at 3 s segments, or 35
 * Switching H.264 to fMP4 removes the parameter sets that MPEG-TS carried in each media segment.
 The server instead serves the stored init with later segments and, once workers advertise their encoders, requires replacement attempts to use the backend that produced that init.
 * The upload loop gains `isReady` flow control, a readiness bound and an acknowledgment deadline.
-The worker starts enforcing the slot count it advertises.
+No count of job attempts bounds the worker, and the worker-wide memory budget guards the worker (<<decision-memory>>).
 * AAC stream copies gain an explicit `aac_adtstoasc` filter that the HLS muxer inserted on its own.
 Without this filter, every MPEG-TS source with AAC fails to copy under the new muxer flags.
 * MPEG-TS disappears end to end, and the container as a type goes with it rather than surviving with one value.

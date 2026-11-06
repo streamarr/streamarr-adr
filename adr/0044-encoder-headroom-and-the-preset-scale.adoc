@@ -28,6 +28,10 @@ A later amendment takes copies out of the playback slots and the server's transc
 A job attempt that copies the video takes no playback slot, even when it encodes audio.
 The same amendment decides what happens when a hardware encoder backend fails during a stream, and stops hardware decoding on that worker until the encoder and the decoder pass their checks again (<<decision-hardware-failure>>).
 
+Another amendment gives every constant a prior and keeps every constant positive with a bounded solver (<<decision-calibration>>).
+That amendment retires the waiting measurements through which the fit first gave a new constant its value.
+Every measurement now enters the fit when it arrives.
+
 == Context
 
 In this ADR, a variant is one HLS variant in the sense of RFC 8216's `EXT-X-STREAM-INF`.
@@ -209,10 +213,28 @@ The fit starts from the benchmark's constants or from a kept calibration.
 The pull of those starting constants fades as old measurements do.
 The fit moves each constant only as far as the measurements support.
 A constant that no recent measurement prices keeps the value that the fit last gave it.
-A new constant stays unknown until the measurements give it a positive value, and an unknown constant never stops the fit of the known constants.
-A measurement that prices a constant without a value moves no known constant until every constant that the measurement prices has a value.
-Waiting measurements that share no constant without a value give their constants values apart from each other, so two constants that the measurements cannot separate never hold back a third.
-A waiting measurement whose constant comes out not positive moves no other constant.
+Every constant has a prior, which is a value that the fit pulls the constant toward.
+A constant with a starting value has that starting value as a prior, with the pull that fades.
+A constant with a value also has the value that the fit last gave it as a prior, with a light pull that never fades.
+A new constant is a constant that a measurement names before the constant has a starting value or a value.
+A new constant has a nominal value as its prior, with a pull so light that the measurements, not the nominal value, decide the constant.
+Every measurement enters the fit when it arrives, including a measurement that prices a new constant.
+The fit solves for all constants at once as one bounded weighted least-squares problem.
+Because every constant has a prior, that problem has exactly one solution.
+The fit keeps every constant at or above a small positive floor, so every constant is positive.
+A measurement whose constants reach the floor still moves the other constants that it prices.
+When a measurement's new constants would need a negative total cost, they stop at the floor, and the measurement's other constants take the rest of its cost.
+A new constant stays unknown until the measurements determine it apart from the other new constants.
+A new constant also stays unknown while the nominal values of the new constants could still move it by more than a thousandth of its value, or of 0.01 CPU s per megapixel for a smaller constant, with each nominal value off by up to the largest measured constant.
+That move is taken through the whole fit, so a constant with a value moves as far as its own measurements and priors let it.
+The move is the largest over every set of constants that the nominal values could take to the floor or off it.
+That bound holds however small the constant's part of a cost split that the measurements cannot separate.
+An unknown constant prices no encode configuration, and a kept calibration keeps no value for it.
+An unknown constant still has its prior in the fit, so an unknown constant never stops the fit of the known constants.
+An active-set solver from a maintained library solves the fit, not numerical code of Streamarr's own.
+The server accepts a solution only when the solver reports it optimal.
+The server raises to the floor any constant that the solver's round-off leaves below it.
+When the solver reports no optimal solution, every constant keeps its previous value.
 
 A calibration is a worker's fitted constants, together with the hardware, the CPU limit and the FFmpeg build that the constants describe.
 The worker reports its hardware, its CPU limit and its FFmpeg build when the worker registers.
@@ -261,6 +283,7 @@ Own predictions that neither validate nor fail an encode configuration are too l
 Such an encode configuration counts as validated while the encode configuration that differs only by using the encoder's Automatic preset is validated by its own predictions.
 Automatic may therefore pick another preset, such as `veryfast` for libx264, before that preset has any predictions of its own.
 While no measurement prices that preset's constant, the constant moves with the constant of the encoder's Automatic preset, at the ratio between the two constants that the benchmark measured.
+The preset's starting value moves with it, so the first measurement that prices the preset pulls the constant away from its followed value, never back toward the benchmark's value.
 A failed preset becomes too little evidence again once its failed predictions are 7 days old, and the fit has by then learned from those failed measurements.
 Each prediction also keeps its job attempt's pixel rates and measured cost.
 The server checks the current constants against those measurements as well.
@@ -269,6 +292,7 @@ A larger median error of the current constants fails the encode configuration, h
 A change to a constant that encode configurations share, such as an encode constant that another source decoder's measurements move, therefore removes the validation of every encode configuration whose measurements the changed constants no longer predict.
 A kept calibration keeps each encode configuration's predictions with their measurement times, and therefore each encode configuration's validation.
 A kept calibration also keeps which constants a measurement has priced, so a preset measured before a restart keeps its own constant instead of following the Automatic preset's constant.
+A measurement counts as pricing each of its constants as soon as it arrives, even when it also prices an unknown constant.
 A benchmark's constants start without predictions, and therefore without validation.
 An early start of an extra variant or a preset choice depends on the model only when the encode configuration of every running variant on the worker, and of the variant that the decision concerns, is validated.
 Otherwise ADR 0019's on-demand rules apply on that worker, and Automatic keeps the fixed meaning that <<decision-preset-setting>> gives Automatic.
@@ -302,6 +326,13 @@ Without the benchmark's ratio between presets, Automatic could never pick `veryf
 A single running variant keeps one ratio, so a preset whose own accurate predictions cover one ratio keeps the Automatic preset's validation instead of losing it.
 A preset that has failed gets no new predictions while Automatic avoids it, so its failed predictions age out instead of blocking it for good.
 A starting constant that kept its full pull would drag a constant that has gone dormant back to the benchmark's value, while the constant's old predictions would still validate it.
+A constant without a prior leaves the fit without a single solution whenever one measurement prices two constants that the measurements cannot yet separate.
+A prior on every constant gives the fit one solution in every case, so no measurement has to wait for the other constants it prices.
+A split of one cost that only the priors decide is a guess, not a measurement.
+Such a split once gave a preset without a starting value a constant, and the preset then shared the Automatic preset's validation with no predictions of its own.
+The model then predicted that preset's speeds 2.35× to 6× too fast, so a new constant gets no value from such a split.
+An active-set solver holds each constant that reaches the floor at the floor, up to round-off, where an ADMM solver only converges toward the floor and can stop below it.
+A followed preset whose prior stayed at the benchmark's value would snap back toward that value at its first measurement, and an unknown constant priced beside it would take the difference.
 Fitted per source and preset, the model predicted libx264's CPU within about 7 %, so a median error of 10 % leaves room for content that changes between segments.
 Equal parts of the cores predicted up to 21 % faster than the measured speed, so the margin for overprediction keeps a running variant above the speed floor when the model errs in that direction.
 A preset stays with its variant for the variant's lifetime, so a preset chosen without the margin cannot be repaired by later calibration.
@@ -783,6 +814,20 @@ Those running producers hold the CPU that a seek's first segment needs.
 * Letting a preset's first 20 predictions replace the Automatic preset's validation disables a preset whose single running variant kept one ratio.
 * Keeping a failed preset's predictions until they are replaced blocks that preset for good, because Automatic gives it no new predictions.
 * Rejecting every new solution when one new constant comes out not positive stops the fit of every known constant.
+* Holding a measurement that prices a constant without a value until every constant that the measurement prices has a value needs separate solves for the waiting measurements.
+Ten adversarial review rounds of https://github.com/streamarr/streamarr-server/pull/828[streamarr/streamarr-server#828] kept finding edge cases of that design.
+The tenth round left one case open: a partly determined group of waiting measurements could give a constant a value while the unknown constants beside it needed a negative total cost.
+* Holding a constant that comes out not positive at its last value, and solving again, repeats by hand what a bounded solver does exactly.
+* Publishing every constant to which the priors give a value lets a split that only the priors decide price an encode configuration.
+A preset priced that way shared the Automatic preset's validation with no predictions of its own, and the model predicted its speeds 2.35× to 6× too fast.
+* Settling a new constant once a prior keeps under a thousandth of its variance misses a constant that takes only a small part of a cost split that the measurements cannot separate.
+Such a constant settled at a value that the priors decided, and once held, it priced another new constant at half that constant's cost.
+* Holding every constant with a value fixed while checking a new constant misses the constants that the fit can still move.
+Medium measured at 360p from an 8K source shares its cost with a decode constant that three measurements of another preset pinned, so medium's nominal value raised that decode constant by 14 % and gave medium half its cost.
+* An ADMM solver converges toward the floor and can stop below it.
+Hipparchus 4.0.3's ADMM solver returned 0.0099758 against a floor of 0.01, and its polishing step failed on a well-posed problem of three constants.
+* A hand-written non-negative least-squares solver keeps numerical code in Streamarr that a maintained library already provides.
+* A floor of zero lets a constant reach zero, although every constant of the model is positive.
 * Validating from past prediction errors alone keeps a dormant encode configuration validated after measurements of another configuration move a constant that both share.
 * Leaving FFmpeg's memory to the container runtime lets requested variants of a 2160p source exhaust the container once no job limit caps them.
 * Assuming a session limit from a list of GPUs and drivers refuses sessions on workstation cards and patched drivers that have no limit.
@@ -909,6 +954,12 @@ The fit used the 24 clean capacity runs of the 24 fps film at five libx264 prese
 One encode constant for each preset and one decoder constant predicted the 180 running variants' production speeds with a median error of 5 % and a largest error of 21 %.
 That fit is derived from the measured speeds.
 The largest errors came at `superfast` and `veryfast` with 10 to 16 variants running at once, where the model predicted up to 21 % faster than the measured speed.
+* The same 180 running variants were replayed one step ahead: each speed was predicted before the fit saw it.
+The fit with a prior on every constant gave the same errors as the fit with waiting measurements in six of eight orders and starting points.
+From the file's order and no starting constants, both predicted 174 speeds with a median error of 6.3 % and a largest error of 28 %.
+In the other two, with the rows shuffled, it predicted one speed fewer, and its median error changed by at most 0.05 percentage points.
+* ojAlgo 57.6.2's active-set convex solver solved 2,000 random bounded problems of 3 to 30 constants, each to optimality.
+Its free constants matched an exact solve of the same problems with a median relative error of 1e-16.
 
 [[evidence-tonemap]]
 === Tone-mapping cost
@@ -980,3 +1031,4 @@ SVT-AV1 names 12 as the highest preset intended for human use.
 * https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56] — NVENC encoders.
 * https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57] — VideoToolbox encoders.
 * https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] — the VAAPI, QSV, AMF and RKMPP encoders.
+* https://github.com/optimatika/ojAlgo[ojAlgo] — the active-set convex solver that keeps the fit's constants at or above the positive floor.

@@ -51,6 +51,14 @@ Each encoded lower variant beside a copy then forces its keyframes at the copy's
 The amendment ends this decision's deferral of that alignment.
 The server lists encoded lower variants beside a copy only once each job attempt carries those exact starts (https://github.com/streamarr/streamarr-server/issues/780[streamarr/streamarr-server#780]).
 
+A later amendment adds the optional upload budget (<<decision-upload-budget>>).
+A ServerAdmin enters the server's internet upload speed, and counted stream sessions may use 80% of it together.
+When the server serves a multivariant playlist, the budget leaves out each variant that would take the counted stream sessions over that share, and it always keeps the lowest variant.
+It never refuses playback, never changes a direct play and never turns a copy into an encode.
+When it leaves out the first-listed variant, the server starts the top variant that stays as it serves the playlist.
+The client attests the network route of each playback session, and a stream session on the local network never counts (<<decision-network-route>>).
+The server still never classifies a viewer by IP address.
+
 NOTE: link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052] changes what this decision says about an encode in Original.
 Every encode that Original reaches now plays in Auto, and the client tells the viewer that the playback choice changed.
 That encode is Auto's encoded quality ladder, not one variant without a label.
@@ -231,6 +239,7 @@ When the server copies the video in Auto, the multivariant playlist lists the co
 The copy is the first-listed variant, so creating the stream session starts only the copy.
 link:0008-server-generated-hls-playlists.adoc[ADR 0008]'s rule that lists the variant nearest 2000 kb/s first applies to a ladder of encodes.
 Each lower variant encodes only when the player switches to it, as link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019] starts a variant on demand.
+When the upload budget leaves the copy out of the playlist, the top lower variant that stays starts instead, when the server creates the stream session or serves the playlist (<<decision-upload-budget>>).
 The headroom model of link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] never starts a lower variant beside a copy early, and never keeps one running as an extra variant.
 When the player switches back to the copy, the lower variant that the player leaves stops once the copy delivers a media segment, as ADR 0019 stops a left variant.
 While the player stays on the copy, no lower variant runs.
@@ -252,20 +261,113 @@ Variants without the shared segment list would make a switch fall inside a segme
 === The server does not tell a viewer at home from a viewer away
 
 The server never classifies a viewer as at home or away by the viewer's IP address.
-The server has no separate limits for viewers at home and viewers away.
+The server has no separate quality limits for viewers at home and viewers away.
+Only the optional upload budget treats them apart, by the network route that the client attests (<<decision-network-route>>).
 The player's own variant switching adapts each viewer's quality to the bandwidth that the viewer's own connection gives (<<decision-lower-variants>>).
 The Apple client caps Auto only in Low Data Mode, when the system reports the network path as constrained (`NWPath.isConstrained`).
 The cap is the 720p quality tier's picture box and 4 Mb/s for video plus audio, sent as the viewer's limits when a stream session starts.
 An expensive path alone, such as cellular or a hotspot (`NWPath.isExpensive`), leaves Auto uncapped: many viewers have unlimited data, and the player's own variant switching already adapts to the connection.
 Original and fixed qualities are never capped.
 A ServerAdmin may set a total upload budget for the server.
-That budget is optional and off by default.
+That budget is optional and off by default (<<decision-upload-budget>>).
 
 *Why:* An IP address does not show how fast a viewer's path is.
 A viewer at home can have weak Wi-Fi, and a viewer away can have a fast fibre connection.
 A VPN, a reverse proxy or carrier-grade NAT also hides where a viewer is.
 Variant switching measures each viewer's own path while the viewer plays.
 Only the device knows that its connection is metered, so the Apple client caps its own quality there.
+
+[[decision-upload-budget]]
+=== An optional upload budget leaves variants out of a playlist, and never blocks playback
+
+A ServerAdmin may enter the server's internet upload speed as a speed test reports it, in whole megabits per second from 1 to 10,000.
+The upload budget is off until a ServerAdmin enters a speed, and clearing the speed turns it off again.
+The stream sessions that count against the budget may use 80% of that speed together.
+That 80% is the streams' share.
+
+A stream session counts at the average bitrate of what it sends, at the variant that its player last requested:
+
+* a copy at its measured average (link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc[ADR 0054]), or at its probed average while the file has no measurement;
+* an encoded variant at its target average;
+* a direct play at its measured average once the file's measurements (ADR 0054) cover every video stream of the file, and at its probed container bitrate otherwise.
+
+Before its player requests a media segment, a stream session counts at its first-listed variant.
+The headroom that a variant's BANDWIDTH attribute adds above its average does not count.
+A suspended stream session counts nothing.
+A stream session on the local network never counts (<<decision-network-route>>).
+
+When the server serves a counted stream session's multivariant playlist, it leaves out each variant whose average bitrate would take the counted stream sessions over the streams' share.
+The lowest variant always stays.
+When no variant that stays runs or can start now, because no connected worker can run it or every worker that can gives it a memory refusal (link:0019-recoverable-jit-hls-segment-delivery.adoc#decision-requested-variant[ADR 0019]), the playlist stays whole.
+The check runs each time the server serves the playlist and reserves nothing, so the budget is a soft cap.
+
+The budget never refuses playback.
+It never changes or blocks a direct play, never turns a copy into an encode and never changes any other part of the stream decision.
+It only leaves variants out of an HLS multivariant playlist.
+
+When the budget leaves out the first-listed variant as the server creates the stream session, creating the stream session starts the top variant that stays instead of the first-listed variant.
+That variant holds the place in a worker's memory budget that admission found until the player reads its playlist, and it holds the playlist's place as a variant that a served playlist starts does.
+So when the budget no longer leaves out the first-listed variant as the server serves the first playlist, a request of the first-listed variant can stop that variant and start in the memory that the stop frees.
+Each time the server serves a playlist that leaves out the first-listed variant, and no job attempt of a variant that stays runs, it starts the top variant that stays at the current segment before it returns the playlist.
+That variant then holds its place in its worker's memory budget, so another stream session cannot take the last place before the player requests a variant that stays.
+This also covers a playlist that the player fetches again after the budget has left out the copy that it plays.
+When a variant that stays already runs while the player plays a variant that the playlist leaves out, as one that an initialization request started does, the server starts nothing and treats that running variant as the variant that the playlist started.
+When that variant cannot start, the playlist stays whole and lists the first-listed variant again.
+The playlist also stays whole when the top variant that stays has a job attempt that does not run, such as a suspended one: that job attempt holds no place, and recovery rather than a start replaces it.
+The player can choose another variant that stays.
+Until the player requests a media segment of a variant other than the one it plays, a request of another variant, an initialization request included, stops the variant that the playlist started when the stop frees the place that the start lacks, and tries the start or the replacement once more.
+The variant that takes that place then holds it for the playlist in turn.
+It stops no other variant.
+A media-segment request for the variant that the player plays keeps the variant that the playlist started running, because the player may have sent it before it read that playlist.
+Delivering a media segment that the player requested before that playlist keeps it running too.
+When the budget leaves out no variant, variants start as link:0019-recoverable-jit-hls-segment-delivery.adoc#decision-requested-variant[ADR 0019] decides.
+
+*Why:* Every stream over the internet shares the server's one upload.
+When the streams together ask for more than it carries, every one of them stalls, and each player's variant switching sees only its own path.
+Leaving variants out moves a new stream session to a variant that fits, and the decisions of this ADR and of link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045] stay as they are.
+The lowest variant stays, so a player always has a variant to play.
+A playlist with only variants that cannot start would leave the player nothing that plays, while the first-listed variant may still start.
+Averages, not peaks, are counted, because the peaks of several streams rarely come at once, and the 20% that the share leaves out absorbs them.
+A speed test reports the upload that a ServerAdmin can check, so the setting takes that value.
+
+A player starts with the first variant that the playlist lists.
+When the budget leaves out the first-listed variant, the top variant that stays is the variant that the player requests first.
+On demand, that variant would start only at the player's first request.
+Another stream session could take the last place in the workers' memory budgets between the playlist and that request, and the request would then fail with `503 Service Unavailable`, although the copy would have played.
+Starting the variant as the server serves the playlist closes that gap, as starting the first-listed variant at creation does under ADR 0019.
+The same gap opens earlier, between admission and the first playlist: admission found a place in a worker's memory budget, and other stream sessions could fill that budget before the player reads its playlist.
+The budget would then keep the playlist whole, and the player's first request of the first-listed variant would fail although admission accepted the stream session.
+Starting the top variant that stays at creation holds the place that admission found, as starting the first-listed variant does when the budget leaves out no variant.
+The budget decides the playlist again each time the server serves it, so each served playlist still starts the top variant that stays when none runs.
+
+[[decision-network-route]]
+=== The client attests the network route, and the server never classifies by IP address
+
+`createPlaybackSession` requires the network route: `LOCAL_NETWORK` or `INTERNET`.
+The client sends `LOCAL_NETWORK` when it reached the server through one of these:
+
+* a private IPv4 address (RFC 1918);
+* an IPv4 or IPv6 link-local address;
+* an IPv6 unique local address in `fd00::/8`;
+* a `.local` name, or a `.home.arpa` name (RFC 8375);
+* local discovery.
+
+The client sends `INTERNET` for every other route.
+That includes loopback, public host names, tunnels, carrier-grade NAT in `100.64.0.0/10` including Tailscale, Tailscale's IPv6 prefix `fd7a:115c:a1e0::/48`, hairpin NAT through a public name, and a single-label host name, one with no dot that is not an IP literal.
+Every format attempt of the playback session keeps the route.
+
+A stream session on the local network never counts against the upload budget, and the budget leaves its playlist whole.
+A false `LOCAL_NETWORK` claim only takes that stream session out of the budget.
+It grants no access: authorization, playback tokens and worker capacity ignore the route.
+
+*Why:* The client knows the address that it reached the server at.
+The server sees only the peer address, which a reverse proxy, a tunnel or hairpin NAT hides.
+Loopback counts as the internet because a tunnel can forward a loopback port.
+RFC 8375 reserves `.home.arpa` for home networks, and the public DNS never answers for it.
+A resolver expands a single-label name with the DNS search domains, so the name reaches whatever host the first search domain that answers points to.
+Tailscale's MagicDNS adds the tailnet's search domain, so a bare machine name reaches the server over Tailscale, which this decision keeps on the internet.
+A work or ISP network can also hand out a public search domain.
+A browser does not tell the client which address a name resolved to.
 
 [[decision-tiers]]
 === Each quality tier is a 16:9 picture box in either orientation
@@ -806,8 +908,8 @@ The source's bitrate suits the source's picture, which can be far larger.
 === Explicitly deferred
 
 * This ADR does not add a quality cap for each viewer or each Profile.
-* This ADR does not decide how the ServerAdmin's total upload budget bounds stream sessions.
-The issue that adds the budget decides that.
+* This ADR does not add a ServerAdmin list of custom domain names that count as the local network.
+A later decision may add one for a household that names its server under its own domain.
 * This ADR does not decide whether a client's playback details show that the server lowered the audio.
 The multivariant playlist already names the delivered audio codec and channel count.
 * This ADR does not add a night mode, a dialogue boost or other dynamic range compression for the viewer to turn on.
@@ -903,6 +1005,19 @@ A seek into a loud scene starts an encoder, so a stereo AAC downmix is most like
 The first segments after a switch down wait for that variant's encoder to start, as every on-demand start does under ADR 0019.
 * A viewer away from home gets the same rules as a viewer at home.
 A viewer on a slow connection relies on the player's variant switching, or on the Apple client's own cap on a metered connection.
+* Under the upload budget, a stream session can play a lower variant than its viewer's own connection carries, because other stream sessions use the upload.
+* The budget reserves nothing, so stream sessions that start at the same moment can together take the counted total over the streams' share.
+* Before its player requests a media segment, a stream session counts at its first-listed variant, even when the budget left that variant out, so the counted total runs high for a moment.
+* When the budget leaves the copy out, a lower variant encodes from the start of playback and uses a video encode's encoder headroom (link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044]), where the copy decoded and encoded no video.
+* When a player keeps requesting the copy after a playlist fetched again left it out, the variant that the playlist started keeps running and holds its place in its worker's memory budget until the player requests another variant.
+* Handing the playlist's place to another variant stops the variant that the playlist started and then starts the other, as a media-segment request that makes room under link:0019-recoverable-jit-hls-segment-delivery.adoc#decision-requested-variant[ADR 0019] does. Nothing reserves the freed place between the two steps, so another stream session's start can take it, and the request then answers `503 Service Unavailable` while the playlist still leaves the copy out.
+* A variant that the playlist started frees only the memory that its own job attempt holds: an encode holds its expected segments and a copy two segment caps (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-memory[ADR 0037]).
+Stopping a lower encode can free less than the copy needs, and the copy's request then waits out the memory refusal and can end with `503 Service Unavailable`.
+* A player that plays a lower variant while its switch to the copy is pending, when a playlist fetched again leaves the copy out, keeps no place for the playlist: delivering the copy segment stops the lower variant, and another stream session can take its place before the player requests it again.
+* A false `LOCAL_NETWORK` claim takes that stream session out of the budget, so the streams can use more than the share.
+* A viewer who reaches the server on the local network by a single-label name counts against the budget.
+* A direct play of a file whose measurements do not cover every video stream, such as a second video track or cover art stored as a video stream, counts at the probed container bitrate.
+* The setting takes whole megabits per second, so a speed test of 23.7 Mb/s is entered as 23 or 24.
 * An AAC encode of a track of 7 or more channels plays 5.1, or 5.0 for a `7.0` track, so the track's second surround pair folds into the first.
 * An Opus or FLAC encode of a `7.0` track plays as 7.1 with a silent low-frequency channel when that codec's capability entry accepts 8 or more channels, and the player shows 7.1.
 In Opus, it costs the 7.1 rate of 640 kb/s, where a 5.0 encode costs 448 kb/s (ADR 0043).
@@ -932,6 +1047,13 @@ It encodes at the bitrate of the tier that holds that size.
 * Classifying viewers as at home or away by IP address, with separate limits for each, misjudges viewers on weak Wi-Fi at home and on fast connections away.
 A VPN, a reverse proxy or carrier-grade NAT hides the viewer's location from the server.
 * A server-side cap for cellular viewers cannot see that a connection is metered, because only the device knows.
+* Refusing playback, or encoding instead of copying, when the upload budget is full would turn a soft limit into a playback failure.
+* Counting each variant at its BANDWIDTH peak would leave out variants that fit, because the peaks of several streams rarely come at once.
+* Leaving the top variant that stays to start on the player's first request lets another stream session take the last place in the workers' memory budgets before that request.
+* Reserving a place in a worker's memory budget for the variants that stay until the player's first request would hold a place that runs no job attempt and needs its own timeout.
+* Counting a direct play at its measured average when its measurements do not cover every video stream counts it below what it sends.
+* Counting a single-label host name as the local network would attest a Tailscale route through MagicDNS's search domain as local.
+* Classifying the network route on the server by the peer address fails behind a reverse proxy, a tunnel or hairpin NAT.
 
 * Applying the viewer's limits to encodes only would let a copy exceed every limit the viewer set.
 * Applying the viewer's limits to a copy in Original would break Original's promise of the source's own quality.
@@ -1268,4 +1390,8 @@ Every channel came out in its RFC 7845 position, within 0.6 dB of the source's l
 * https://www.itu.int/rec/R-REC-BS.1770[ITU-R BS.1770-5: Algorithms to measure audio programme loudness and true-peak audio level], Annex 2 for the example true-peak filter
 * https://tech.ebu.ch/docs/tech/tech3341.pdf[EBU Tech 3341: Loudness Metering], for its true-peak test cases
 * https://github.com/streamarr/streamarr-transcode-worker/pull/142[streamarr/streamarr-transcode-worker#142] implements the two-stage true-peak limiter.
+* https://github.com/streamarr/streamarr-server/pull/796[streamarr/streamarr-server#796] implements the upload budget and the network route, and https://github.com/streamarr/streamarr-server/pull/759[streamarr/streamarr-server#759] implements the lower variants beside a copy.
+* https://www.rfc-editor.org/rfc/rfc1918[RFC 1918: Address Allocation for Private Internets]
+* https://www.rfc-editor.org/rfc/rfc8375[RFC 8375: Special-Use Domain 'home.arpa.']
+* https://www.icann.org/en/system/files/files/sac-064-en.pdf[ICANN SSAC SAC064: Search List Processing]
 * Xiph's Creative Commons masters: https://media.xiph.org/tearsofsteel/tearsofsteel-surround.flac[Tears of Steel 5.1] and https://media.xiph.org/sintel/sintel-master-51.flac[Sintel 5.1]

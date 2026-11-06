@@ -28,6 +28,7 @@ The job attempt then decodes the media before its first segment but does not enc
 An amendment keeps an idle stream session's segments for one hour by default, as a ServerAdmin setting, and ends the longest-idle stream sessions first when the segment disk runs short of space (<<decision-idle-retention>>).
 The same amendment has a left variant that copies the video give up its place under a worker's copy cap when the worker refuses a copy because that cap is full (<<decision-requested-variant>>).
 An amendment lets a new viewer's first request stop another stream session's left variant that copies the video on a full worker, and gives the new viewer the capacity error when no such left variant is left to stop (<<decision-requested-variant>>).
+An amendment of link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc#decision-upload-budget[ADR 0050] starts the top variant that stays in the playlist when the upload budget leaves the first-listed variant out (<<decision-requested-variant>>).
 
 === Implementation status
 
@@ -173,10 +174,14 @@ Before the player requests any media segment, the current segment is the media s
 The server starts, restarts and stops variants by these rules:
 
 * Creating a stream session starts the first-listed variant.
+When the upload budget leaves the first-listed variant out of the playlist, creating the stream session starts the top variant that stays instead.
+Each time the server serves a playlist that leaves out the first-listed variant, it starts the top variant that stays unless the job attempt of a variant that stays runs (link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc#decision-upload-budget[ADR 0050]).
+Until the player requests a media segment of a variant other than the one it plays, a request of another variant, an initialization request included, may stop that started variant to make room for its start or its replacement.
 * A request for the initialization segment of a variant that has no producer starts that variant at the current segment.
 * A request for an initialization segment stops no producer.
 * A request for a media segment of a variant that has no producer starts that variant at the requested segment.
 * A request for a media segment of one video variant stops the producers of the stream session's other video variants, except the left variant.
+A request for the variant that the player plays also keeps the variant that a playlist started under the upload budget, and so does the delivery of a media segment that completes a switch (link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc#decision-upload-budget[ADR 0050]).
 * The left variant keeps running only while its job attempt runs and can produce the requested segment without a relocation.
 A request whose segment lies past the left variant's relocation gap, or before its job attempt's first segment, stops the left variant too.
 A suspended left variant has no running job attempt, so the request that resumes the stream session stops it.
@@ -213,27 +218,28 @@ That holds whether the left variant copies or encodes the video.
 Only a worker that advertises a variant's pinned encoder can run that variant's later job attempts.
 The same rule holds when a worker gives a memory refusal to a media-segment request's replacement of a dead or stalled job attempt of the requested variant.
 A start that fails for another reason, such as no worker that runs the variant's pinned encoder, leaves the left variant running.
-An initialization request never stops a variant to make room, except an extra variant after a memory refusal, and except for a new viewer's first request as the rule below on other stream sessions says.
+An initialization request never stops a variant to make room, except an extra variant after a memory refusal, except for a new viewer's first request as the rule below on other stream sessions says, and except for the variant that a playlist started under the upload budget, as the first rule says.
 * A left variant holds memory in the memory budget of the worker that runs it, whether its job attempt copies or encodes the video.
 The server stops a left variant to make room only after a memory refusal from the worker that runs it.
 A job attempt that fails to start for any other reason stops no left variant and goes to ordinary recovery.
 An initialization request never stops a left variant of its own stream session after a memory refusal.
 * A left variant never keeps another stream session from playing.
 When a worker gives a start a memory refusal and runs another stream session's left variant, the server stops that left variant and tries the start once more on that worker.
-It does so when a new stream session is refused admission, when a new stream session's first-listed variant cannot start, when a variant cannot start on demand, and when a dead or stalled job attempt cannot be replaced.
-A start on demand here is a media-segment request's start, because an initialization request stops no producer outside a new viewer's first request.
+It does so when a new stream session is refused admission, when the variant that a new stream session started for its player cannot start, when a variant cannot start on demand, and when a dead or stalled job attempt cannot be replaced.
+A start on demand here is a media-segment request's start, because an initialization request stops no other stream session's producer outside a new viewer's first request.
 The server stops another stream session's left variant only while the left variant's job attempt runs and the job attempt of that stream session's requested variant runs.
 While the requested variant has no running job attempt, the left variant is the only variant that can serve that stream session's player.
 The server stops only a left variant that runs on the refusing worker, so that the stop frees the memory, or the place under the copy cap, that the start lacks.
 * A new viewer's first request may stop another stream session's left variant on a full worker.
-Before the new stream session's player requests its first media segment, any request of its first-listed variant, an initialization request included, may stop that left variant when that worker gives the first-listed variant a memory refusal.
-The server then tries the first-listed variant once more on that worker, as for a media-segment request.
-Apart from extra variants after a memory refusal, this is the one case in which an initialization request stops a producer.
+The variant that a stream session started for its player is the first-listed variant, or, when the upload budget leaves the first-listed variant out, the top variant that stays, whether creation or a served playlist started it (link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc#decision-upload-budget[ADR 0050]).
+Before the new stream session's player requests its first media segment, any request of the variant that the stream session started for its player, an initialization request included, may stop the other stream session's left variant when that worker gives the started variant a memory refusal.
+The server then tries the started variant once more on that worker, as for a media-segment request.
+Apart from extra variants after a memory refusal, this is the one case in which an initialization request stops another stream session's producer.
 The new viewer's first request never stops another stream session's requested or played variant, whether that variant copies or encodes the video.
 When no other stream session's left variant frees what the start lacks, the new viewer gets the capacity error instead.
 `createPlaybackSession` returns `TranscodeCapacityUnavailableError`, a held segment request ends with `503 Service Unavailable`, and the viewer reads the plain capacity message of https://github.com/streamarr/streamarr-server/issues/507[streamarr/streamarr-server#507].
 A capacity shortage uses no format attempt.
-* Apart from the first-listed variant, no variant starts before the player requests one of that variant's segments, unless the headroom model of link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] allows that variant to start early.
+* Apart from the first-listed variant, and the top variant that stays when the upload budget leaves the first-listed variant out, no variant starts before the player requests one of that variant's segments, unless the headroom model of link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] allows that variant to start early.
 * Until the headroom model is validated, the headroom model allows no variant to start early.
 * The headroom model never starts a lower variant beside a copy in Auto early, and never keeps one running as an extra variant (link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc#decision-lower-variants[ADR 0050]).
 When the player switches back to the copy, the lower variant that the player leaves stops once the copy delivers a media segment, as a left variant does without the headroom model.
@@ -312,8 +318,10 @@ Stream sessions would keep stopping each other's variants.
 `503 Service Unavailable` gives the player the same clear boundary as exhausted recovery.
 The player's own retry budget and its adaptive-bitrate switch then decide what happens next.
 
-*Why a new viewer's first request may stop another stream session's left variant:* The server cannot see a worker's memory budget, so the server learns that the budget is full only when the worker refuses the new stream session's first-listed variant.
-The first-listed variant starts when the stream session is created, and its player then requests the initialization segment first.
+*Why a new viewer's first request may stop another stream session's left variant:* The server cannot see a worker's memory budget, so the server learns that the budget is full only when the worker refuses the variant that the new stream session started for its player.
+That variant starts when the stream session is created, or under the upload budget when the server serves the playlist, and its player then requests the initialization segment first.
+When the upload budget leaves the first-listed variant out, the top variant that stays heads the playlist, and a player such as AVPlayer starts with it as it would start with the first-listed variant.
+The exception follows the variant that the stream session started for its player, not a position in the full ladder, so the budget never takes the new viewer's way to make room away.
 If only a media-segment request could make room, the refused variant would fail on that initialization request while another player's left variant kept the memory.
 A left variant only insures one player's switch back, so the left variant gives up its memory to a new viewer.
 A requested or played variant serves a viewer who is watching it, so the new viewer gets the capacity error rather than interrupting that viewer's stream.

@@ -218,6 +218,14 @@ When the audio leaves no room for the 360p tier under the maximum bitrate, the s
 Outside Original, a video copy costs its video plus the session's audio, and the server lowers the audio before it encodes the video.
 _Avoid_: client capabilities (what the player can decode), quality cap
 
+**Network route**:
+How the client reached the server for a playback session, as the client attests it: `LOCAL_NETWORK` or `INTERNET`. The client sends `LOCAL_NETWORK` for a private, link-local or unique local address, a `.local` or `.home.arpa` name, or local discovery, and `INTERNET` for every other route, loopback, Tailscale and single-label host names included. Every format attempt of the playback session keeps it. The server never classifies a viewer by IP address. The route decides only whether the stream session counts against the upload budget, and it grants no access (ADR 0050).
+_Avoid_: home, away, at home (ADR 0050's earlier wording), network class, location
+
+**Upload budget**:
+The optional share of the server's internet upload that counted stream sessions may use together: 80% of the upload speed that a ServerAdmin enters, off until one is entered. A stream session counts at the average bitrate of the variant that its player last requested, unless its network route is `LOCAL_NETWORK` or it is suspended. When the server serves a multivariant playlist, the budget leaves out the variants that would take the counted stream sessions over the share and always keeps the lowest. It never refuses playback, changes a direct play or turns a copy into an encode (ADR 0050).
+_Avoid_: bandwidth limit, bandwidth cap, upload limit (the worker's segment upload limit), quota, throttle
+
 **Language override**:
 A Profile's choice of audio language, subtitle language or subtitle mode for one episode or movie, one season or one series. An empty choice comes from the next wider level. The choice that the client sends when it starts a stream session comes first, then the most specific override, then the Profile's preferences, then the file's own default. A switch of audio or subtitles in the player becomes the Profile's override for that episode or movie only, and never carries to the next episode; turning on a full subtitle stores its language with the mode `ALWAYS`. A change on a settings screen outside the player stores the override of that screen's episode, movie, season or series (ADR 0043).
 _Avoid_: track preference, per-title track, per-track override, default track (the file's flag)

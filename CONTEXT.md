@@ -130,6 +130,22 @@ Its values are claims that the probe checks against the picture signaling and th
 When no configuration record names a profile, the probe derives the profile from the first RPU header, as FFmpeg does.
 _Avoid_: profile (unqualified), DV profile
 
+**MEL**:
+A minimal enhancement layer: the second HEVC layer of a Dolby Vision profile 7 stream when that layer adds no picture detail to the base layer.
+An RPU describes a MEL when its NLQ parameters, the parameters that tell a dual-layer decoder how to add the residual, hold an offset of 0, a `vdr_in_max` of exactly 1, a dead-zone slope of 0 and a dead-zone threshold of 0 for every color component.
+A stream is MEL when an RPU describes a MEL and no RPU describes a FEL.
+A copy converts a single-track MEL stream to profile 8.1, and each RPU that describes a MEL keeps its mapping curves (ADR 0036).
+_Avoid_: empty enhancement layer, dummy layer, EL (unqualified), enhancement layer (unqualified) for the type
+
+**FEL**:
+A full enhancement layer: the second HEVC layer of a Dolby Vision profile 7 stream when that layer carries residual picture detail that a dual-layer decoder adds to the base layer.
+An RPU describes a FEL when its NLQ parameters are anything other than a MEL's, or when it uses floating-point coefficients.
+A stream is FEL when any RPU describes a FEL.
+A copy converts a single-track FEL stream to profile 8.1 (ADR 0036).
+Each RPU that describes a FEL gets identity mapping curves in place of its own, and each RPU that describes a MEL keeps its curves, whatever the stream's type.
+The converted copy loses the residual picture detail, because Streamarr does not compose a FEL on a device.
+_Avoid_: full layer, complete enhancement layer, lossless profile 7, EL (unqualified), enhancement layer (unqualified) for the type
+
 **RPU placement**:
 Where the samples of an H.264 or HEVC Dolby Vision video stream put each picture's RPU, the unit that holds the picture's Dolby Vision reshaping instructions.
 The probe reports it from the first packets: each RPU follows its own picture, every RPU starts its sample, or unspecified when the probe cannot tell.

@@ -50,6 +50,13 @@ Each worker declares the bitstream rewrites that it supports.
 The third amendment also has the worker write the probed static HDR metadata into the decoder configuration record of an HEVC copy with a PQ output (<<decision-static-metadata-record>>).
 link:0013-stream-decision-architecture.adoc[ADR 0013] decides when the server lists each rewrite.
 
+A fourth amendment decides how the worker converts single-track Dolby Vision profile 7 to profile 8.1 during a copy (<<decision-profile-7-conversion>>).
+Issue https://github.com/streamarr/streamarr-server/issues/651[streamarr/streamarr-server#651] delivers the fourth amendment.
+The worker converts a stream with a minimal enhancement layer (MEL) and a stream with a full enhancement layer (FEL) by the same rule, dovi_tool's mode 2.
+The worker converts each RPU in its own Java code and loads no native library.
+A failed conversion is a format error, and the next format attempt is the copy with Dolby Vision stripped.
+The fourth amendment also adds the enhancement layer type to the Dolby Vision details (<<decision-enhancement-layer-type>>).
+
 == Context
 
 https://github.com/streamarr/streamarr-server/issues/399[The playback capabilities epic] requires the playlist to describe the media that the worker produces.
@@ -167,7 +174,7 @@ In this ADR, video stream means a media track, not the stream session that manag
 Use the same type to describe a source video stream and an output video stream, even when the source and output have different values.
 A planned or produced output never holds `UNSPECIFIED`, because the server chooses every value and the worker asserts every value.
 Validation enforces that rule, because the shared type permits the value.
-One exception applies to a copy that keeps Dolby Vision.
+One exception applies to a copy that keeps Dolby Vision without converting it.
 Its planned output keeps the source's RPU observations, even when they are `UNSPECIFIED`, as link:0013-stream-decision-architecture.adoc#copy-planned-range[ADR 0013] decides.
 
 Use the following agreed structure.
@@ -695,7 +702,7 @@ After a format error during an HLS copy, a fixed quality falls back to an encode
 When the rules permit a format attempt, the server explicitly chooses the new output and leaves the source description unchanged.
 The probe recognizes Dolby Vision and HDR10+ in a source.
 A stream copy passes HDR10+ information through unchanged, unless the decision lists a bitstream rewrite that strips it (<<decision-bitstream-rewrites>>).
-A stream copy also passes the Dolby Vision RPUs through unchanged, under the same condition.
+A stream copy also passes the Dolby Vision RPUs through unchanged, unless the decision lists a bitstream rewrite that strips or converts them (<<decision-profile-7-conversion>>).
 An SDR-base Dolby Vision copy is a stream copy of a Dolby Vision source whose `compatibleBase` is `SDR`.
 The worker writes the sample entry of an SDR-base Dolby Vision copy as `hvc1` or `avc1`.
 A stream copy keeps the Dolby Vision configuration record only where the pinned FFmpeg build allows the record, as link:0013-stream-decision-architecture.adoc[ADR 0013] decides.
@@ -771,11 +778,14 @@ A copy that keeps Dolby Vision also strips the HDR10+ messages by default.
 A measurement on the Apple TV of a source that carries both can change that default.
 A copy that strips Dolby Vision keeps the HDR10+ messages for a client that declares HDR10+.
 * *Convert single-track Dolby Vision profile 7 to profile 8.1.*
-Issue https://github.com/streamarr/streamarr-server/issues/651[streamarr/streamarr-server#651] defines this rewrite.
+The worker removes the enhancement layer and converts each RPU for a profile 8.1 output (<<decision-profile-7-conversion>>).
+The server lists this rewrite for a client that declares profile 8.1 at the copy's Dolby Vision level (link:0013-stream-decision-architecture.adoc#hdr-copies[ADR 0013]).
+The decision lists this rewrite only together with the normalization of the Dolby Vision configuration record.
 * *Normalize the Dolby Vision configuration record.*
 The worker writes the record that the copy's output needs, not the record that the source declares.
 For a profile 5 copy whose source uses `hev1`, the worker writes a genuine `dvh1` output, with the parameter sets in the decoder configuration record (link:0013-stream-decision-architecture.adoc#no-compatible-base-copies[ADR 0013]).
 For a profile 8 stream with compatibility identifier 6, the worker writes compatibility identifier 1, so that the record matches the `db1p` playlist entry.
+For a converted profile 7 copy, the worker writes a profile 8.1 record (<<decision-profile-7-conversion>>).
 For a profile with a compatible base, the worker writes metadata compression 0.
 
 The worker applies every bitstream rewrite to the fragmented MP4 that the job attempt's one FFmpeg process writes to its standard output (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]).
@@ -818,6 +828,143 @@ A record built from the job attempt's first keyframe would differ between job at
 The copy departs from the second half of item 1.8 on purpose.
 Removing the messages from the samples would need an SEI rewrite at every keyframe.
 A player that reads only the messages in the samples keeps working.
+
+[[decision-profile-7-conversion]]
+=== A copy converts single-track Dolby Vision profile 7 to profile 8.1, with a MEL or a FEL
+
+Dolby Vision profile 7 is the format of Ultra HD Blu-ray discs.
+A profile 7 stream has a base layer, an enhancement layer and RPUs.
+The base layer is HEVC Main 10 with a PQ transfer, so a player without Dolby Vision can show the base layer as HDR10.
+The enhancement layer is a second HEVC layer.
+A minimal enhancement layer (MEL) carries no picture detail beyond the base layer.
+A full enhancement layer (FEL) carries residual picture detail, which a dual-layer decoder adds to the base layer.
+The RPUs carry the Dolby Vision metadata of each picture.
+A single-track profile 7 stream carries the base layer, the enhancement layer and the RPUs in one track.
+In that track, the RPUs are HEVC NAL units of type 62, and the enhancement layer is NAL units of type 63.
+A dual-track profile 7 source carries the base layer in one track and the enhancement layer with the RPUs in a second track.
+No client declares profile 7, because no supported player decodes two layers (link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049]).
+
+When the decision lists the conversion, the worker converts a single-track profile 7 copy to profile 8.1.
+The converted copy keeps the base layer and the Dolby Vision metadata of each picture, and it needs no encode.
+The worker converts a stream with a MEL and a stream with a FEL by the same rule.
+The server converts in every playback choice, Original included.
+The server never encodes a profile 7 source because the source carries a FEL.
+The converted copy of a FEL stream loses the residual picture detail.
+
+The worker makes these changes to every converted copy:
+
+* The worker removes every NAL unit of type 63.
+* The worker converts each picture's RPU as dovi_tool's mode 2 does.
+The worker names the mode by its behavior, because libdovi's C API numbers its modes differently from the dovi_tool command line.
+The converted RPU names profile 8, disables the residual and carries no NLQ parameters.
+The NLQ parameters are the nonlinear quantization parameters that tell a dual-layer decoder how to add the residual to the picture.
+An RPU that describes a FEL gets identity luma and chroma mapping curves in place of its own curves.
+An RPU that describes a MEL keeps its mapping curves.
+The converted RPU takes the color matrices of profile 8.1.
+The converted RPU keeps the rest of the source RPU's display management metadata, including every extension block.
+* The worker puts each converted RPU last in its sample, behind any suffix SEI NAL unit.
+* A converted RPU can be shorter or longer than the source RPU.
+The worker therefore rewrites the sample sizes, the track runs and the media data of every fragment.
+* The worker writes a profile 8.1 configuration record.
+The record names profile 8, compatibility identifier 1, metadata compression 0 and the Dolby Vision level that the decision carries.
+The record sets the base layer flag and the RPU flag, and it clears the enhancement layer flag.
+The worker builds the record from the job and never from a sample, so every job attempt of the variant writes the same initialization segment (ADR 0037).
+
+The converted copy keeps the `hvc1` sample entry, and the playlist describes the converted copy by the profile 8.1 rules of link:0013-stream-decision-architecture.adoc#hdr-copies[ADR 0013].
+The planned output range is Dolby Vision profile 8.1 on a PQ base.
+The source range stays Dolby Vision profile 7.
+The decision lists the conversion only together with the normalization of the Dolby Vision configuration record, and only for a planned profile 8.1 `hvc1` output.
+The worker refuses a job that lists the conversion in any other way, as an invalid specification.
+ADR 0013 decides which sources the server converts.
+
+A dual-track profile 7 source and a profile 6 source play their HDR10 base, as ADR 0013 decides.
+The server never converts either one.
+The server never converts the enhancement layer track of a dual-track source either, because that track's configuration record names no base layer.
+
+The worker parses and writes each RPU in its own Java code, in the stage that applies the other bitstream rewrites.
+The Java code covers only the part of the RPU syntax that the conversion reads and writes.
+The worker loads no native library for the conversion and starts no extra process.
+The conversion therefore leaves the worker's Landlock rules unchanged (link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033]).
+Every byte that the conversion holds is on the JVM heap.
+The worker counts a fragment's growth against the segment memory budget (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]).
+Tests compare the converted RPUs with the bytes that dovi_tool's mode 2 writes for the same RPUs.
+
+The conversion must refuse every RPU that FFmpeg 8.1.3's decoder would skip or would reject for a field that the conversion reads.
+The worker must fail the job attempt with `JOB_ATTEMPT_FAILURE_DOLBY_VISION_CONVERSION_FAILED` when a sample breaks any of these rules:
+
+* Each picture's sample holds exactly one RPU.
+* The RPU's NAL unit is on layer 0 and has TemporalId 0.
+* The RPU parses, its checksum matches, and the RPU names profile 7 or profile 8 with a 10-bit base layer.
+* Every header, mapping and display management field that the decoder checks holds a value that the decoder accepts.
+This rule covers every check of that kind, including a check that compares two fields.
+For example, the decoder rejects unequal affected and current display management metadata ids, and a metadata compression value above 1.
+* No list of extension blocks is longer than the decoder keeps.
+* The RPU codes its mapping coefficients in fixed point.
+The identity curves of a FEL need fixed-point coefficients.
+
+The conversion keeps the contents of each extension block as the source RPU holds them, and it does not check those contents.
+An extension block that the decoder rejects, such as a level 2 block with an `ms_weight` below -1, therefore passes through the conversion.
+The source RPU carries the same block, so the conversion does not change whether the decoder accepts that RPU.
+
+The worker never drops an RPU, and the worker never repeats an earlier RPU in its place.
+A malformed RPU fails only its job attempt, and the worker process keeps running.
+Every job attempt of the same decision meets the same RPU, so no replacement attempt runs.
+The typed conversion failure is a format error.
+The next format attempt is the copy with Dolby Vision stripped, in every playback choice.
+Original or a fixed quality stays selected (link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc#decision-dolby-vision[ADR 0052]).
+
+*Why:* The copy with Dolby Vision stripped plays a profile 7 source as HDR10 and loses the Dolby Vision metadata of every picture.
+The compatibility identifier is a field of the configuration record, not of the RPU, so a profile 7 RPU can be rewritten for a profile 8.1 output without an encode.
+The mapping curves of a FEL RPU were made to work together with the residual.
+Without the residual, those curves no longer describe the picture, so mode 2 replaces them with identity curves.
+A MEL adds nothing to the picture, so a MEL RPU's curves still describe the picture.
+dovi_tool's author made mode 2 the default for a FEL, and players that convert profile 7 today use mode 2.
+FFmpeg 8.1.3's HEVC decoder reads an RPU only when the RPU is the last NAL unit of its packet (`decode_nal_units` in `libavcodec/hevc/hevcdec.c`).
+In a synthesized stream with an RPU in front of each suffix SEI NAL unit, ffprobe found Dolby Vision side data on 0 of 24 frames.
+With each RPU behind the suffix SEI NAL unit, ffprobe found Dolby Vision side data on 24 of 24 frames.
+The pinned decoder is the only Dolby Vision decoder that the worker can test against.
+An RPU whose converted fields the pinned decoder rejects could reach the player as a successful conversion.
+A player could then show that picture without its metadata, and no format error would start the copy with Dolby Vision stripped.
+A Dolby Vision picture without its RPU can flash visibly in AVPlayer, so the worker fails the job attempt instead of dropping or repeating an RPU.
+Java code that parses the source's bytes fails a job attempt on malformed input, with bounds checks on every read.
+The Java code also stays inside the worker's heap and its memory budget.
+
+[[decision-enhancement-layer-type]]
+=== The Dolby Vision details report the enhancement layer type from the NLQ parameters of the RPUs
+
+The `PRESENT` arm of the Dolby Vision details carries the enhancement layer type:
+
+[source,typescript]
+----
+type DolbyVisionEnhancementLayer = "UNSPECIFIED" | "NONE" | "MEL" | "FEL";
+
+// The PRESENT arm of DolbyVision gains one field.
+type DolbyVisionPresent = {
+  presence: "PRESENT";
+  declared: DolbyVisionConfiguration | null;
+  observedRpu: Presence;
+  enhancementLayer: DolbyVisionEnhancementLayer;
+};
+----
+
+The RPUs decide the type.
+An RPU that disables the residual describes no enhancement layer.
+An RPU describes a MEL when its NLQ parameters hold these values for every color component: an offset of 0, a `vdr_in_max` of exactly 1, a dead-zone slope of 0 and a dead-zone threshold of 0.
+Any other NLQ parameters describe a FEL.
+An RPU with floating-point coefficients also describes a FEL.
+The stream is `FEL` when any RPU that the probe reads describes a FEL.
+Otherwise, the stream is `MEL` when any RPU describes a MEL.
+Otherwise, the stream is `NONE` when its RPUs disable the residual.
+The type is `UNSPECIFIED` when the probe read no RPU that it accepts.
+link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032] decides which probe version reports the type.
+
+The type tells the viewer's media info whether a converted copy loses picture detail.
+The stream decision does not read the type, because a stream with a MEL and a stream with a FEL convert by the same rule.
+The conversion classifies each RPU by the same rule, to decide whether that RPU keeps its mapping curves (<<decision-profile-7-conversion>>).
+
+*Why:* The configuration record sets its enhancement layer flag for a MEL and for a FEL alike, so the record cannot tell the two apart.
+The NLQ parameters of a MEL add no residual to the picture, so a MEL adds no picture detail.
+libdovi uses the same rule to tell a MEL from a FEL.
 
 === Examples show how to use the shared terms
 
@@ -941,7 +1088,7 @@ Each primaries, transfer and matrix value names an ITU-T H.273 code point, and i
 Explicitly deferred:
 
 * Defer encoding Dolby Vision or HDR10+ output.
-A stream copy still passes HDR10+ information and Dolby Vision RPUs through unchanged.
+A stream copy still passes HDR10+ information and Dolby Vision RPUs through unchanged, apart from the bitstream rewrites that the decision lists (<<decision-bitstream-rewrites>>).
 Recognizing Dolby Vision and HDR10+ in source files stays in scope.
 * Defer reading the frames of video streams other than the chosen video stream.
 Every other video stream reports HDR10+ and the observed RPU as `UNSPECIFIED`, as in probe version 4, and its compatible base follows the probe version 5 rules.
@@ -955,12 +1102,10 @@ link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc
 * Defer showing a `MediaFileProbePropertyIssue` to clients.
 ADR 0032 also defers exposing stream properties in GraphQL.
 * Defer conversion between Dolby Vision profiles other than single-track profile 7 to profile 8.1.
-That conversion is a bitstream rewrite that https://github.com/streamarr/streamarr-server/issues/651[streamarr/streamarr-server#651] defines (<<decision-bitstream-rewrites>>).
-* Defer distinguishing a full enhancement layer from a minimal one.
-The configuration record has no flag that tells the two kinds of enhancement layer apart.
-Detection needs the RPUs parsed from frames.
-Probe version 5 keeps only the RPU header fields that tell the Dolby Vision profile.
-Adding the field later is an additive change.
+The conversion of single-track profile 7 to profile 8.1 is a bitstream rewrite (<<decision-profile-7-conversion>>).
+* Probe version 5 does not tell a full enhancement layer from a minimal one.
+The configuration record has no flag that tells the two kinds of enhancement layer apart, and probe version 5 keeps only the RPU header fields that tell the Dolby Vision profile.
+The fourth amendment ends this deferral: the Dolby Vision details report the enhancement layer type from the NLQ parameters of the RPUs (<<decision-enhancement-layer-type>>).
 * Defer pairing a base-layer track with a separate enhancement-layer track; the dynamic-range description covers one track.
 * Leave the playlist attributes that announce a PQ or HLG video range, or Dolby Vision on a PQ or HLG base, to link:0013-stream-decision-architecture.adoc#hdr-copies[ADR 0013].
 https://github.com/streamarr/streamarr-server/issues/396[streamarr/streamarr-server#396] builds those attributes.
@@ -1004,7 +1149,7 @@ The probe takes no static metadata from the SEI messages or OBUs of such a strea
 A worker that derives the base differently stops the file's probe after three such results, as ADR 0032 decides for every contract violation.
 * When the server chooses SDR output, the source description keeps the HDR facts that the probe found.
 The server cannot silently change a manual choice, and the playlist must describe the actual output that the server selected.
-* A stream copy of a Dolby Vision or HDR10+ source delivers the HDR10+ information and the Dolby Vision RPUs unchanged, unless the decision lists a bitstream rewrite that strips them.
+* A stream copy of a Dolby Vision or HDR10+ source delivers the HDR10+ information and the Dolby Vision RPUs unchanged, unless the decision lists a bitstream rewrite that strips them or converts the RPUs.
 The client's declaration decides whether such a copy is eligible.
 Until clients declare dynamic ranges, <<decision-undeclared-client>> decides whether the copy is eligible.
 An SDR-base Dolby Vision copy still carries the Dolby Vision RPUs.
@@ -1018,6 +1163,16 @@ Continue to follow the existing ADR definitions and the order of work recorded i
 * A worker that does not declare a rewrite receives no job that lists it.
 * While no connected worker declares a rewrite that a copy needs, every client that needs that copy receives an encode, which costs encoder capacity.
 * Every job attempt of an HEVC copy with a PQ output writes the same `hvcC` record, whichever keyframe the attempt starts at.
+* A single-track profile 7 copy plays as Dolby Vision profile 8.1, without an encode, for a client that declares profile 8.1 at the copy's level.
+* The converted copy of a FEL stream loses the residual picture detail.
+The media info shows the enhancement layer type, so a viewer can see that the source carries a FEL.
+* The worker owns a Java parser for RPUs from the source file.
+That parser must fail every malformed RPU with the typed conversion failure, and it must never fail the worker process.
+* The ranges that FFmpeg's decoder checks in an RPU become part of the worker's conversion.
+A new FFmpeg pin (ADR 0029) needs a check of the pinned decoder's RPU checks.
+* A profile 7 stream whose samples hold more than one RPU, or whose RPUs use floating-point coefficients, never plays as profile 8.1.
+Such a stream fails its first conversion and plays the copy with Dolby Vision stripped.
+That failure costs a format attempt.
 
 == Rejected Alternatives
 
@@ -1131,6 +1286,32 @@ A player that reads only the messages in the samples could then lose the HDR met
 * Assuming that every connected worker supports every rewrite once the pinned worker image has it: a worker that predates the pin would fail the copy.
 That failure spends a format attempt and drops the viewer to an SDR encode.
 
+=== Alternatives rejected for the profile 7 conversion
+
+* Linking libdovi, the native library behind dovi_tool, into the worker.
+The worker image would need a native build of the library for every worker platform, including native macOS workers.
+The library's memory would sit outside the JVM heap, so the segment memory budget could not count it.
+A fault in native code that parses the source's bytes could stop the worker process, where the Java parser fails one job attempt.
+* Running dovi_tool or a second FFmpeg process beside the copy's FFmpeg process.
+Every converted copy would run two processes for each job attempt, and the second process would need its own Landlock rules.
+The pinned FFmpeg build has no profile 7 conversion of its own, and ADR 0029 pins prebuilt binaries, so the worker cannot add one.
+The third amendment already rejects a pipe between two processes for every bitstream rewrite.
+* Composing the FEL on the device, to keep the residual picture detail.
+Composition re-implements Dolby's dual-layer decoder.
+Streamarr leaves composition out until legal advice says whether Dolby's patents and licensing permit it (decided on 2026-11-05).
+The Apple TV 4K and the SHIELD TV Pro with its stock software cannot show a FEL, so those clients lose nothing that they could show.
+* Converting a FEL with dovi_tool's mode 5, which keeps the RPU's mapping curves.
+Those curves were made to work together with the residual that the copy drops.
+For a MEL, mode 5 and mode 2 give the same result.
+* Encoding a FEL source to keep its picture detail.
+An encode also reads only the base layer (ADR 0013), so the encode keeps no residual and costs encoder capacity.
+* Dropping an RPU that the worker cannot convert, or repeating the previous RPU in its place.
+A Dolby Vision picture without its own RPU can flash visibly in AVPlayer.
+* Converting an RPU whose header, mapping or display management fields FFmpeg 8.1.3's decoder would reject, and leaving the check to the player.
+The copy would then report success while some pictures play without Dolby Vision metadata, and no format error would start the copy with Dolby Vision stripped.
+* Telling a MEL from a FEL by the configuration record's enhancement layer flag.
+The record sets that flag for both.
+
 == References
 
 * https://github.com/streamarr/streamarr-server/issues/399[Epic #399: clients declare what they can play, and playlists describe the produced media]
@@ -1142,4 +1323,7 @@ That failure spends a format attempt and drops the viewer to an SDR encode.
 * https://netflixtechblog.com/rebuilding-netflix-video-processing-pipeline-with-microservices-4e5e6310e359[Netflix explains how to describe sources, encode media, and check the output]
 * https://github.com/streamarr/streamarr-server/issues/394[streamarr/streamarr-server#394] (probe version 5, which reads the first frames of the chosen video stream) and https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] (typed client capability declarations)
 * https://github.com/streamarr/streamarr-transcode-worker/issues/24[streamarr/streamarr-transcode-worker#24] (the worker's part of probe version 4)
+* https://github.com/streamarr/streamarr-server/issues/651[streamarr/streamarr-server#651] (the profile 7 conversion), with https://github.com/streamarr/streamarr-transcode-worker/pull/171[streamarr/streamarr-transcode-worker#171] (the worker's conversion), https://github.com/streamarr/streamarr-server/pull/821[streamarr/streamarr-server#821] (the typed conversion failure) and https://github.com/streamarr/streamarr-server/pull/826[streamarr/streamarr-server#826] (the copy rule)
+* https://github.com/quietvoid/dovi_tool[dovi_tool and libdovi]: the conversion modes and the rule that tells a MEL from a FEL
+* https://github.com/FFmpeg/FFmpeg/blob/n8.1.3/libavcodec/dovi_rpudec.c[FFmpeg 8.1.3's `dovi_rpudec.c`]: the RPU checks of the pinned decoder
 * https://mkvtoolnix.download/doc/NEWS.md[MKVToolNix release notes]: version 57.0.0, released on 2021-05-22, stores the HEVC NAL units of types 62 and 63 and the suffix SEI NAL units with the frame that they belong to instead of with the next frame

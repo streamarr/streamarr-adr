@@ -468,7 +468,7 @@ The encoding load that a worker can still take on. After the worker takes on tha
 _Avoid_: free slots, spare capacity (unqualified)
 
 **CPU limit**:
-The share of the host's CPU that a worker and its FFmpeg processes may use. A container's CPU quota sets it, and a worker without a quota has the whole host's CPU. The headroom model divides the CPU limit among the job attempts that encode video on that worker (ADR 0044).
+The share of the host's CPU that a worker and its FFmpeg processes may use: the smaller of the CPUs that the worker's CPU affinity (a container's CPU set) allows and the CPUs that its CPU quota allows. A worker with neither restriction has the whole host's CPU. The headroom model divides the CPU limit among the job attempts that encode video on that worker (ADR 0044).
 _Avoid_: cores (as a setting), slots
 
 **Calibration**:

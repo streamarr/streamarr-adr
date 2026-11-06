@@ -472,7 +472,7 @@ The share of the host's CPU that a worker and its FFmpeg processes may use. A co
 _Avoid_: cores (as a setting), slots
 
 **Calibration**:
-A worker's fitted headroom constants, together with the hardware, the CPU limit and the FFmpeg build that the constants describe. The server keeps the last calibration for each combination of the three. A worker that matches a kept calibration takes jobs at once. Any other worker runs a benchmark of bounded duration first. The server refits the constants from the production speeds while sessions play (ADR 0044).
+A worker's fitted headroom constants, together with the hardware, the CPU limit and the FFmpeg build that the constants describe. The server keeps the last calibration for each combination of the three. A worker that matches a kept calibration takes jobs at once. Any other worker runs a benchmark of bounded duration first. The server refits the constants from the production speeds while sessions play, and validates each encode configuration (one encoder and preset, one source decoder, one tone-mapping chain) from its own predictions (ADR 0044).
 _Avoid_: profile, benchmark (the measurement that starts a calibration)
 
 **Production speed**:

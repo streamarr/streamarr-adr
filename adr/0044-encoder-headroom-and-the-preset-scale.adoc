@@ -197,7 +197,10 @@ Each media segment's production time gives one measurement of the job attempt's 
 That cost is the job attempt's share of the cores divided by the job attempt's production speed.
 The fit weighs recent measurements more than old measurements.
 The fit starts from the benchmark's constants or from a kept calibration.
+The pull of those starting constants fades as old measurements do.
 The fit moves each constant only as far as the measurements support.
+A constant that no recent measurement prices keeps the value that the fit last gave it.
+A new constant stays unknown until the measurements give it a positive value, and an unknown constant never stops the fit of the known constants.
 
 A calibration is a worker's fitted constants, together with the hardware, the CPU limit and the FFmpeg build that the constants describe.
 The worker reports its hardware, its CPU limit and its FFmpeg build when the worker registers.
@@ -228,22 +231,30 @@ The first part runs once, before https://github.com/streamarr/streamarr-server/i
 In the first part, several concurrent stream sessions run on real encodes, and every running variant stays above the speed floor.
 The second part runs for each calibration.
 In the second part, the server predicts each measured production speed before the server fits that measurement.
-The server validates each constant on its own.
-A constant's predictions are the predictions of the job attempts whose cost uses that constant.
-The server counts a constant as validated while the median error of that constant's latest 20 predictions is at most 10 %.
-At least 5 of those 20 measurements must come from job attempts that ran beside other job attempts that encode video.
-Those 20 measurements must also include two job attempts whose ratios of output pixel rate to source pixel rate differ by at least a factor of 2.
-A constant whose later predictions miss loses its validation until its predictions agree again.
-The constant of another preset of the same encoder may have no predictions of its own, because Automatic never picks that preset before the preset is validated.
-Such a constant moves with the constant of the encoder's Automatic preset, at the ratio between the two constants that the benchmark measured.
-Such a constant counts as validated while the constant of the encoder's Automatic preset is validated.
-Once such a constant has 20 predictions of its own, its own predictions decide.
-A kept calibration keeps each constant's latest predictions, and therefore each constant's validation.
+The server validates each encode configuration on its own.
+An encode configuration is one encoder and preset, one source decoder on one decode backend, and one tone-mapping chain.
+An encode configuration's predictions are the predictions of the job attempts that run that configuration, at any pixel rates.
+The server keeps each encode configuration's latest 20 predictions.
+A prediction leaves those predictions 7 days after its measurement.
+An encode configuration's own predictions validate it when all of the following hold:
+
+* The median error of 20 predictions is at most 10 %.
+* At least 5 of those predictions come from job attempts that ran beside other job attempts that encode video.
+* Two of those predictions have ratios of output pixel rate to source pixel rate that differ by at least a factor of 2.
+
+An encode configuration's own predictions fail it when at least 5 predictions have a median error above 10 %.
+A failed encode configuration is not validated.
+Own predictions that neither validate nor fail an encode configuration are too little evidence.
+Such an encode configuration counts as validated while the encode configuration that differs only by using the encoder's Automatic preset is validated by its own predictions.
+Automatic may therefore pick another preset, such as `veryfast` for libx264, before that preset has any predictions of its own.
+While no measurement prices that preset's constant, the constant moves with the constant of the encoder's Automatic preset, at the ratio between the two constants that the benchmark measured.
+A failed preset becomes too little evidence again once its failed predictions are 7 days old, and the fit has by then learned from those failed measurements.
+A kept calibration keeps each encode configuration's predictions with their measurement times, and therefore each encode configuration's validation.
 A benchmark's constants start without predictions, and therefore without validation.
-An early start of an extra variant or a preset choice depends on the model only when every constant in the cost of every running variant on the worker, and of the variant that the decision concerns, is validated.
+An early start of an extra variant or a preset choice depends on the model only when the encode configuration of every running variant on the worker, and of the variant that the decision concerns, is validated.
 Otherwise ADR 0019's on-demand rules apply on that worker, and Automatic keeps the fixed meaning that <<decision-preset-setting>> gives Automatic.
 When the server starts an extra variant, the server keeps every running variant's predicted speed above the speed floor by a margin.
-The margin is the largest overprediction among the latest 20 predictions of the constants in the costs of those running variants and of the extra variant.
+The margin is the largest overprediction among the latest predictions of the encode configurations of those running variants and of the extra variant.
 https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499] builds the headroom model and runs both parts of the measurement.
 
 *Why:* The same preset cost different amounts on different content.
@@ -258,11 +269,15 @@ A calibration kept by worker identifier would therefore make every restarted pod
 A benchmark runs for a bounded time on the benchmark's own content.
 The worker's own production speeds show whether the constants also fit the content that the worker serves.
 A prediction made before the fit sees its measurement tests the constants on a speed that they did not fit.
-Accurate predictions of libx264 say nothing about the constant of another encoder, so each constant needs its own predictions.
-Measurements of one ratio of output to source pixel rate cannot separate the encode term from the decode term.
+Accurate predictions of libx264 say nothing about the constant of another encoder, so each encode configuration needs its own predictions.
+Measurements of one ratio of output to source pixel rate cannot separate the encode term from the decode and tone-mapping terms.
 A wrong encode constant and a wrong decode constant can then predict that ratio exactly and miss every other ratio.
-A second ratio at least twice the first separates the two terms.
-Without the benchmark's ratio between presets, Automatic could never pick `veryfast` for libx264, because only a validated constant allows that choice and only running `veryfast` would validate the constant.
+Within one encode configuration, a second ratio at least twice the first separates the terms.
+Across encode configurations, a second ratio does not: errors in two encoders' constants and two decoders' constants can cancel in four configurations that each run at one ratio.
+Without the benchmark's ratio between presets, Automatic could never pick `veryfast` for libx264, because only a validated encode configuration allows that choice and only running `veryfast` would supply predictions.
+A single running variant keeps one ratio, so a preset whose own accurate predictions cover one ratio keeps the Automatic preset's validation instead of losing it.
+A preset that has failed gets no new predictions while Automatic avoids it, so its failed predictions age out instead of blocking it for good.
+A starting constant that kept its full pull would drag a constant that has gone dormant back to the benchmark's value, while the constant's old predictions would still validate it.
 Fitted per source and preset, the model predicted libx264's CPU within about 7 %, so a median error of 10 % leaves room for content that changes between segments.
 Equal parts of the cores predicted up to 21 % faster than the measured speed, so the margin for overprediction keeps a running variant above the speed floor when the model errs in that direction.
 Evidence: <<evidence-model>>, <<evidence-presets>>.
@@ -731,6 +746,10 @@ Those running producers hold the CPU that a seek's first segment needs.
 * Leaving the CPU limit out of a kept calibration's key lets a worker whose CPU limit changed start from constants that predict the worker's old share of the host.
 * Validating the constants once for every worker trusts each worker's benchmark on content that the benchmark did not encode.
 * Validating a calibration as a whole lets accurate predictions of one encoder validate another encoder's constant that only the benchmark measured.
+* Validating each constant from every prediction that uses it lets errors in the constants of different encode configurations cancel.
+* Letting a preset's first 20 predictions replace the Automatic preset's validation disables a preset whose single running variant kept one ratio.
+* Keeping a failed preset's predictions until they are replaced blocks that preset for good, because Automatic gives it no new predictions.
+* Rejecting every new solution when one new constant comes out not positive stops the fit of every known constant.
 * Assuming a session limit from a list of GPUs and drivers refuses sessions on workstation cards and patched drivers that have no limit.
 * Learning a session cap from one refusal leaves the hardware encoder backend idle after a driver update raises or removes the limit.
 * Turning a hardware encoder backend off after a session-limit refusal sends every later job to software, although the GPU still has capacity.

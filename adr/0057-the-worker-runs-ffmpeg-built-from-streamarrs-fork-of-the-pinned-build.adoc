@@ -1,0 +1,130 @@
+= ADR 0057: The Worker Runs FFmpeg Built from Streamarr's Fork of the Pinned Build
+
+== Status
+
+Proposed
+
+== Context
+
+The transcode worker runs FFmpeg as a subprocess (link:0004-processbuilder-over-jni.adoc[ADR 0004]).
+link:0029-pin-jellyfin-ffmpeg-releases.adoc[ADR 0029] pins the worker to exact numbered releases of one FFmpeg build.
+This ADR calls that build "the pinned FFmpeg build".
+The pinned FFmpeg build's upstream repository holds FFmpeg's source and a series of patches on top of FFmpeg.
+The worker's `buildpacks/ffmpeg/SOURCE.txt` names that repository.
+The pinned FFmpeg build's upstream repository publishes portable GPL binaries for Linux amd64, Linux arm64 and macOS arm64.
+The worker redistributes those binaries unchanged.
+ADR 0029 requires the binaries of all three platforms from one release, so that every platform runs the same FFmpeg.
+
+FFmpeg's scheduler in `fftools/ffmpeg_sched.c` decides which demuxers and filter graphs may run.
+A demuxed stream can have several destinations, for example a stream copy to one output and a decoder that feeds a filter graph.
+A decoder output can also have several destinations.
+When the scheduler unchokes a demuxer or a decoder, the scheduler visits only the first destination of each stream or decoder output.
+A filter graph that has sources of its own waits for the scheduler between steps.
+Such a filter graph runs again only when the scheduler visits one of its inputs.
+If that input is a later destination of a stream, the filter graph never runs again, and FFmpeg deadlocks.
+The deadlock stalls the worker's held encodes in https://github.com/streamarr/streamarr-transcode-worker/pull/177[streamarr/streamarr-transcode-worker#177].
+Those held encodes are part of https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511].
+A change that makes the scheduler visit every destination fixes the deadlock.
+That change edits 4 lines.
+FFmpeg's main branch still had the defect on 2026-11-06.
+
+A fix that waits for FFmpeg and then for the pinned FFmpeg build to release it has no date that Streamarr controls.
+Streamarr also needs a place to keep its own FFmpeg patches.
+
+== Decision
+
+Streamarr builds the worker's FFmpeg from its own fork of the pinned FFmpeg build's upstream repository.
+The fork is https://github.com/streamarr/streamarr-ffmpeg[streamarr/streamarr-ffmpeg].
+The worker runs only FFmpeg binaries that the fork's releases publish.
+
+=== Patches
+
+The fork carries the upstream repository's whole patch series unchanged.
+Streamarr's own patches join the same patch series, after the upstream patches.
+The file name of each Streamarr patch starts with `streamarr-`.
+Each Streamarr patch is a separate file with a commit message that states the defect and the mechanism of the fix.
+A Streamarr patch never edits an upstream patch.
+The fork changes no upstream build recipe, configuration flag or bundled library version.
+The fork changes the upstream build scripts only to record the source that they build from.
+A Streamarr release therefore differs from the upstream release only by the Streamarr patches.
+
+Streamarr may offer its patches to FFmpeg or to the pinned FFmpeg build's upstream repository.
+An upstream review never blocks a Streamarr release.
+
+=== Staying current with upstream
+
+The fork's `streamarr` branch holds the latest upstream release plus the Streamarr patches.
+For each upstream release tag that Streamarr adopts, Streamarr merges the upstream tag into the `streamarr` branch.
+The merge keeps each Streamarr patch as its own file at the end of the patch series.
+A Streamarr patch that upstream has adopted leaves the patch series in the same merge.
+A Streamarr patch that no longer applies fails the fork's build, so a release cannot ship without the patch.
+
+=== Releases
+
+A Streamarr release tag names the upstream release and a Streamarr revision: `v<upstream release>-streamarr.<revision>`.
+An example is `v8.1.3-2-streamarr.1`.
+The Streamarr revision starts at 1 for each upstream release.
+The Streamarr revision increases when the Streamarr patches change on the same upstream release.
+Each Streamarr release publishes one portable GPL archive for each platform of ADR 0029: Linux amd64, Linux arm64 and macOS arm64.
+The archives come from the upstream build scripts, run on GitHub-hosted runners by a workflow that only the fork has.
+A native macOS worker therefore runs the same Streamarr patches as the Linux worker image.
+The archive names start with `streamarr-ffmpeg_` and carry the Streamarr release version.
+The fork does not run the upstream repository's own publishing workflows.
+FFmpeg's version banner stays the banner of the upstream build.
+The archive's SHA-256 digest identifies the exact build, as in ADR 0029.
+
+=== How the worker pins a release
+
+The worker pins one Streamarr release through the lock, notices review and smoke tests of ADR 0029.
+The worker's lock names the fork's release, the fork's source revision, each pinned archive and its SHA-256 digest.
+Renovate proposes new Streamarr releases from the fork, not upstream releases.
+Each Streamarr release needs its own notices review, because the fork builds its binaries itself.
+The worker keeps a test that runs the smallest known reproduction of each fixed FFmpeg defect against the pinned binary.
+That test fails on a build without the Streamarr patch.
+
+=== Licensing and the source offer
+
+Streamarr distributes the binaries that the fork builds, so Streamarr is the distributor of a modified FFmpeg build.
+The worker's `SOURCE.txt` names the fork, the Streamarr release tag and the fork's full source revision as the Corresponding Source of the FFmpeg binaries.
+The worker's `SOURCE.txt` keeps the exact revisions of the bundled libraries that the build recipes name.
+The fork's patch series and its commit history record every change that Streamarr makes to FFmpeg.
+Each Streamarr patch keeps FFmpeg's license headers and adds no code under another license.
+Each archive of a Streamarr release carries FFmpeg's license texts, the license notices of the bundled components and the source-access directions.
+The fork's release workflow checks that every archive carries them before the workflow publishes the release.
+The worker's image also ships the license texts, notices and SBOM of ADR 0029 for the fork's binaries.
+Each Streamarr release's notes give the source-access directions: the release tag's source, its patch series and its build recipes.
+The build recipes name each bundled library's repository and exact revision.
+Some build recipes clone a source without a revision.
+For each such source, the fork's build records the revision that the clone resolved to, and each archive carries that record.
+The worker's `SOURCE.txt` also carries the record of each archive that the worker pins, next to that archive's SHA-256 digest.
+Streamarr keeps each Streamarr release tag and the source it names available for as long as the fork's release offers the release's archives for download.
+Streamarr also keeps that source available for as long as any published worker image contains the release.
+Streamarr keeps each record of resolved revisions for as long as Streamarr keeps the source that the record completes.
+
+=== Explicitly deferred
+
+* A Streamarr-owned archive of the bundled libraries' sources stays deferred, as in ADR 0029.
+
+== Consequences
+
+Streamarr can ship an FFmpeg fix on its own schedule.
+Streamarr reviews each upstream release before the fork adopts it, and Streamarr resolves merge conflicts in the patch series.
+Streamarr reviews security fixes in FFmpeg and in the bundled libraries for its own releases.
+The fork builds every Streamarr release on GitHub-hosted runners, so each release costs one build per platform.
+The upstream base image follows a moving tag, so a rebuild can use a newer toolchain than the upstream release used.
+The worker's notices review therefore re-captures the build configuration for each Streamarr release.
+A Streamarr release can differ from the upstream binary of the same upstream release in its toolchain as well as in its patches.
+
+== Rejected Alternatives
+
+* Wait for FFmpeg and the pinned FFmpeg build's upstream repository to release the fix — the date is outside Streamarr's control, and streamarr/streamarr-server#511 stays blocked until then.
+* Read each stream's source end in a second FFmpeg process beside the encode — every attempt would read the source twice, and the worker would have to match the records of two processes.
+* Read each stream's source end from an observation output on a separate FFmpeg input — the encode's decoder still has two destinations when the observation output carries a decoded copy of the audio, so FFmpeg still deadlocks.
+* Build FFmpeg from FFmpeg's own repository with a Streamarr build recipe — the worker would lose the pinned build's patch series and its reviewed library set.
+
+== References
+
+* https://github.com/streamarr/streamarr-ffmpeg[streamarr/streamarr-ffmpeg]
+* https://github.com/streamarr/streamarr-transcode-worker/pull/177[streamarr/streamarr-transcode-worker#177]: the held encodes that the deadlock stalls, with the scheduler state at the stall.
+* https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511]
+* https://www.gnu.org/licenses/gpl-3.0.html[GNU General Public License, version 3]

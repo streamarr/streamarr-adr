@@ -117,7 +117,7 @@ _Avoid_: profile (unqualified), Profile (the portable viewing identity in ADR 00
 **Codec string**:
 The RFC 6381 value that names one stream's codec with its codec profile, level and other parameters, such as `avc1.640028`.
 A variant's `CODECS` attribute lists the codec strings of the variant's streams.
-An encode's codec string follows from the encode's codec family and from the codec profile, level, tier and bit depth that the encode forces.
+An encode's codec string describes its promised output, including the codec profile, level, tier, bit depth, compatibility flags and constraints that the output signals.
 The probe computes the codec string of every video and audio stream.
 A stream copy uses the source stream's codec string, with the sample-entry tag that ADR 0013's tag rule picks for the copy.
 For example, a Dolby Vision copy carries its base layer's tag, so a `dvh1` source stream's copy is described as `hvc1`.

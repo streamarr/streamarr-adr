@@ -73,7 +73,7 @@ None at present.
 - [ADR 0055: A Viewer's Audio Delay Is a Playback Session Parameter, and the Server Shifts the Audio Renditions by It](adr/0055-a-viewers-audio-delay-is-a-playback-session-parameter-and-the-server-shifts-the-audio-renditions.adoc)
 - [ADR 0056: A Media Title's Profile-Dependent Fields Move under `selectedProfileState`, Which Is Null without a Selected Profile](adr/0056-a-media-titles-profile-dependent-fields-move-under-selected-profile-state.adoc)
 - [ADR 0057: The Worker Runs FFmpeg Built from Streamarr's Fork of the Pinned Build](adr/0057-the-worker-runs-ffmpeg-built-from-streamarrs-fork-of-the-pinned-build.adoc)
-- [ADR 0061: A Client Capability Declaration Lists Capability Entries, a Capability Entry Carries No Codec Tier, and a Client Can Reuse Its Platform's Answers Until Its Player, Display or Audio Output Changes](adr/0061-a-capability-entry-carries-no-codec-tier-and-a-client-reuses-its-platforms-answers.adoc)
+- [ADR 0061: A Client Capability Declaration Lists Capability Entries, a Capability Entry Carries No Codec Tier, and a Client Can Reuse What Its Platform Answered About Its Decoders](adr/0061-a-capability-entry-carries-no-codec-tier-and-a-client-reuses-its-platforms-answers.adoc)
 
 ## Domain language
 

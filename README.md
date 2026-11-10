@@ -66,14 +66,14 @@ None at present.
 - [ADR 0046: Home Continue Watching Keeps a Cap without Backfill Reads](adr/0046-home-continue-watching-keeps-a-cap-without-backfill-reads.adoc)
 - [ADR 0047: Numbering Corrections Follow Parsed Episode Numbers, and ServerAdmins Choose Each Series' Episode Ordering](adr/0047-numbering-corrections-follow-parsed-episode-numbers.adoc)
 - [ADR 0048: Clients Keep Live Lists in Their Normalized Cache](adr/0048-clients-keep-live-lists-in-their-normalized-cache.adoc)
-- [ADR 0049: A Client Capability Declaration Lists Capability Entries, and an Output Fits Only When One Capability Entry Accepts the Whole Output](adr/0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc) — superseded by ADR 0061
+- [ADR 0049: A Client Capability Declaration Lists Capability Entries, and an Output Fits Only When One Capability Entry Accepts the Whole Output](adr/0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc)
 - [ADR 0050: Outside Original, the Viewer's Limits Bind Copies as Well as Encodes, and Each Quality Tier Is a Picture Box in Either Orientation](adr/0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc)
 - [ADR 0052: A Failed HLS Copy Falls Back to an Encode, and Original Changes to Auto Whenever It Must Encode](adr/0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc)
 - [ADR 0054: Workers Measure Stream Bitrates Once, and a Video Copy Costs Its Measured Average and Advertises Its Measured Peak](adr/0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc)
 - [ADR 0055: A Viewer's Audio Delay Is a Playback Session Parameter, and the Server Shifts the Audio Renditions by It](adr/0055-a-viewers-audio-delay-is-a-playback-session-parameter-and-the-server-shifts-the-audio-renditions.adoc)
 - [ADR 0056: A Media Title's Profile-Dependent Fields Move under `selectedProfileState`, Which Is Null without a Selected Profile](adr/0056-a-media-titles-profile-dependent-fields-move-under-selected-profile-state.adoc)
 - [ADR 0057: The Worker Runs FFmpeg Built from Streamarr's Fork of the Pinned Build](adr/0057-the-worker-runs-ffmpeg-built-from-streamarrs-fork-of-the-pinned-build.adoc)
-- [ADR 0061: The Server Proposes Candidate Outputs, Each Client Answers for Its Player, and the Server Chooses Only a Candidate Output That the Client Accepted](adr/0061-the-server-proposes-candidate-outputs-and-chooses-only-one-the-client-accepted.adoc)
+- [ADR 0061: A Client Declares Its Player's Limits as Capability Entries, and Answers for the Exact Stream Before the Server Copies or Direct-Plays a Source](adr/0061-a-client-declares-its-players-limits-and-answers-for-the-exact-stream-before-a-copy-or-direct-play.adoc)
 
 ## Domain language
 

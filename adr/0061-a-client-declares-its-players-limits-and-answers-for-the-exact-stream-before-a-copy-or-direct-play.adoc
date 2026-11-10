@@ -1,0 +1,508 @@
+= ADR 0061: A Client Declares Its Player's Limits as Capability Entries, and Answers for the Exact Stream Before the Server Copies or Direct-Plays a Source
+
+== Status
+
+Proposed
+
+When accepted, this ADR supersedes link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049].
+This record restates every rule of ADR 0049 that still holds, so a reader needs only this record.
+When accepted, <<decision-candidates>> also replaces the rule of link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc#decision-sample-entries[ADR 0045] that a video capability entry lists sample entries.
+
+This record changes three rules of ADR 0049:
+
+* A copy or a direct play of a source needs the client's answer for that exact stream, and no capability entry bounds its codec level, its codec tier or its sample entry (<<decision-candidates>>).
+* A capability entry's maximum codec level and maximum codec tier bound only encodes (<<decision-nested-limits>>).
+* A client can reuse its platform's answers for the declaration until its player, display or audio output changes (<<decision-display>>).
+
+== Context
+
+The server chooses each output from what the client says its player accepts (link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036]).
+The server also chooses direct play from it (link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045]).
+Direct play means that the server sends the source file itself.
+A copy is a stream copy, which passes the source video through unchanged.
+The source container is the container of a media file as the probe found the media file, such as Matroska, MP4 or MPEG-TS.
+
+ADR 0036 forbids the server to assume that a client supports every combination of the values in separate lists.
+Real players have limits that depend on each other:
+
+* A decoder reports its codec profiles and levels as pairs.
+A decoder can reach a higher level in HEVC Main than in HEVC Main 10.
+* A decoder's maximum picture size depends on the frame rate.
+A decoder that plays 3840×2160 at 30 fps and 1920×1080 at 120 fps does not necessarily play 3840×2160 at 120 fps.
+* A display's HDR formats can depend on the display mode.
+* Each Dolby Vision profile has its own maximum Dolby Vision level.
+* Whether a player opens a codec directly depends on the source container that holds the codec.
+
+ADR 0049 answered those limits with a client capability declaration, which is a list of capability entries.
+Each capability entry gives values and maximums that the player accepts together.
+
+=== What a source signals is arbitrary, and a maximum is a poor way to cover it
+
+An encode has the codec level that its picture needs, because the server chooses that level.
+A source is different.
+A source can signal a codec level far above the level that its picture needs, and it can use the High tier.
+A source in an MP4 file can use any sample entry.
+Under ADR 0049, a copy or a direct play of such a source fit only a capability entry whose maximum level and tier covered what the source signals.
+
+To declare those maximums, the web client asked its browser about each HEVC level, in each tier, at each picture size, for each bit depth and each HDR base (https://github.com/streamarr/streamarr-web/pull/185[streamarr/streamarr-web#185]).
+On an HDR display, that change raised the questions for each playback start from about 90 to about 360.
+Measured in Safari:
+
+* The questions took about 1.9 s before every playback start.
+* The browser answered one HEVC question in about 5 ms, and it answered the questions one after another.
+* A second run took as long as the first, so the browser does not remember its answers.
+
+The web client waits at most 3 s for the answers.
+A device that needs longer declares less than it plays, and nothing reports the loss.
+In automated builds of the other two browser engines, the same questions took under a quarter of a second.
+
+=== What a platform can answer
+
+No platform API answers about a whole output.
+
+* WebKit's `MediaCapabilities.decodingInfo()` reads the codec profile and the codec level of an HEVC question, and compares the level with the decoder's limit for that profile.
+It does not read the codec tier, the picture size, the frame rate or the bitrate.
+For H.264 it reads none of them.
+The browser accepted every HEVC level in both tiers, including a combination of tier and level that HEVC does not define.
+* On an Apple platform, `AVURLAsset.isPlayableExtendedMIMEType` takes a container type and a codec string, and nothing else.
+The Apple client takes its picture sizes and frame rates from tables for each device.
+* Other browser engines judge a question by its picture size and frame rate, and do not read the codec level.
+
+Two things follow.
+A player's limits on picture size, frame rate, bit depth and dynamic range are maximums in the platform's own terms, and a declaration of maximums fits them.
+Every platform can answer whether its player opens one exact codec string from one container.
+That question is the right one for what a source signals.
+
+The server stores what that question needs: each stream's codec string, its sample entry and the file's source container.
+
+== Decision
+
+[[decision-entries]]
+=== A client capability declaration is a list of capability entries
+
+A client capability declaration holds a list of capability entries.
+A capability entry is one group of values and maximums that the player accepts together.
+A video capability entry covers one codec family.
+An audio capability entry covers one audio codec.
+
+A video capability entry lists the codec profiles and the dynamic-range features that the player accepts for the entry's codec family.
+A video capability entry also gives the maximum bit depth, the maximum picture width and height, and the maximum frame rate.
+An audio capability entry gives the maximum channel count that the player accepts for the entry's audio codec.
+An audio capability entry can also give a maximum sample rate.
+A capability entry that a client sends gives every maximum, except that maximum sample rate.
+An audio capability entry without a maximum sample rate states no limit on the sample rate.
+An encode that a maximum sample rate forces resamples to the highest rate at or below the maximum that the encoder writes, from the source's own family of 44.1 kHz or 48 kHz multiples where that family has one.
+
+*Why the maximum sample rate is optional:* FLAC and ALAC sources at 96 and 192 kHz exist, and a player that decodes FLAC only up to 48 kHz fails on such a copy, which costs a format attempt.
+A required field would make every client measure its sample rates before it could start a stream session.
+
+A FLAC capability entry can also give a minimum block size.
+A FLAC copy fits that entry only when the track's STREAMINFO minimum block size is at least that size, and an unknown block size fits no entry that gives one.
+link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc#decision-audio-codec[ADR 0043] decides which clients give it and what replaces a refused copy.
+
+*Why:* Apple's CoreMedia drops a FLAC track whose STREAMINFO minimum block size is below 192 samples, so such a copy plays without sound, which no format attempt detects.
+Other players accept smaller blocks, so the minimum belongs to the player's entry and not to a rule for every client.
+
+Inside one capability entry, the player accepts every combination that takes one value from each list of that capability entry and stays within that capability entry's maximums.
+The contract of the client capability declaration gives the lists inside one capability entry this combining meaning explicitly, as ADR 0036 requires.
+No list combines with a list of another capability entry.
+
+[[decision-codec-names]]
+=== A codec joins the declaration with the first client that declares it
+
+The declaration gives each video codec family and each audio codec a typed value.
+A new value, such as VP9, TrueHD, DTS, LPCM or MP3, joins the schema together with the first client that declares it.
+The same change adds the server's rules for the new value, such as whether the server copies it, steps it or plays it directly.
+The schema holds no codec value that no client declares.
+
+*Why:* A value that no client sends cannot be checked against a real player.
+A client that needs a codec adds it with the checks that show it plays.
+
+[[decision-one-entry]]
+=== An output fits the declaration only when one capability entry accepts every property that the entry bounds
+
+The server accepts a video output for a client only when one video capability entry accepts every video property of that output that a capability entry bounds.
+The server accepts an audio output for a client only when one audio capability entry accepts every audio property of that output.
+The server never takes one property from one capability entry and another property from a second capability entry.
+
+Capability entries may overlap.
+The server does not merge or rewrite capability entries.
+
+[[decision-several-entries]]
+=== A client sends several capability entries when its limits depend on each other
+
+A client whose limits depend on each other sends one capability entry for each combination of limits.
+For example, a client that plays HEVC Main 10 at 3840×2160 and 30 fps, and at 1920×1080 and 120 fps, sends two HEVC capability entries.
+The server then never chooses 3840×2160 at 120 fps for that client.
+
+[[decision-encodes]]
+=== The server shapes each encoded variant to fit one capability entry
+
+Each encoded variant is an output, so each variant fits one capability entry on its own.
+Two variants of one stream session may fit different capability entries.
+
+* *Size:* a variant larger than every capability entry of its codec family accepts is encoded at the largest size that one capability entry accepts, keeping the picture's aspect ratio.
+A fixed quality follows the same rule, so a fixed quality larger than the client accepts plays at the closest size that the client decodes.
+* *Frame rate:* when the output frame rate is above every capability entry's maximum frame rate, the server divides the rate by the smallest whole number that fits: 60 becomes 30, 59.94 becomes 29.97 and 50 becomes 25.
+Division stops at 10 fps, the lowest rate that link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] encodes.
+A codec family has no encode for the client only when no whole divisor that keeps 10 fps or more fits any of its capability entries.
+* *Frame rate before size:* when a variant cannot keep both its picture size and its frame rate, the server keeps the frame rate and shrinks the picture.
+A codec level that allows the picture size only at a lower frame rate therefore shrinks the picture: an H.264 entry at level 4.1 receives a 1080p60 source at about 768p60, not at 1080p30.
+Between capability entries, the server prefers the one that keeps the higher frame rate.
+The same holds between codec families, and the codec preference (link:0009-h264-plus-av1-codec-strategy.adoc[ADR 0009]) only breaks a tie.
+
+*Why:* An error tells the viewer nothing they can act on, while a smaller picture or a lower frame rate still plays.
+The sources that reach these limits are mostly high-frame-rate video, where halving the frame rate is more visible than a smaller picture.
+
+[[decision-nested-limits]]
+=== A limit that belongs to one value sits inside that value, and a codec level or tier bounds only encodes
+
+Each codec profile in a video capability entry carries its own maximum codec level and its own maximum codec tier.
+HEVC and AV1 have a Main tier and a High tier.
+H.264 has no tier.
+Each Dolby Vision profile in a video capability entry carries its own maximum Dolby Vision level.
+A limit that applies to every value of a list stays on the capability entry.
+
+A codec profile's maximum level and maximum tier bound the encodes that the server makes in that profile.
+They do not bound a copy or a direct play.
+<<decision-candidates>> decides whether the player accepts the level and the tier that a source signals.
+A client therefore declares, for each codec profile, the level and the tier that its largest accepted picture needs.
+A client asks its platform about no level or tier above that.
+
+A capability entry numbers codec levels the way the probe numbers codec levels.
+The probe writes a codec level as the major level × 10 plus the minor level, for every codec family.
+HEVC level 5.1 is therefore 51, and AV1 level 5.1 is also 51.
+
+[[decision-maximums]]
+=== A maximum accepts every value at or below the maximum
+
+A maximum accepts every value at or below the maximum.
+The maximums are the picture width, the picture height, the frame rate, the codec level, the codec tier, the Dolby Vision level, the bit depth, the channel count and the sample rate.
+The High tier is above the Main tier.
+A frame rate, of a copy or of an encode, fits a maximum frame rate up to 0.5% above that maximum.
+The margin absorbs timestamp rounding, and it lets a declared 29.97 or 59.94 accept the exact NTSC rate that lies just above it.
+Codec profiles, compatible bases, Dolby Vision profiles and source containers are lists of accepted values.
+No value in those lists counts as below another value.
+
+[[decision-orientation]]
+The maximum picture width and the maximum picture height bound a picture in either orientation.
+A picture fits when its longer side is at or below the larger of the two maximums and its shorter side is at or below the smaller.
+A capability entry with a maximum of 1920×1080 therefore accepts a 1080×1920 portrait picture.
+The rule applies to a copy, which the server checks at the source's decoded size, and to an encode.
+
+*Why:* A capability entry describes how much picture a decoder can decode, and turning a picture on its side does not change that amount.
+Phones record portrait video, so portrait sources are common in a personal library.
+
+A client declares a maximum only when the player accepts every value at or below that maximum.
+A client whose player refuses some smaller values declares a maximum only up to the point where the player accepts every value below.
+
+[[decision-candidates]]
+=== The server proposes candidate outputs for a source, and the client answers for each
+
+A candidate output is one way in which the server may send a source's video stream unchanged.
+A candidate output is the direct play of the file, or one copy of the video stream over HLS.
+A source can have several copies, such as the copy that keeps Dolby Vision and the copy with Dolby Vision stripped.
+An encode is never a candidate output.
+
+The server describes each candidate output with what the stream signals:
+
+* the delivery, which is direct play or HLS
+* the source container, for direct play
+* the sample entry
+* the codec string that the player will meet, which carries the codec profile, the codec tier and the codec level
+* whether the stream carries an HDR transfer, and which
+* the picture size and the frame rate, where the server knows them
+
+The server can add the stream's bitrate.
+The bitrate is advice for the client's question, and it is no part of what the candidate output is.
+The description is the same for every client.
+
+The client sends one candidate output answer for each candidate output.
+A candidate output answer has an outcome and a typed reason.
+The outcome is accepted, refused or unanswered.
+
+* *Accepted* means that the client's rule for its platform says that the player opens this exact stream from this delivery.
+* *Refused* means that the rule says that the player does not.
+* *Unanswered* means that the platform gave no answer in time, or failed while it answered.
+Unanswered is never a refusal.
+
+Each client keeps the rule that turns its platform's answer into an outcome.
+A client can ask its platform other questions to apply that rule.
+A client can write the codec string in the form that its platform's API reads.
+A client accepts a sample entry only after its player plays a real file with that sample entry.
+
+*Why:* What a source signals is arbitrary, and one question about the exact stream covers every value that a ladder of maximums tried to cover.
+Every platform can answer that question, because every platform API takes a codec string and a container.
+The rule for one platform's answers is knowledge about that platform's player, and that client's checks against real players prove it.
+
+[[decision-both]]
+=== A copy or a direct play needs a capability entry and an accepted candidate output
+
+The server copies a source's video stream, or plays the file directly, only when both of the following hold:
+
+* One video capability entry accepts the stream's codec profile, bit depth, picture size, frame rate and dynamic range.
+* The client accepted the candidate output.
+
+The capability entry is not compared with the stream's codec level, codec tier or sample entry.
+No capability entry lists sample entries.
+
+The server treats an unanswered candidate output as not confirmed and moves to its next choice, which is another copy or an encode.
+The server never records an unanswered candidate output against the player as a refusal.
+
+*Why:* A platform's limits on picture size and frame rate are maximums, and the capability entry holds them.
+Some platforms answer the exact question without reading the picture size or the frame rate, so the answer alone cannot stand in for the capability entry.
+
+[[decision-query]]
+=== The client reads the candidate outputs with a query when playback starts
+
+The client reads a media file's candidate outputs with a query of its own, when the viewer starts playback.
+The client sends its answers in the request that starts the playback session.
+A client that reaches the player from a list, from a link or after a reload does the same.
+
+The candidate outputs of a media file depend only on the file's stored probe.
+They do not depend on the viewer's limits, on the playback choice or on which workers are connected.
+One read therefore covers every format attempt of the playback session.
+
+The exchange holds no state on the server.
+Each candidate output carries an opaque token.
+The token stands for the media file, the probe version and what the stream signals.
+It does not stand for the bitrate.
+When the playback session starts, the server derives the candidate outputs again and matches each answer by its token.
+An answer whose token matches no candidate output counts as unanswered, and the stream decision records that it did not match.
+
+Every profile that can read the media file can read its candidate outputs.
+Reading them grants nothing.
+The request that starts the playback session passes the playback-authority check as before.
+
+The client waits for its platform's answers for a bounded time, and then sends each remaining candidate output as unanswered.
+The length of the wait is configuration.
+
+*Why:* Reading candidate outputs changes nothing on the server, so it is a query and not a mutation.
+A source has a handful of candidate outputs, so the questions add tens of milliseconds to a playback start.
+A client does not always show a title's own page before playback, so the client asks when playback starts and not when a page opens.
+Answers that a client takes at playback start are never stale.
+
+[[decision-unknown-values]]
+=== The server decides for each property whether an unknown source value fits
+
+The probe leaves a source value empty when the probe cannot read that value.
+A codec profile that the contract has no value for, such as HEVC 4:4:4, is also empty.
+The server applies the same rule for every client:
+
+* An unknown codec profile, bit depth or picture size fits no capability entry.
+The server encodes such a stream.
+* A stream without a known codec string has no candidate output.
+The server encodes such a stream.
+* An unknown frame rate fits a capability entry that accepts every known property of the stream, and its candidate output states no frame rate.
+* An unknown sample rate fits an audio capability entry without a maximum sample rate, and fits no entry that gives one.
+* An `UNSPECIFIED` compatible base fits a capability entry that accepts `SDR`.
+ADR 0036 already copies a source with an `UNSPECIFIED` compatible base as SDR.
+
+A client cannot change how an unknown value fits.
+
+*Why:* A codec profile decides whether a decoder can decode the stream at all, and a profile without a value is often one that consumer decoders refuse.
+A client cannot answer for a stream that the server cannot describe.
+A stream with no usable frame rate cannot be encoded, so a rule that refused it would leave that stream with no playback path.
+
+[[decision-delivery-paths]]
+=== Each capability entry states its delivery paths, and HLS and direct play are matched separately
+
+Each video capability entry and each audio capability entry says whether the capability entry applies to HLS.
+Each capability entry also lists the source containers from which the player directly opens a stream that the capability entry accepts.
+A capability entry can apply to HLS alone, to direct play alone, or to both.
+HLS needs no container in the capability entry, because every HLS media segment is fragmented MP4 (ADR 0037).
+
+The server matches each output against the capability entries for the output's delivery path.
+An HLS output fits only a capability entry that applies to HLS.
+
+A file's video stream is covered for direct play only when one video capability entry accepts the video stream and lists the file's source container, and the client accepted the file's direct-play candidate output.
+Direct play must cover every audio track in the file (ADR 0045).
+An audio track is covered for direct play only when one audio capability entry accepts the track and lists the file's source container.
+
+The declaration has no list of source containers outside the capability entries.
+
+[[decision-display]]
+=== A client declares its current player, display and audio output, and can reuse its platform's answers until one of them changes
+
+A client sends a client capability declaration each time the client starts a stream session.
+The declaration describes the player, the display and the audio output that the stream session uses.
+A limit that depends on the display mode goes into the capability entries, like every other limit that depends on another value.
+
+A client can keep the answers that its platform gave for the declaration, and can build later declarations from them.
+The client discards those answers when its player, its display or its audio output changes.
+The client keeps no such answer after the app or the page closes.
+A client can ask for those answers before the viewer starts playback.
+
+*Why:* The declaration's questions do not depend on the title, so asking them again for each playback start buys nothing.
+A platform can base an answer on how earlier playback went, so an answer does not stay true for ever, and a client does not store one.
+
+[[decision-required]]
+=== Every stream session request carries a declaration with video and audio capability entries
+
+The API boundary rejects a request to start a stream session when the request carries no client capability declaration.
+The API boundary also rejects a declaration that holds no video capability entry or no audio capability entry.
+The server assumes no capability entry for a client.
+
+The API boundary also rejects a declaration that holds no audio capability entry for AAC that applies to HLS.
+When ADR 0043 encodes the default audio track, it takes FLAC only when a FLAC capability entry accepts the channel count of the FLAC layout that ADR 0043 gives the track.
+Otherwise it takes E-AC-3 or AC-3 only when a capability entry for that codec keeps more than two of the track's channels.
+When neither fits, it encodes AAC, and that AAC encode fits the declaration.
+Every platform that Streamarr's clients run on plays AAC over HLS.
+
+A request can carry no candidate output answer.
+Every candidate output is then unanswered, and the server encodes.
+
+[[decision-dynamic-range]]
+=== Declaring a compatible base declares neither Dolby Vision nor HDR10+
+
+A video capability entry lists the compatible bases that the player displays.
+A compatible base in a declaration is `SDR`, `PQ` or `HLG`.
+A declaration never lists `NONE` or `UNSPECIFIED`.
+
+A video capability entry lists a Dolby Vision profile only when the player applies that profile's RPUs.
+An RPU is a Dolby Vision reference processing unit.
+The server accepts a Dolby Vision output only through a capability entry that lists the output's Dolby Vision profile.
+That Dolby Vision profile's maximum Dolby Vision level must be at or above the output's Dolby Vision level.
+A player that plays only the PQ base of a profile 8.1 stream declares `PQ` and does not declare profile 8.1.
+The declaration has no value for Dolby Vision profile 7.
+
+Dolby Vision profiles 5 and 10.0 have a compatible base of `NONE` (ADR 0036).
+A capability entry accepts a profile 5 or profile 10.0 output through the output's Dolby Vision profile and Dolby Vision level alone.
+
+A video capability entry declares HDR10+ only when the player applies HDR10+ information.
+The server accepts an HDR10+ output only through a capability entry that declares HDR10+.
+
+A client can accept a source's compatible base but not the source's Dolby Vision profile or HDR10+ information.
+The server then copies the source and strips the undeclared format.
+Each such copy is its own candidate output, because the player meets a different codec string.
+ADR 0036 already decides that a copy keeps the RPUs of Dolby Vision profiles 8.2 and 9 under its base sample entry.
+Such a copy fits a capability entry that accepts the base codec and `SDR`.
+
+[[decision-unknown-profile]]
+=== A Dolby Vision stream whose profile is unknown plays without Dolby Vision
+
+A Dolby Vision stream's profile is unknown when the probe found Dolby Vision `PRESENT` but read neither a configuration record nor an RPU header.
+No capability entry can declare an unknown Dolby Vision profile.
+The server therefore treats the Dolby Vision information of such a stream as undeclared for every client.
+A client with a capability entry that accepts the stream's compatible base receives a copy with Dolby Vision stripped, when it accepts that candidate output.
+Every other client receives an encode.
+Such a stream never plays directly.
+
+[[decision-direct-play-issues]]
+=== A property issue that rules out a copy also rules out direct play
+
+A `MediaFileProbePropertyIssue` is the server's judgment that a stream's probe facts conflict or break a container rule.
+Every `MediaFileProbePropertyIssue` that rules out a copy also rules out direct play.
+Direct play sends the same bitstream that a copy passes through.
+A file with such an issue has no candidate output and plays over HLS as an encode, whatever the client declares.
+
+[[decision-playlist]]
+=== The playlist announces an HDR range only for an output that one capability entry accepts
+
+The playlist describes the planned output.
+The server plans a `PQ`, `HLG` or Dolby Vision output only for a client with a capability entry that accepts that output.
+A variant in the multivariant playlist therefore carries `VIDEO-RANGE=PQ`, `VIDEO-RANGE=HLG` or `SUPPLEMENTAL-CODECS` only for such a client.
+
+[[decision-observability]]
+=== Each stream decision records what the client answered
+
+Each stream decision records the candidate outputs that it considered, with the outcome and the reason of each answer.
+A viewer sees them in the playback-data panel, and a ServerAdmin sees them in the active-streams view (link:0013-stream-decision-architecture.adoc[ADR 0013]).
+The server counts the answers by outcome and reason.
+The server also counts each format error that follows an accepted candidate output.
+
+*Why:* An accepted candidate output that fails to play shows that a platform's answer was wrong.
+No count of such failures existed before.
+
+[[decision-clients]]
+=== Every client changes together
+
+The server adds candidate outputs and removes sample entries from the capability entries in the same change.
+The web client and the Apple client change in parallel.
+No release of the server accepts a declaration that lists sample entries.
+
+*Why:* Streamarr has no production instances, so no deployed client depends on the earlier contract.
+
+[[explicitly-deferred]]
+=== Explicitly deferred
+
+* This ADR does not decide the field names, the list of reasons or the metric names.
+The issues that implement the contract decide them.
+* This ADR does not decide whether the server keeps a stream decision after its playback session ends.
+* This ADR does not decide how a declaration states the subtitle formats that a player plays from inside a source file.
+https://github.com/streamarr/streamarr-server/issues/506[Issue streamarr/streamarr-server#506] decides that question for direct play.
+* This ADR does not decide whether each codec family has its own codec profile type in the schema.
+* This ADR does not add dual-layer Dolby Vision playback.
+
+== Consequences
+
+* The server never chooses an output from known values that no single capability entry accepts.
+* The server never copies or direct-plays a source whose exact stream the client did not accept.
+A source that signals a high codec level, the High tier or an unusual sample entry is copied whenever the player opens it, and no client declares a ladder of levels for it.
+* A client asks its platform a handful of questions when playback starts, and asks the declaration's questions once until its player, display or audio output changes.
+The web client no longer asks about each HEVC level in each tier.
+* A playback start costs one more request, which is the query for the candidate outputs.
+* A client that sends no candidate output answer receives an encode for every source.
+* An answer is only as true as the platform's API.
+A platform can accept a stream that it does not check.
+Such an output still costs a format attempt (link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052]), and the new count shows how often it happens.
+* A source without a stored codec string is always encoded, even for a player that could play the file as it is.
+* The schema exposes what a file's video stream signals before a playback session exists.
+* A client turns the answers of its platform APIs into capability entries, and each client decides which configurations it asks about.
+A client that declares too little loses copies and direct play that the client could have played.
+A client that declares too much can receive an output that the player rejects.
+* A remembered answer can be older than the playback session that uses it.
+A change that the client cannot observe, such as a decoder that another app takes, shows up only as a format error.
+* The server checks a planned output against each capability entry in turn, and needs no constraint solver.
+* A file with a property issue that rules out a copy never plays directly, even when the player could play the file.
+* A Dolby Vision stream whose profile is unknown loses Dolby Vision on every client.
+* A stream whose codec profile, bit depth or picture size the probe cannot read is always encoded.
+* A player whose decoder refuses some smaller values loses the larger values that the player could play.
+* A decoder whose own maximum height is below its maximum width can receive a portrait picture that it rejects, which costs a format attempt.
+* A client that sends no declaration cannot start a stream session.
+* Every declaration carries an AAC capability entry for HLS, even when the client prefers another audio codec.
+* A file whose codec has no value yet is encoded, even for a player that could play the file as it is.
+
+== Rejected Alternatives
+
+* Candidate outputs for every output, with no declaration, would have the client answer for each encoded variant and each audio output as well.
+No platform can give that answer: one browser engine does not read the picture size, the frame rate or the bitrate of a question, and the Apple API takes only a codec string.
+A client that works from tables would have to compare each candidate output with its tables, which moves the server's fitting rules into every such client.
+The batch would also grow with each frame rate that the frame-rate rule can produce and with each audio step, and a session with no answers would need a default output that nobody asked a player about.
+* Asking for the answers when a title's page opens would save the query at playback start.
+The web client starts most playback from a list, where that rule would ask for every title on the page.
+* Keeping ADR 0049 and asking the browser fewer questions would cut the web client's wait.
+Each client would need to know which parts of a question each engine reads, and a maximum would still not say whether a player opens one file's exact stream.
+* Keeping ADR 0049 and only reusing the answers would move the web client's wait to the first playback start and keep the ladder of levels and tiers in every client.
+* Sending each platform's raw answer for the server to judge would put every platform's rules in the server, where no player can check them.
+* A mutation that prepares a playback session would use a mutation for a read.
+* A proposal that the server stores needs an expiry and a cleanup, and gains nothing over a token.
+* Running the playback-authority check on the query would refuse a viewer the candidate outputs for a reason that can clear before playback starts.
+* A token that stands for the bitrate would stop matching when a later measurement changes the bitrate (link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc[ADR 0054]).
+* Independent lists across the whole declaration would imply combinations that the player cannot play.
+* Condition strings in the style of DLNA device profiles let a typo change playback without an error.
+* A flag on each limit that says whether an unknown source value fits would leave that choice to each client.
+* Capability entries of exact configurations, with no maximums, multiply the number of capability entries.
+* A default capability entry for a client that sends no declaration would authorize outputs that nobody asked a player about.
+* A capability entry that lists a source container and therefore also applies to HLS would treat direct play and HLS as one capability.
+A player can open a codec from an MP4 file and still fail on the same codec in fragmented MP4.
+* Ranges with minimums, alignment rules or lists of exact sizes would let a capability entry express a gap below a maximum.
+Streamarr has measured no player that needs one.
+* Requiring a separate portrait capability entry would double the capability entries of every client.
+* One list of source containers for the whole declaration would combine every container with every capability entry.
+* Always encoding a Dolby Vision stream whose profile is unknown would cost worker time.
+* Offering direct play despite a property issue would rely on the format error after a failed start.
+
+== References
+
+* link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049: A Client Capability Declaration Lists Capability Entries, and an Output Fits Only When One Capability Entry Accepts the Whole Output]
+* link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036: Video Contracts Share One Vocabulary and Preserve Dynamic-Range Facts]
+* link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045: In Original Quality, a Client Direct-Plays Each File Its Capability Declaration Covers, and Each Client Uses Its Platform's Own Player]
+* link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037: The Worker Delivers Fragmented MP4 Segments From FFmpeg's Standard Output, and HLS Media Segments Are fMP4 Only]
+* link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052: A Failed HLS Copy Falls Back to an Encode, and Original Changes to Auto Whenever It Must Encode]
+* link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc[ADR 0054: Workers Measure Stream Bitrates Once, and a Video Copy Costs Its Measured Average and Advertises Its Measured Peak]
+* https://github.com/streamarr/streamarr-web/pull/185[streamarr/streamarr-web#185] asks about HEVC High tier and levels through 6.2.
+* https://developer.mozilla.org/en-US/docs/Web/API/MediaCapabilities/decodingInfo[MDN: MediaCapabilities.decodingInfo()]
+* https://github.com/WebKit/WebKit/blob/main/Source/WebCore/platform/graphics/cocoa/HEVCUtilitiesCocoa.mm[WebKit: HEVC parameter validation for Cocoa platforms]
+* https://developer.apple.com/documentation/avfoundation/avurlasset/isplayableextendedmimetype(_:)[Apple: AVURLAsset.isPlayableExtendedMIMEType]
+* https://developer.android.com/reference/android/media/MediaCodecInfo.CodecProfileLevel[Android: MediaCodecInfo.CodecProfileLevel]

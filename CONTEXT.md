@@ -172,7 +172,7 @@ The logical span of one viewing of a media title, which survives replacement str
 _Avoid_: playback (ADR 0018's token and request surface), app session, stream session (one server-side run inside it)
 
 **Decision reason**:
-A typed value that the stream decision records for why a stream session plays the file directly, copies a stream or encodes it, such as a codec that the client does not declare. The playback session keeps the reasons. A viewer sees them in the playback-data panel for that viewer's own playback, and a ServerAdmin sees every active stream session's reasons in the active-streams view (ADR 0013).
+A typed value that the stream decision records for why a stream session plays the file directly, copies a stream or encodes it, such as a candidate output that the client refused. The playback session keeps the reasons. A viewer sees them in the playback-data panel for that viewer's own playback, and a ServerAdmin sees every active stream session's reasons in the active-streams view (ADR 0013).
 _Avoid_: transcode reason (it also explains copies and direct play), log message
 
 **Audio delay**:
@@ -196,23 +196,28 @@ The record of one media track as the probe found it.
 It never changes when the server chooses a playback output.
 _Avoid_: source metadata, input description
 
-**Client capability declaration**:
-The record of the combinations that a player and its delivery path can accept, including any display constraints.
-A client capability declaration lists capability entries.
-The server chooses an output from it, and playback can still fail.
-_Avoid_: device profile, client profile, capabilities list
+**Candidate output**:
+One exact output that the server may choose for a media file: a direct play of the file, one copy of the video stream, one encoded variant, one copy of an audio track or one audio encode.
+The server describes it with the facts that a client needs to ask its platform about it, and the description is the same for every client.
+One batch of candidate outputs covers a whole playback session (ADR 0061).
+_Avoid_: capability entry, client capability declaration (both retired by ADR 0061), device profile, client profile
 
-**Capability entry**:
-One group of values and maximums that the player accepts together for one video codec family or one audio codec.
-An output fits the declaration only when one capability entry accepts every property of the output.
-Its maximum picture width and height bound a picture in either orientation (ADR 0049).
-_Avoid_: codec profile (a profile of the coding standard), device profile, condition
+**Candidate output answer**:
+What a client reports for one candidate output: an outcome of accepted, refused or unanswered, with a typed reason.
+Accepted means that the player decodes the candidate output without dropping frames and that the current display and audio output present every feature it lists.
+Unanswered is never a refusal.
+The server chooses only a candidate output that the client accepted, and playback can still fail (ADR 0061).
+_Avoid_: verdict, test, capability
+
+**Baseline output**:
+The encode that every client plays: H.264 High profile at level 4.0, 8-bit SDR, at most 1920×1080 and 30 fps, with stereo AAC, over HLS.
+An unanswered baseline output counts as accepted (ADR 0061).
 
 **Viewer's limits**:
-The limits that bound a stream session's output apart from the client capability declaration: the picture box of the fixed quality that the viewer picked, and the maximum picture width, maximum picture height and maximum bitrate that the client sends.
+The limits that bound a stream session's output apart from the candidate output answers: the picture box of the fixed quality that the viewer picked, and the maximum picture width, maximum picture height and maximum bitrate that the client sends.
 They bound every encode. An encode that Original reaches plays in Auto (ADR 0052).
 Outside Original, they also bound copies, except a copy of a source that cannot be encoded or that the server has nothing to encode to.
-The server has nothing to encode to when the client capability declaration rejects every encode of the source, or when workers are connected but none has a worker-verified encoder for a codec that the declaration accepts an encode in.
+The server has nothing to encode to when the client accepted no encode of the source, or when workers are connected but none has a worker-verified encoder for a codec that the client accepted an encode in.
 The maximum width and height apply as the client gives them, and the maximum bitrate covers video plus audio (ADR 0050).
 When the audio leaves no room for the 360p tier under the maximum bitrate, the server lowers the audio through the audio steps before the stream exceeds the maximum.
 Outside Original, a video copy costs its video plus the session's audio, and the server lowers the audio before it encodes the video.
@@ -265,7 +270,7 @@ Each fixed quality has the box of one quality tier. Its single variant has no la
 _Avoid_: resolution, height (as a tier's key), preset (an encoder speed setting)
 
 **Planned output**:
-The output that the server chooses from the source description, the client capability declaration, the verified worker capabilities and the user's playback choice.
+The output that the server chooses from the source description, the candidate output answers, the verified worker capabilities and the user's playback choice.
 _Avoid_: target format, requested output
 
 **Produced output**:
@@ -350,11 +355,11 @@ An encoder is keyframe-verified when recordings under the pinned FFmpeg show tha
 _Avoid_: verified encoder (unqualified), GOP-verified encoder
 
 **Direct play**:
-The delivery in which the server sends the source file itself, and the player reads it with HTTP byte-range requests. Only Original direct-plays, and only a file whose source container, video stream, audio tracks and any selected subtitle the client capability declaration covers. A direct-play stream session starts no job attempt (ADR 0045). A player that cannot select an audio track inside the file, such as Chromium's or Firefox's, direct-plays a file only when the chosen audio track is the file's first audio track; when the viewer switches to another track, the client moves to HLS at the viewer's position (ADR 0043).
+The delivery in which the server sends the source file itself, and the player reads it with HTTP byte-range requests. Only Original direct-plays, and only a file whose direct-play candidate output the client accepted, with every audio track and any selected subtitle covered. A direct-play stream session starts no job attempt (ADR 0045). A player that cannot select an audio track inside the file, such as Chromium's or Firefox's, direct-plays a file only when the chosen audio track is the file's first audio track; when the viewer switches to another track, the client moves to HLS at the viewer's position (ADR 0043).
 _Avoid_: direct stream, passthrough, stream copy (an HLS delivery)
 
 **Sample entry**:
-The four-character code that names a video stream's coding format in an MP4 or MOV file, such as `avc1`, `hvc1`, `hev1` or `dvh1`. Every video capability entry that lists MP4 or MOV also lists the sample entries that its player opens (ADR 0045).
+The four-character code that names a video stream's coding format in an MP4 or MOV file, such as `avc1`, `hvc1`, `hev1` or `dvh1`. A direct-play candidate output states the file's sample entry, and a client refuses a sample entry that its player does not open (ADRs 0045, 0061).
 _Avoid_: codec tag, FourCC (unqualified), codec string (a different value)
 
 **Source container**:

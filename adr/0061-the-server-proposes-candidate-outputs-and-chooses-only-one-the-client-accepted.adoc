@@ -1,0 +1,298 @@
+= ADR 0061: The Server Proposes Candidate Outputs, Each Client Answers for Its Player, and the Server Chooses Only a Candidate Output That the Client Accepted
+
+== Status
+
+Proposed
+
+This decision supersedes link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049].
+ADR 0049 rejected the alternative that this decision adopts, and <<context-reversal>> gives the measurements that changed the answer.
+<<decision-carried-rules>> restates the rules of ADR 0049 that still hold.
+<<decision-earlier-adrs>> says how to read the earlier ADRs that mention a capability entry.
+
+== Context
+
+Under ADR 0049, a client sends a client capability declaration each time it starts a playback session.
+The declaration lists capability entries, and each capability entry gives maximums.
+The server chooses each output from the capability entries.
+
+No platform API lists every configuration that a player accepts.
+Each API answers one configuration at a time.
+A client therefore has to decide which configurations to ask about, and has to turn the answers into maximums.
+That work is planning, and under ADR 0049 each client does it.
+
+The cost of that planning grows with every limit that the declaration expresses.
+A source can signal an HEVC level above the level that its picture needs, and it can use the High tier.
+A copy or a direct play of such a source fits only a capability entry whose maximum level and tier cover it.
+To declare those maximums, the web client asks about each HEVC level, in each tier, at each picture size, for each bit depth and each HDR base (https://github.com/streamarr/streamarr-web/pull/185[streamarr/streamarr-web#185]).
+
+On an HDR display, the web client asked about 100 questions for each playback start before streamarr/streamarr-web#185, and 357 questions with it.
+Measured in Safari:
+
+* The 357 questions took about 1.9 s before every playback start.
+* The browser answered one question in about 5 ms, and it answered the questions one after another.
+* A second run took as long as the first, so the browser does not remember its answers.
+* The browser accepted every HEVC level in both tiers, including a combination of tier and level that HEVC does not define.
+
+The web client waits at most 3 s for the answers.
+A device that needs longer declares less than it plays, and nothing reports the loss.
+
+The server already stores what an exact question needs for a source: the codec string, the picture size, the frame rate, the bitrate, the transfer characteristics, the HDR metadata, the source container and the sample entry.
+The server also computes the codec string, the picture size, the frame rate and the bitrate of every encode that it plans.
+The declaration's maximums made the client guess at values that the server knows.
+
+The questions that a client asks under ADR 0049 are also not the outputs that the server sends.
+The web client asks about round frame rates and bitrates, and about codec strings that differ from the strings that the server writes.
+
+[[context-reversal]]
+=== Why ADR 0049 rejected candidate outputs, and what changed
+
+ADR 0049 rejected an exchange in which the server proposes candidate outputs and the client answers for each.
+It gave three reasons.
+
+* _The answer adds a round trip, or travels with the client's query for the media item._
+A client opens a title's page before the viewer presses play.
+The client can read the candidate outputs and ask its platform while that page is open (<<decision-wait>>).
+The answers then travel in the request that starts the playback session, as the declaration did.
+* _The server cannot decide until the client answers._
+The server decides when the playback session starts, and the answers arrive with that request.
+* _The candidate set grows with the variants of Auto, with format recovery and with direct play._
+The set is small.
+For one source, the server chooses among three to five combinations of codec profile and encode format.
+A typical title has 12 to 30 candidate outputs for its encodes, and a 4K source above 30 fps with 10-bit video has about 60.
+Direct play, the copy plans and the audio add a handful more.
+At the measured rate, 30 questions take about 150 ms, and the client spends that time before the viewer presses play.
+
+== Decision
+
+[[decision-candidates]]
+=== The server proposes candidate outputs for a media file
+
+A candidate output is one exact output that the server may choose for a media file.
+A candidate output is a direct play of the file, one copy of the video stream, one encoded variant, one copy of an audio track or one audio encode.
+
+The server describes a candidate output with the facts that a client needs to ask its platform about it.
+For video, those facts are the delivery, the source container and sample entry for direct play, the codec string, the picture size, the frame rate, the bitrate, the transfer characteristics, the HDR metadata, the Dolby Vision profile and level, and any HDR10+ information.
+For audio, those facts are the codec, the channel layout, the sample rate and the bitrate.
+The description is the same for every client.
+It holds no field that belongs to one platform's API.
+
+*Why:* The server knows each of these values.
+A description that every client reads lets each client ask its own platform API, such as `MediaCapabilities.decodingInfo()` in a browser or `AVURLAsset.isPlayableExtendedMIMEType` on an Apple platform.
+
+[[decision-batch]]
+=== One batch of candidate outputs covers a whole playback session
+
+The candidate outputs of a media file cover every output that the server can choose during one playback session:
+
+* direct play of the file
+* every copy plan of the video stream, such as the copy that keeps Dolby Vision and the copy with Dolby Vision stripped
+* every copy and every encode of the audio that the server can choose
+* every variant of every codec profile and encode format that the server can encode the source in, for Original, for Auto and for each fixed quality
+* for a source above 30 fps, the same variants at the frame rates that the frame-rate rule of <<decision-carried-rules>> can produce
+
+The request for the candidate outputs carries the viewer's limits that the client will send, because those limits change the exact encodes.
+The server never proposes a candidate output during a playback session.
+A format attempt after a failure, a change of audio track and a change of encoder each choose from the same batch.
+
+*Why:* The server's choice among encodes depends on which workers are connected and on which formats have already failed, and both change during a playback session.
+A batch that held only the first choice would force a second exchange in the middle of playback.
+
+[[decision-query]]
+=== The client reads candidate outputs with a query and sends its answers when it starts the playback session
+
+The candidate outputs are a field of the media file that takes arguments.
+The client reads the field in a request of its own.
+The client sends its answers in the request that starts the playback session.
+
+The exchange holds no state on the server.
+Each candidate output carries an opaque token.
+When the playback session starts, the server derives the candidate outputs again and matches each answer to a candidate output by its token.
+The server ignores an answer whose token matches no candidate output, such as an answer for a file that was probed again since the client read the field.
+
+Every profile that can read the media file can read its candidate outputs.
+Reading them grants nothing.
+The request that starts the playback session passes the playback-authority check as before.
+
+*Why:* Reading candidate outputs changes nothing on the server, so it is a query and not a mutation.
+A field with arguments is how a GraphQL read takes input, and a client can send it alone or together with another query.
+A viewer often opens a title's page and never plays the title.
+A stored proposal would need an expiry and a cleanup for each such visit.
+
+[[decision-answers]]
+=== The client answers each candidate output for its current player, display and audio output
+
+The client sends one candidate output answer for each candidate output.
+A candidate output answer has an outcome and a typed reason.
+The outcome is accepted, refused or unanswered.
+
+Accepted means all of the following:
+
+* The player decodes the candidate output at its picture size, frame rate and bitrate without dropping frames.
+* The current display shows the candidate output's transfer.
+* The player applies every feature that the candidate output lists, such as the RPUs of its Dolby Vision profile or its HDR10+ information.
+* The current audio output plays the candidate output's channels in the right order.
+
+A player that plays only the base layer of a Dolby Vision candidate output refuses that candidate output.
+The same player can accept the candidate output with Dolby Vision stripped.
+
+Unanswered means that the platform gave no answer in time, or that the platform failed while it answered.
+Unanswered is never a refusal.
+
+Each client keeps the rule that turns its platform's answer into an outcome.
+For example, the web client knows when a browser's power-efficient answer stands in for a smooth one.
+A client asks its platform about the candidate outputs and about nothing else.
+A client does not choose which configurations to ask about, and does not turn answers into maximums.
+
+*Why:* The rule for one platform's answers is knowledge about that platform's player, and that client's tests against real players check it.
+The server has no player to check such a rule against.
+The planning is the same for every client, and the server holds the facts that the planning needs.
+
+[[decision-choice]]
+=== The server chooses only a candidate output that the client accepted
+
+The server chooses an output only when the client accepted that exact candidate output.
+The server never infers an answer for one candidate output from the answer for another.
+An accepted candidate output says nothing about a smaller picture, a lower level or a lower frame rate.
+
+The server treats an unanswered candidate output as not confirmed and moves to its next choice.
+The server never records an unanswered candidate output against the player as a refusal.
+
+The request that starts a playback session no longer carries a client capability declaration.
+The schema holds no capability entry.
+The request keeps one fact that describes the player and no output: whether the player selects an audio track inside a file that it direct-plays (link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045]).
+
+*Why:* A maximum let the server send an output that the client had never asked its platform about.
+With exact candidate outputs, every output that the server sends is one that the client's platform answered for.
+
+[[decision-baseline]]
+=== An unanswered baseline output counts as accepted
+
+The baseline output is an encode of H.264 High profile at level 4.0, 8-bit SDR, at most 1920×1080 and at most 30 fps, with stereo AAC, over HLS.
+Every client plays the baseline output.
+A client that plays H.264 High profile also plays the Main and Constrained Baseline profiles.
+
+The candidate outputs of every source that the server can encode include the baseline output.
+For a source above 30 fps, the baseline output has the frame rate that the frame-rate rule produces.
+An unanswered baseline output counts as accepted.
+A refused baseline output stays refused.
+
+*Why:* A platform can lack the API that answers, and a viewer can press play before any answer arrives.
+Without a baseline, such a playback session would have no output.
+A picture of 1920×1080 at 30 fps is the largest that H.264 level 4.0 holds, and it is the output that the web client declared without an answer under ADR 0049.
+ADR 0049 already required every client to play AAC over HLS.
+
+[[decision-wait]]
+=== The client asks before the viewer presses play, and a bounded wait covers the rest
+
+A client reads the candidate outputs and asks its platform as soon as it shows a title that the viewer can play.
+When the viewer presses play before every answer has arrived, the client waits for a bounded time.
+The client then sends each remaining candidate output as unanswered.
+The length of the wait is configuration.
+
+*Why:* The time that a viewer notices runs from the press of play to the first frame.
+Questions that a client asks while a title's page is open cost the viewer nothing.
+
+[[decision-carried-rules]]
+=== The rules of ADR 0049 that still hold
+
+* *Frame rate:* when the client accepts no encode at the source's frame rate, the server divides the rate by the smallest whole number that gives an accepted candidate output: 60 becomes 30, 59.94 becomes 29.97 and 50 becomes 25.
+The server never encodes below 10 fps.
+* *Frame rate before size:* between two accepted candidate outputs, the server prefers the one that keeps the higher frame rate.
+* *Unknown source values:* the server proposes a copy or a direct play only when it can state every fact that <<decision-candidates>> lists.
+A source without a known codec string, codec profile, bit depth or picture size therefore has no such candidate output, and the server encodes it.
+A source without a known frame rate is the exception.
+The server proposes its copy without a frame rate, and each client asks its platform at that platform's usual rate, because a stream with no usable frame rate cannot be encoded.
+* *Dolby Vision:* a Dolby Vision stream whose profile is unknown has no candidate output that keeps Dolby Vision.
+No candidate output carries Dolby Vision profile 7.
+* *Property issues:* a `MediaFileProbePropertyIssue` that rules out a copy also rules out direct play, so such a file has neither candidate output.
+* *Playlist:* the playlist announces an HDR range only for an output that the client accepted.
+* *Codec names:* a codec joins the schema together with the first client whose player plays it.
+
+The rules of ADR 0049 about maximums, about several capability entries, about picture orientation and about one capability entry accepting a whole output no longer apply.
+A candidate output states its exact picture, so no rule about orientation is needed.
+
+[[decision-observability]]
+=== Each stream decision records what the client answered
+
+Each stream decision records the candidate outputs that it considered, with the outcome and the reason of each answer and with the candidate output that it chose.
+A viewer sees them in the playback-data panel, and a ServerAdmin sees them in the active-streams view (link:0013-stream-decision-architecture.adoc[ADR 0013]).
+The server counts the answers by outcome and reason.
+The server also counts each format error that follows an accepted candidate output.
+
+*Why:* An accepted candidate output that fails to play shows that a platform's answer was wrong.
+That count is the measure of how far each platform's answers can be trusted, and no such count existed before.
+
+[[decision-clients]]
+=== Every client changes together
+
+The server adds candidate outputs and removes capability entries in the same change.
+The web client and the Apple client change in parallel, and each removes the code that built its declaration.
+No release of the server accepts both a declaration and candidate output answers.
+
+*Why:* Streamarr has no production instances, so no deployed client depends on the declaration.
+
+[[decision-earlier-adrs]]
+=== How earlier ADRs read after this decision
+
+ADRs 0013, 0043, 0045, 0050, 0052 and 0055 describe choices in terms of a capability entry that accepts an output.
+Read each such passage as "the client accepted that candidate output".
+Where one of those ADRs says that the client declares a value, read it as "the client accepts a candidate output with that value".
+ADR 0045's rule that a capability entry lists sample entries is replaced: a direct-play candidate output states the file's sample entry, and a client refuses a sample entry that its player does not open.
+Each client still accepts a sample entry only after its player plays a real file with that sample entry.
+
+[[explicitly-deferred]]
+=== Explicitly deferred
+
+* This ADR does not decide the field names, the list of reasons or the metric names.
+The issues that implement the contract decide them.
+* This ADR does not decide whether the server keeps a stream decision after its playback session ends.
+* This ADR does not decide how a candidate output states a subtitle that a player reads from inside a source file.
+ADR 0049 deferred the same question to https://github.com/streamarr/streamarr-server/issues/506[streamarr/streamarr-server#506].
+
+== Consequences
+
+* A client asks its platform a few dozen questions for a title, and none for a title that the viewer never opens.
+The web client no longer asks hundreds of questions before each playback start.
+* Each client loses the code that chose configurations and built maximums.
+The web client loses its ladder of HEVC levels and tiers and its table of picture sizes.
+* Every output that the server sends is one that the client's platform answered for, with the codec string, frame rate and bitrate that the server writes.
+* An answer is only as true as the platform's API.
+A browser can accept a configuration that it does not check.
+Such an output still costs a format attempt (link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052]), and the new count shows how often it happens.
+* The schema exposes a file's stream facts before a playback session exists.
+* A client must be able to read the candidate outputs before it starts a playback session.
+A client that has not read them starts with every candidate output unanswered and receives the baseline output.
+* The server proposes encodes only at the sizes of its quality tiers.
+Under ADR 0049, a maximum level that was too low for a tier shrank the picture to a size between two tiers.
+The server now uses the next smaller tier that the client accepted.
+* A source whose facts the server cannot state is always encoded, even for a player that could play it.
+* A display or an audio output that changes during a playback session is not asked about again until the next playback session, as under ADR 0049.
+* The Apple client, whose declaration came mostly from fixed tables, must now answer each candidate output.
+It can answer from the same tables.
+
+== Rejected Alternatives
+
+* Keeping the declaration and asking the questions once for each page load removes the wait but keeps the planning in every client.
+The client would also need a rule for when a remembered answer is too old.
+* Keeping the declaration and asking fewer questions in the web client makes that client guess which questions are safe to skip.
+* Candidate outputs for copies and direct play only, with capability entries for encodes, keeps two mechanisms.
+The web client would still ask about 100 questions for each playback start.
+* Asking only about the largest variant of each codec profile and encode format saves a few questions.
+The server would then assume that a player accepts every smaller variant, which is the assumption that a maximum made.
+* A mutation that prepares a playback session would use a mutation for a read.
+* A proposal that the server stores needs an expiry and a cleanup, and gains nothing over a token.
+* Sending each platform's raw answer for the server to judge would put every platform's rules in the server, where no player can check them.
+* A floor that each client sends without asking its platform would leave the baseline to each client's own choice.
+* Falling back to capability entries for an unanswered candidate output would keep both contracts and the questions that fill the capability entries.
+* Running the playback-authority check on the query would refuse a viewer the candidate outputs for a reason that can clear before the viewer presses play.
+
+== References
+
+* link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049: A Client Capability Declaration Lists Capability Entries, and an Output Fits Only When One Capability Entry Accepts the Whole Output]
+* link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc[ADR 0036: Video Contracts Share One Vocabulary and Preserve Dynamic-Range Facts]
+* link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045: In Original Quality, a Client Direct-Plays Each File Its Capability Declaration Covers, and Each Client Uses Its Platform's Own Player]
+* link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052: A Failed HLS Copy Falls Back to an Encode, and Original Changes to Auto Whenever It Must Encode]
+* https://github.com/streamarr/streamarr-web/pull/185[streamarr/streamarr-web#185] asks about HEVC High tier and levels through 6.2.
+* https://github.com/streamarr/streamarr-web/pull/188[streamarr/streamarr-web#188] keeps direct play for other codec families when one question goes unanswered.
+* https://developer.mozilla.org/en-US/docs/Web/API/MediaCapabilities/decodingInfo[MDN: MediaCapabilities.decodingInfo()]
+* https://developer.apple.com/documentation/avfoundation/avurlasset/isplayableextendedmimetype(_:)[Apple: AVURLAsset.isPlayableExtendedMIMEType]

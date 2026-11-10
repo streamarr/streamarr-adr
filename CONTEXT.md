@@ -728,3 +728,12 @@ _Avoid_: last played, last activity, recently watched
 The per-Profile list of movies and episodes that have a counted resume position, ordered by last watched, newest first.
 Continue Watching does not yet list a series' next episode after a Profile finishes an episode.
 _Avoid_: up next (a series' next episode, which Continue Watching does not list yet), recently watched, resume list
+
+### Notifications
+
+**Notification**:
+A stored note to one Account that something happened to a subject, such as a share offer or a library.
+Each recipient Account gets its own copy when it happens, with its own read state.
+A Notification is either a request, which waits for a decision and resolves for every recipient once anyone decides it or it expires or is withdrawn, or news, which needs no decision and stays unread until its recipient reads it.
+A Notification never holds what waits: an offer or an invitation waits on its own, and the page that lists it counts it (ADR 0063).
+_Avoid_: alert, inbox (neither the list of Notifications nor a list of work such as the numbering review is an inbox), message (no person writes one), activity feed, event (a subscription event updates an open screen and is stored nowhere), task (a portion of a job's work)

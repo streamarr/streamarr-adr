@@ -74,6 +74,7 @@ None at present.
 - [ADR 0056: A Media Title's Profile-Dependent Fields Move under `selectedProfileState`, Which Is Null without a Selected Profile](adr/0056-a-media-titles-profile-dependent-fields-move-under-selected-profile-state.adoc)
 - [ADR 0057: The Worker Runs FFmpeg Built from Streamarr's Fork of the Pinned Build](adr/0057-the-worker-runs-ffmpeg-built-from-streamarrs-fork-of-the-pinned-build.adoc)
 - [ADR 0062: A Worker Sends Each Probe Report in a Call of Its Own, and the Worker Session Carries Only Commands and Events](adr/0062-a-worker-sends-each-probe-report-in-a-call-of-its-own.adoc)
+- [ADR 0063: Each Recipient Account Keeps Its Own Notification, and a Notification Is a Request That Resolves with Its Subject or News That Stays until Read](adr/0063-notifications-are-stored-per-recipient-as-requests-or-news.adoc)
 
 ## Domain language
 

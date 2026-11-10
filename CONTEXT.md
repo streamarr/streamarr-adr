@@ -65,7 +65,9 @@ _Avoid_: pairing grant (the short-lived approval record that comes before it)
 **Share code**:
 A short code that a HouseholdAdmin, or a ServerAdmin, issues for one Household so that whoever holds it can offer a Profile to that Household.
 Looking it up names the Household and tells nothing else about it.
-A share code admits one offer and is then spent; it expires, a HouseholdAdmin can withdraw it, and a Household can hold several at once.
+A share code admits one offer and is then spent.
+It also stops working when it expires, when a HouseholdAdmin withdraws it, or when the Account that issued it loses the authority to issue it or is disabled.
+A Household can hold several at once.
 Issuing one is an invitation to offer, never consent: every offer still waits for a HouseholdAdmin to accept or reject it (ADR 0024).
 _Avoid_: Household id (the key that a share code replaces), invite code or invitation code (the code of an Account invitation or a ProfileManager invitation), join code (a share code makes nobody a member), user code or linking code (the code that links a Device), share link (a client may carry the code in a link, but the code is the term)
 

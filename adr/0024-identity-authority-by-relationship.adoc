@@ -7,6 +7,15 @@ Accepted
 Supersedes link:0022-single-home-accounts-and-portable-profile-sharing.adoc[ADR 0022] and link:0021-device-pairing-over-streamarr-transport.adoc[ADR 0021]'s binding of a paired device to the approving Account's home Household.
 The authorization engine behind this model is a separate decision, made in link:0025-cedar-decides-authorization.adoc[ADR 0025]; this ADR stands whichever engine is chosen.
 
+This text amends the accepted decision.
+The first version did not say how an offerer names the Household that it offers a Profile to.
+It let the offerer learn only the offer preflight's two answers about that Household: whether the Profile would lock there, and which name conflicts exist.
+This amendment settles that clause with share codes (<<share-codes>>).
+A HouseholdAdmin issues a share code for their Household and hands it out, and an offer names its target Household only by a share code; the one exception is an Account invitation's automatic re-offers to the Households that already host the Profile.
+Looking a share code up tells its holder the Household's name and nothing else about the Household, and the Profile's ProfileManagers keep seeing that name on the Profile's shares at every status.
+Issuing a share code is not consent to a share, and who may offer which Profile does not change.
+https://github.com/streamarr/streamarr-server/issues/870[streamarr/streamarr-server#870] implements this amendment, and https://github.com/streamarr/streamarr-server/issues/871[streamarr/streamarr-server#871] names the Household on each share.
+
 == Context
 
 link:0022-single-home-accounts-and-portable-profile-sharing.adoc[ADR 0022] gave every Account one home Household, made Profiles portable through named managers and Household shares, and made child safety a rule the server enforces rather than the client.
@@ -289,7 +298,7 @@ No role, including ServerAdmin, may read password or PIN hashes, access or refre
 ===== Household deletion
 
 ServerAdmin may delete a Household, including through an audited break-glass path.
-The operation revokes its Device registrations and refresh sessions, and the registrations its Accounts authorized anywhere, returns affected sessions to the Profile picker, cancels pending invitations and offers, ends shares, deletes its Accounts, deletes Profiles that belong to it, and then deletes the Household.
+The operation revokes its Device registrations and refresh sessions, and the registrations its Accounts authorized anywhere, returns affected sessions to the Profile picker, cancels pending invitations and offers, withdraws its live share codes, ends shares, deletes its Accounts, deletes Profiles that belong to it, and then deletes the Household.
 
 Before deletion, ServerAdmin transfers out whatever should survive through the ordinary workflows: every Account but the last, and every unlinked Profile worth keeping.
 Household deletion then handles the final Account atomically: transfer the Account with its Personal Profile and delete the Household, delete both, or delete the Account while transferring its preserved Profile and deleting the Household.
@@ -304,6 +313,7 @@ A HouseholdAdmin may:
 * Inspect, revoke, or block its Devices.
 * Inspect administrative details of its Accounts and available Profiles.
 * Create Profiles in the Household.
+* Issue share codes for the Household, list its live share codes, and withdraw any of them (see <<share-codes>>).
 * Accept or reject offers of Profiles into the Household — authority over the pending offer, held through `adminOf` the target Household.
 * Administer a Profile while it is shared into the Household: see its administrative details as scoped under Read authorization, and remove it from the Household — except a member's own Personal Profile, which leaves only with its Account.
 * Supervise a _restricted_ Profile while it is shared into the Household: edit its name, picture, Content Ceiling, and PIN, with the edits applying everywhere the Profile goes.
@@ -441,7 +451,7 @@ Acceptance atomically creates the Account, links its Personal Profile, makes bot
 History, progress, preferences, PIN, policy, and managers remain.
 Shares into other Households do not: a Profile's share admitted a Profile, and once it is someone's Personal Profile the same share would admit the person — their Household switching and Device linking — which those hosts never consented to.
 Connecting therefore ends every share except the home one and invalidates every pending offer of the Profile, so no offer made under the old terms can be accepted after the Profile becomes a person's.
-Hosts are then offered the Profile afresh, told what accepting means: the Account invitation may name the Households to re-offer automatically the moment the invitation is accepted, or the fresh offers are sent later as ordinary operations; the invitation preflight lists which Households are affected.
+Hosts are then offered the Profile afresh, told what accepting means: the Account invitation may name the Households to re-offer automatically the moment the invitation is accepted, or the fresh offers are sent later as ordinary operations, each with a share code from its host; the invitation preflight lists which Households are affected.
 The Account–Personal Profile pair thereafter transfers together.
 An Account whose Personal Profile is unrestricted Adult gains derived management; a restricted Personal Profile requires the eligible local direct manager.
 
@@ -455,7 +465,7 @@ Streamarr has three distinct proposals:
 
 | Account invitation | ServerAdmin | Named recipient | Account, Household membership and role, and exactly one Personal Profile
 | ProfileManager invitation | Any ProfileManager | Named Account | Direct durable `managerOf` grant
-| Profile share offer | ServerAdmin or ProfileManager | ServerAdmin or target HouseholdAdmin | Active `sharedInto` relationship
+| Profile share offer | ServerAdmin or ProfileManager, with a share code issued for the target Household | ServerAdmin or target HouseholdAdmin | Active `sharedInto` relationship
 |===
 
 An Account invitation specifies recipient, Household role, Profile kind and ceiling, whether to create or connect a Profile, and the required local manager for a restricted Profile.
@@ -496,7 +506,7 @@ PENDING -> ACTIVE -> ENDED
     |------> REJECTED | CANCELED | EXPIRED | INVALIDATED
 ----
 
-* ServerAdmin or ProfileManager may offer.
+* ServerAdmin or ProfileManager may offer, and names the target Household by a share code issued for it (see <<share-codes>>).
   A self-managed Personal Profile is offered only by its own Account (or ServerAdmin), because acceptance admits that person to a Household; a supervised Personal Profile may be offered by its managers, which is what supervision means.
 * ServerAdmin or a target HouseholdAdmin may accept or reject.
 * The offerer may cancel while pending; the system invalidates a pending offer when its Profile, Household, or offering manager can no longer carry it, as listed under Invitations.
@@ -514,6 +524,48 @@ Unsharing returns affected sessions using that Profile to the Profile picker but
 When the unshared Profile was the only reason an Account could use that Household, its Device registrations there are revoked in the same transaction, and its web sessions whose recorded context is that Household fall back to the membership Household at their next refresh.
 Existing access JWTs remain valid until their short expiry; clients discard superseded tokens immediately.
 The Profile itself never initiates unsharing; its Account does.
+
+[[share-codes]]
+===== Share codes
+
+An offer names its target Household by a share code, and by nothing else.
+A HouseholdAdmin issues a share code for their Household, and ServerAdmin may issue one for any Household.
+The Household hands the code to the person it wants an offer from: it is short enough to read aloud or type, in the same form as the code a person types to link a Device.
+A share code admits one offer and is then spent.
+It expires after its own configurable lifetime, set beside the invitation lifetime.
+A Household may hold several live share codes at once; its HouseholdAdmins list them, with who issued each and when it expires, and may withdraw any of them.
+
+Looking a share code up needs a signed-in Account.
+A live code tells that Account the Household's name and nothing else about the Household: not its Profiles, its people, its Devices, or its catalog.
+A wrong, spent, withdrawn, or expired code gets a plain refusal and names no Household.
+The offer preflight takes the share code too, and adds only its two answers: whether the Profile would lock there, and which name conflicts exist.
+Every request that presents a share code — a lookup, a preflight, or an offer — is a credential attempt under a credential kind of its own, throttled against the Account that presents it (link:0028-credential-attempts-are-journaled-and-throttled-in-postgresql.adoc[ADR 0028]).
+As for Device pairing codes, a success keeps that Account's earlier failures (link:0030-credential-budgets-use-shared-time-and-explicit-success-reset.adoc[ADR 0030]), because anyone who holds one live code could otherwise look it up between guesses to reset the count.
+
+Issuing a share code is an invitation to offer, never consent to a share.
+Every offer still waits as a pending offer: only a HouseholdAdmin of that Household, or ServerAdmin, accepts or rejects it, and acceptance rechecks every rule as of that moment.
+Holding a share code grants no authority over any Profile.
+The Account that presents one may offer only a Profile it may already offer, as a ProfileManager or as ServerAdmin, under the rules above.
+The offer spends its code in the transaction that creates the offer, so of two offers that present one code, exactly one is made.
+A spent code stays spent whatever becomes of its offer; for another try, the Household issues another code.
+
+From the offer on, the Household's name belongs to the share.
+The Profile's ProfileManagers, the offering side, see it on every share of the Profile at every status — pending, active, ended, rejected, canceled, expired, or invalidated — as they already see every Household the Profile visits.
+A share tells the offering side nothing more about its Household than the code did.
+
+The automatic re-offers that an Account invitation may name when it connects a Profile (see Profile creation and Personal Profiles) are the one kind of offer without a share code.
+They go back only to Households where the Profile is shared when the invitation is issued, which already host it, and they ask those Households to consent again.
+A fresh offer sent later as an ordinary operation needs a share code like any other.
+
+*Why share codes:* A Household id is a database key that no screen shows, that never expires, and that says nothing about which Household it stands for.
+A person could neither learn it nor check that they had typed the right one.
+Account invitations and Device linking already solve the same problem with a short-lived code that one side issues and the other side enters and reviews.
+A share code has the same shape, and the side that issues it is the Household whose consent the share needs.
+
+*Why the holder may learn the Household's name:* A Household is private, so the first version let an offerer learn only whether their Profile would lock there and which names conflict.
+A share code changes who chooses: the Household chose to hand the code out, so it consented to being named to whoever holds it.
+The name is all the holder needs to check where their Profile would go, and it is the only fact the code reveals; the Household's Profiles, people, and catalog stay as private as before.
+The offering side keeps the name at every status because it learned the name before it offered; a share list that forgot where a rejected or ended offer went would only hide the Profile's own history from its managers.
 
 ==== Device linking
 
@@ -622,7 +674,9 @@ Someone who may edit a resource may see the administrative facts needed to under
 | Account administrative details | HouseholdAdmins for their Accounts; ServerAdmin
 | Profile administrative details | HouseholdAdmins while available; ProfileManagers; ServerAdmin
 | Profile history, progress, and preferences | Legitimately selected Account; ProfileManagers; ServerAdmin
-| Offer preflight for a target Household | The offerer learns only whether their Profile would lock there and which name conflicts exist
+| A target Household, through its share code | The code's holder learns only the Household's name, and from the offer preflight only whether their Profile would lock there and which name conflicts exist
+| The target Household of a share | The Profile's ProfileManagers see the Household's name on every share of the Profile, at every status
+| A Household's live share codes | Its HouseholdAdmins, with who issued each and when it expires; ServerAdmin
 | Security audit | ServerAdmin only
 | Authentication secrets | Nobody
 |===
@@ -736,7 +790,7 @@ PostgreSQL ensures, regardless of application path or concurrency:
 * Profile names are case-insensitively unique among the Profiles available in a Household, checked on rename, share activation, and transfer; manager, share, Personal Profile, Device-registration, and pending-invitation relationships are unique where required.
 * A `REGISTERED` Device registration names its Device, Household, and an authorizing Account that may use that Household; access loss or ESN blocking leaves no `REGISTERED` matching registration or device-bound refreshable session.
 * Every restricted Profile has its home anchor, and every Household into which a restricted Profile is actively shared holds an eligible HouseholdAdmin; PIN safety is a selection-time rule and needs no stored invariant.
-* Invitation, share, and registration state transitions, and every deletion, are conditional, atomic, and single-winner.
+* Invitation, share, share code, and registration state transitions, and every deletion, are conditional, atomic, and single-winner; an offer and the spending of its share code commit together.
 * Only the newest invitation for a target is pending.
 * Transfers, authority changes, and deletions preserve all Account, Household, Profile, and manager invariants.
 * Deletion leaves no dangling relationship; a linked Personal Profile is erased only with its Account.
@@ -752,8 +806,8 @@ Explicitly deferred:
 * Portability is limited to one Streamarr server; federation is out of scope.
 * A Profile has one portable PIN; Household-local PINs are out of scope.
 * New safety dimensions require a deterministic restrictiveness order.
-* Invitation delivery, exact expiry, screens, GraphQL contracts, and final error copy are deferred.
-  Expiry remains bounded.
+* Invitation and share code delivery, exact expiry, screens, GraphQL contracts, and final error copy are deferred.
+  A Household hands its share code over itself, and expiry remains bounded.
 * ESN quality depends on the client platform.
   Streamarr stores whatever the client supplies during linking but never places it in the JWT or treats it as authentication.
 
@@ -781,17 +835,17 @@ Because Ben is B's first Account he becomes its HouseholdAdmin.
 His Personal Profile moves with him: it now belongs to B and is available there.
 The transfer's `sourceAccess` is `END`, the default, so his share into A ends in the same transaction: his face leaves Ana's picker, and the Apple TV he had linked to A loses its registration; Ana relinks it under her own Account.
 Had the ServerAdmin chosen `KEEP_AS_VISITOR` — an amicable move, say — Ben would have stayed available in A as a visitor, and either Ben (his own Profile) or Ana (her Household) could have ended that share later.
-Nothing stops Ben offering his Profile back into A afterwards; Ana would have to accept, as for any visitor.
+Nothing stops Ben offering his Profile back into A afterwards, with a share code that Ana issues for A; Ana would still have to accept, as for any visitor.
 In B, with no Kid around, Ben drops the PIN he needed while living with Kai — allowed, because nothing would lock.
 
 Ben is still a direct manager of Kai.
-Nothing about the transfer changed that, and it means Ben does not need Ana's help to bring Kai into B: as a manager he may offer Kai to any Household, and as B's HouseholdAdmin he may accept.
+Nothing about the transfer changed that, and it means Ben does not need Ana's help to bring Kai into B: as a manager he may offer Kai to any Household that gives him a share code, and as B's HouseholdAdmin he may issue that code for B and accept the offer.
 Ana cannot prevent it, just as Ben cannot end Kai's share into A — equal managers, each sovereign over their own home.
 Kai is simply not yet available in B.
 
 === Kai in both homes
 
-Ben offers Kai to Household B and, as B's HouseholdAdmin, accepts the offer himself.
+Ben issues a share code for Household B, offers Kai to B with it, and, as B's HouseholdAdmin, accepts the offer himself.
 B holds an eligible admin — Ben — so the share activates and Kai is available in both homes with one history, one ceiling, one PIN.
 Ben edits Kai as a named manager anyway; had B another admin — a new partner — they would supervise Kai while he is in B (set his PIN, adjust his ceiling) but could not change his kind or leave him unrestricted, and their authority would end with the share.
 
@@ -814,7 +868,9 @@ It never shows A, and it never asks which Household it is in.
 
 Sam lives in his own Household S.
 He is visiting Ana and wants his own watch history on her TV.
-Sam offers his own Personal Profile into Ana's Household A.
+Ana issues a share code for Household A and reads it out to Sam.
+Sam enters it in Streamarr-web, which names Household A and tells him nothing else about it, and offers his own Personal Profile into A with it.
+The code only let Sam ask.
 Ana's acceptance screen says plainly: _accepting lets Sam use your Household — see its Profiles, browse its catalog, and link devices to it — until the share ends._
 Because Kai is in A, Sam's Adult Profile will be locked there until it has a PIN; the offer preflight told Sam so, and he set one before he left home.
 
@@ -826,6 +882,7 @@ He could also link his own Apple TV to A; Ana sees that registration in her Hous
 When the visit is over Sam ends the share himself — his own identity, his call, no cooperation needed.
 His registrations and refreshable sessions in A are revoked in the same transaction.
 Ana could have removed him instead.
+Sam's list of shares still names Household A after the share ends.
 Throughout, Ana can see Sam's kind, ceiling, PIN-configured status, and that he is shared into A, but not which other Households Sam visits.
 
 === Theo turns eighteen
@@ -850,7 +907,8 @@ Rose has never administered anything and never will.
 The ServerAdmin creates an empty Household R and invites her; her acceptance creates her Account and Personal Profile and, as R's first Account, makes her HouseholdAdmin without her noticing.
 
 Ana wants Kai available at Rose's.
-Ana offers Kai to R; Rose accepts on her screen, or the ServerAdmin accepts for her, since ServerAdmin may accept a share into any Household.
+Rose could issue a share code for R, but the ServerAdmin issues one and gives it to Ana, since ServerAdmin may issue a share code for any Household.
+Ana offers Kai to R with it; Rose accepts on her screen, or the ServerAdmin accepts for her, since ServerAdmin may accept a share into any Household.
 That is all the setup there is: a Kid's share can only activate into a Household that already has an eligible admin, and R has Rose, so the share activates and, while Kai is there, Rose supervises him.
 (Had the ServerAdmin tried to accept Kai into R before Rose existed, the database would have refused: nobody would be supervising.)
 She can set his PIN if he arrives without one, and tighten or adjust his ceiling; she cannot change his kind or strip his last ceiling — only Ana or Ben, his named managers, or a ServerAdmin override can — and her authority ends the day the share does.
@@ -883,7 +941,9 @@ The one thing the ServerAdmin cannot do is disable the last enabled ServerAdmin 
 * An adult is sovereign over their own identity, so a co-manager veto no longer protects a Personal Profile once its person is an unrestricted Adult; parents keep management of a grown child only by that child's continued consent.
 * A supervised person holds no administrative authority anywhere, and an adult cannot self-restrict; becoming supervised means another manager exists and ServerAdmin has first removed any HouseholdAdmin role or manager grants the person held.
 * Disabling an Account is always available to ServerAdmin; a Household with no enabled admin is a visible operational state, not an invalid one.
-* Web clients gain Household switching, device linking with a Household choice, invitation and share management, sovereign self-service (end own shares, remove own managers, delete Account and Profile), and the plain-words confirmations these rules require.
+* No client asks a person for a Household id.
+  An offer names its Household by a share code, and HouseholdAdmins issue, list, and withdraw their Household's codes in Streamarr-web.
+* Web clients gain Household switching, device linking with a Household choice, invitation, share code, and share management, sovereign self-service (end own shares, remove own managers, delete Account and Profile), and the plain-words confirmations these rules require.
   tvOS gains nothing but a fixed Household; it still selects a Profile, never a Household.
 * Access tokens carry one context-Household claim however it was established, plus a registration id on device sessions; all revocation remains bounded by the configured access-token lifetime, which is ten minutes by default and at most fifteen minutes (ADR 0016).
 * `CONTEXT.md`'s Household Owner and Parent vocabulary, ADR 0015/0016/0018/0021's supersession notes, and every client string that says "owner" or "parent" change with this decision.
@@ -955,6 +1015,10 @@ Alternatives considered here and declined:
 * Let any HouseholdAdmin invite Accounts to the server — Account creation is a server-resource decision on a self-hosted server; ServerAdmin owns it, and delegating it later is a separate role decision.
 * Keep a separate Device bearer credential from pairing — the registration id inside the ordinary Account token carries the Device facts; a second credential would be one more thing to rotate and revoke.
 * Two token claims for "which Household am I acting in" (web-selected versus Device) — one context claim, however established, keeps every consumer on one code path.
+* Name an offer's target Household by its id, as the first implementation did — no screen shows the id, it never expires, and it says nothing about the Household it stands for, so a person can neither learn it nor check it.
+* Let an offerer search or pick from the server's Households — it names every Household to everyone who may offer, though no Household chose to be named.
+* Let a share code admit the Profile by itself, as consent given in advance — a code can be passed on, so the Household would consent to people it never chose; the code invites the offer, and a HouseholdAdmin still decides it.
+* One lasting code per Household — a code that keeps working after it is passed on lets anyone who has seen it offer until someone notices; a code that admits one offer and expires limits a leaked code to one offer, which a HouseholdAdmin must still accept.
 
 == References
 
@@ -963,7 +1027,11 @@ Alternatives considered here and declined:
 * link:0021-device-pairing-over-streamarr-transport.adoc[ADR 0021: Device Pairing Follows RFC 8628 Semantics over Streamarr Transport]
 * link:0022-single-home-accounts-and-portable-profile-sharing.adoc[ADR 0022: Accounts Have One Home Household and Profiles Are Portable]
 * link:0025-cedar-decides-authorization.adoc[ADR 0025: Cedar Decides Authorization; PostgreSQL Keeps the Relationships]
+* link:0028-credential-attempts-are-journaled-and-throttled-in-postgresql.adoc[ADR 0028: Credential Attempts Are Journaled and Throttled in PostgreSQL]
+* link:0030-credential-budgets-use-shared-time-and-explicit-success-reset.adoc[ADR 0030: Credential Attempts Use PostgreSQL Time and Pairing Successes Preserve Failures]
 * https://github.com/streamarr/streamarr-server/pull/296[streamarr-server PR #296: first implementation of ADR 0022]
+* https://github.com/streamarr/streamarr-server/issues/870[streamarr/streamarr-server#870] (share codes), which implements this amendment.
+* https://github.com/streamarr/streamarr-server/issues/871[streamarr/streamarr-server#871] (names on each Profile share, and the shares into a Household)
 * https://docs.cedarpolicy.com/auth/authorization.html[Cedar authorization requests]
 * https://docs.cedarpolicy.com/overview/patterns.html[Cedar RBAC, ABAC, and ReBAC patterns]
 * https://docs.cedarpolicy.com/bestpractices/bp-using-the-context.html[Cedar request context guidance]

@@ -114,7 +114,7 @@ Its state is its subject's state, which the server reads from the subject each t
 ** _decided_, when anyone with the authority accepts, rejects or declines the subject;
 ** _withdrawn_, when its proposer cancels the subject, a newer proposal replaces it, or the server invalidates it (ADR 0024);
 ** _expired_, when the subject's expiry passes with no decision.
-* Nothing writes the resolution.
+* Nothing writes the resolution on the Notification.
   The server already reads an offer's or an invitation's expiry as a check on its expiry time, as ADR 0024 does for pairing grants, and a request reads its subject the same way.
   A request therefore never claims to wait for something that is already settled.
 * A resolved request counts as read.
@@ -128,9 +128,11 @@ News needs no decision.
 It stays unread until its recipient marks it read, and nothing else marks it read.
 
 *Why a request reads its state from its subject:* the subject is already the one record that every recipient and every page reads.
-A stored resolution would need a correct write on every path that decides, withdraws or invalidates an offer, and one missed write would leave a request waiting for something already settled.
+A stored resolution would need a correct write on every path that decides, withdraws, invalidates or expires an offer, and one missed write would leave a request waiting for something already settled.
 Every such path also publishes a change for open screens (see <<live-changes>>), but a missed publication costs only freshness: the next read is still right.
-Expiry has no path at all, and a stored resolution would need a writer for it that the server has never needed.
+Expiry shows the difference.
+The server stores an offer's expiry when its expiry sweep next runs, within about a minute of the expiry time, and the offer reads as expired from the expiry time on.
+A request that reads its offer is right during that minute, and a stored resolution would not be.
 
 === One unread Notification per kind, subject and recipient
 
@@ -197,7 +199,6 @@ Opening the list marks nothing.
 A client marks a Notification read when the reader opens it, or when the reader marks them all.
 
 The unread count counts the unread Notifications that the guard shows the reader, including the requests that still wait.
-With the count, the server gives the time when the soonest of the counted requests expires, because the count then falls with nothing pushed.
 
 [[what-it-carries]]
 === What a Notification carries
@@ -207,14 +208,14 @@ It also stores when it was made, when its latest event happened, and when its re
 It stores the facts of its events that the subject does not keep: an offer's answer, which side ended a share, or a scan's figures.
 
 A Notification stores one name only: a sharing Notification keeps the Profile's name as it was at its latest event.
-It keeps the name alone, never the Profile's picture or kind.
-The Household's side sees a Profile's name, picture and kind, and the offerer's name, only while the offer is pending or the share is active (ADR 0024, as https://github.com/streamarr/streamarr-adr/pull/127[streamarr/streamarr-adr#127] amends it).
-Yet its history of offers and ended shares must still say which Profile it was.
-The kept name is a record of what the reader was told at that moment, not a read of the Profile.
-The Household's side saw that name then, so the copy tells that side nothing that ADR 0024 hides, and a later rename never reaches a Household that the Profile has left.
-Retention bounds the record: the name goes when its Notification goes.
+The kept name is for a reader who may no longer see the Profile.
+It is the name alone, with no picture and no kind.
+It is a record of what the reader was told when the event happened, not a read of the Profile, so a later rename never reaches a Household that the Profile has left.
+Retention removes it with its Notification.
+ADR 0024, as https://github.com/streamarr/streamarr-adr/pull/127[streamarr/streamarr-adr#127] amends it, lets the Household's side see a Profile's name, picture and kind, and the offerer's name, only while the offer is pending or the share is active.
+The kept name is the one exception that it makes.
 
-So a reader who may see the Profile now reads its current name.
+A reader who may see the Profile now reads its current name instead.
 The offering side may at every status, and the Household's side may while the offer is pending or the share is active.
 Any other reader reads the kept name, and nothing in a Notification lets that reader read the Profile itself.
 
@@ -264,7 +265,7 @@ A ServerAdmin reads and changes it within the bounds that the setting reports, a
 * *An offer is canceled, replaced or invalidated:* its requests read as withdrawn.
   The offering side gets no news, because its own side or the server withdrew the offer.
 * *An offer expires:* its requests read as expired, and nobody gets news.
-  The server pushes nothing at that moment (see <<live-changes>>).
+  The server pushes their resolution when it stores the offer's expiry (see <<live-changes>>).
 * *A share ends:* a side that did not end it gets news, as the sharing kinds below set out.
   When a share ends because its Profile or its Household is deleted, the share is deleted too, and nobody gets news.
 
@@ -588,8 +589,11 @@ extend type Query {
     session gets FORBIDDEN.
     """
     notifications(first: Int, after: String): NotificationConnection!
-    "The signed-in Account's unread Notifications. The same access as notifications."
-    unreadNotifications: UnreadNotifications!
+    """
+    How many of the signed-in Account's Notifications are unread, including the requests that
+    still wait. The same access as notifications.
+    """
+    unreadNotificationCount: Int!
     "How long the server keeps read news and resolved requests. Requires a ServerAdmin."
     notificationRetentionSetting: NotificationRetentionSetting!
 }
@@ -607,19 +611,6 @@ type NotificationEdge implements OrderedEdge {
     orderKey: String!
 }
 
-"The signed-in Account's unread Notifications (ADR 0063)."
-type UnreadNotifications {
-    "The same for every read and change for one Account, so a client cache can update it in place."
-    id: ID!
-    "How many of the Account's Notifications are unread, including the requests that still wait."
-    count: Int!
-    """
-    When count next falls by itself, because the soonest of the counted requests expires. Null when
-    no counted request expires. The server pushes nothing at that moment: read the count again then.
-    """
-    nextExpiryAt: String
-}
-
 extend type Mutation {
     markNotificationRead(input: MarkNotificationReadInput!): MarkNotificationReadPayload
     markAllNotificationsRead(input: MarkAllNotificationsReadInput!): MarkAllNotificationsReadPayload
@@ -633,8 +624,8 @@ input MarkNotificationReadInput {
 
 type MarkNotificationReadPayload {
     notification: Notification
-    "The signed-in Account's unread Notifications after the change."
-    unreadNotifications: UnreadNotifications
+    "The signed-in Account's unread count after the change."
+    unreadNotificationCount: Int
     userErrors: [MarkNotificationReadError!]!
 }
 
@@ -649,8 +640,8 @@ input MarkAllNotificationsReadInput {
 }
 
 type MarkAllNotificationsReadPayload {
-    "The signed-in Account's unread Notifications after the change."
-    unreadNotifications: UnreadNotifications
+    "The signed-in Account's unread count after the change."
+    unreadNotificationCount: Int
     userErrors: [MarkAllNotificationsReadError!]!
 }
 
@@ -659,9 +650,10 @@ union MarkAllNotificationsReadError = InvalidCursorError
 extend type Subscription {
     """
     The signed-in Account's Notifications changed: one was made or updated in place, a request
-    resolved because someone decided, canceled, replaced or invalidated its subject, or one was
-    marked read. An expiry, a deletion, and a change of what the guard hides are not pushed: read
-    the list or the count again. The Account comes from the access token that opened the socket,
+    resolved because its subject was decided, canceled, replaced, invalidated or expired, or one
+    was marked read. An expiry arrives when the server stores it, within about a minute of the
+    request's expiresAt. A deletion and a change of what the guard hides are not pushed: read the
+    list or the count again. The Account comes from the access token that opened the socket,
     and no argument names it. The same access as notifications; the field authorizes when it
     opens, and each change is guarded from the Account's live relationships. Every open socket of
     the Account receives the change, including the socket of the client that made it.
@@ -673,8 +665,8 @@ extend type Subscription {
 type NotificationsChange {
     "Each Notification that the change touched, once."
     notifications: [NotificationChange]!
-    "The Account's unread Notifications after the change. Null when they could not be read."
-    unreadNotifications: UnreadNotifications
+    "The Account's unread count after the change. Null when the count could not be read."
+    unreadNotificationCount: Int
 }
 
 type NotificationChange {
@@ -732,19 +724,23 @@ union ChangeNotificationRetentionError = NotificationRetentionOutOfRangeError
 `notificationsChanged` pushes each committed change that a service makes:
 
 * a Notification is made or updated in place;
-* a request resolves, because someone decides, cancels, replaces or invalidates its subject;
+* a request resolves, because its subject is decided, canceled, replaced, invalidated or expired;
 * a recipient marks one Notification or all of them read.
 
-Every service path that changes a share's status publishes the share change event that streamarr-server#871 adds for its live updates of shares, and the delivery listener hears the same event.
-That covers the operations on an offer and a share themselves.
+Every write of a share goes through `ProfileShareLifecycle`, which publishes a `ProfileShareChangedEvent` for each share that the write changes.
+The Notification writer and the delivery listener hear that event, and so do the live updates of shares.
+These names come from the work for streamarr-server#871.
+The event covers the operations on an offer and a share themselves.
 It also covers the operations that change shares on their way, such as connecting a Profile to an Account, disabling an Account, revoking ServerAdmin authority, deleting or transferring an Account or a Profile, and relinquishing management.
-A later request kind brings the same rule for its own subject.
+
+It covers expiry too.
+`ProfileShareExpirySweeper` runs once a minute by default.
+It stores `EXPIRED` on each pending offer whose expiry time has passed, through `ProfileShareLifecycle`, so each expiry arrives as the same event as every other change.
+A request about an offer still reads its state from the share, and `notificationsChanged` announces its expiry like any other resolution.
+A later request kind brings the same rule for its own subject, its expiry included.
 
 Some changes are not pushed:
 
-* An offer's expiry, because no path writes it.
-  `UnreadNotifications.nextExpiryAt` tells a client when the soonest counted request expires, and the client reads the count again at that moment.
-  A client also compares each shown request's `expiresAt` with its clock.
 * A deletion by retention, or with a subject or a recipient.
 * A Notification that the guard newly hides or shows again, because live changes follow Notifications, not relationships.
 
@@ -756,7 +752,7 @@ The first build adds no new mechanism.
 It uses the parts that the server already has:
 
 * *Events:* the services that change a subject publish application events (ADR 0010).
-  For shares, this is the share change event that streamarr-server#871 adds; for the library kinds later, it is `ScanEndedEvent` and `RefreshEndedEvent` with the library operation's id added.
+  For shares, this is `ProfileShareChangedEvent`, which `ProfileShareLifecycle` publishes for every write of a share, the expiry sweep's included; for the library kinds later, it is `ScanEndedEvent` and `RefreshEndedEvent` with the library operation's id added.
 * *Writing:* a Notification writer listens inside the publisher's transaction.
   It works out the recipients, leaves out the Account that acted, and applies the noise rule to news with one `INSERT … ON CONFLICT … DO UPDATE` against the unique index, so a Notification commits with its event.
 * *Delivery:* after commit, a listener passes each change to the recipient's open operations through a `KeyedSubscriptionBroadcaster` keyed by Account id, as `watchStateChanged` is keyed by Profile id (ADR 0042).
@@ -793,16 +789,15 @@ The tests show that:
 * each recipient gets one copy when the event happens, the Account that made an offer is on its offering side, and the Account that acts gets none;
 * the guard decides from the recipient Account's relationships in PostgreSQL: it hides a Notification as soon as its reader loses the authority, even while the reader's token still names the old role, and shows it again when the authority returns;
 * a person who gains a role later gets no Notification for what was already waiting;
-* a request reads as decided, withdrawn or expired from its subject, for every recipient, with no write;
+* a request reads as decided, withdrawn or expired from its subject, for every recipient, with no write to the Notification, and it reads as expired from its offer's expiry time on, before the sweep stores the expiry;
 * a recipient keeps one unread Notification per kind and subject, also under two events at the same moment; news of another kind about the same subject makes a Notification of its own, and a request never updates in place;
 * a Household's side reads the current Profile name while the offer is pending or the share is active, and the kept name alone, with no picture or kind, once the offer or the share is over; the offering side reads the current one;
 * the list passes the shared `PagedListContract`, newest `latestEventAt` first, and a page that continues from a Notification that has since moved to the top starts where that Notification was;
 * marking all as read leaves a Notification that arrived after the client's cursor, or moved above it, unread;
-* the unread count gives the soonest expiry among the requests that it counts;
 * retention deletes history and hidden news older than the period, and keeps unread news that the guard shows;
 * deleting a subject, a record that a subject names, or a recipient deletes the Notifications;
 * a device-bound session gets `FORBIDDEN` from every Notification read, mark and subscription;
-* each path that changes a share pushes a change that carries the edge and the unread Notifications that a fresh query returns;
+* each path that changes a share, the expiry sweep included, pushes a change that carries the edge and the unread count that a fresh query returns;
 * the two library kinds, defined only in test code, fit the general model: the same writer, noise rule, guard and retention handle them without a change.
 
 === Explicitly deferred
@@ -822,15 +817,16 @@ The tests show that:
 
 * A person learns about an offer, its answer or the end of a share without opening the sharing pages, and sees them in one list.
 * The sharing pages still list and count from the shares, and Notifications change nothing that those pages show.
-* The sharing kinds read their names through `ProfileShare` and take their live changes from its share change event, so the first build follows streamarr-server#871.
+* The sharing kinds read their names through `ProfileShare` and take their live changes, expiry included, from `ProfileShareChangedEvent`, so the first build follows streamarr-server#871.
   It also follows streamarr-server#870, so that every ordinary offer answers a share code that the target Household issued.
-* Every service path that changes a share's status publishes the share change event, because a missed path makes no Notification or leaves open screens stale.
-  A missed path never leaves a request in the wrong state, because a request reads its state from its subject.
+* Every write of a share goes through `ProfileShareLifecycle`, because a write that bypasses it publishes no `ProfileShareChangedEvent`, makes no Notification and leaves open screens stale.
+  A missed event never leaves a request in the wrong state, because a request reads its state from its subject.
 * The unread count makes one guard decision for each unread Notification.
   The noise rule, the resolution of requests and the retention of hidden news keep that set small; a count that outgrows point decisions reopens ADR 0025's deferred partial evaluation.
 * An open list can keep showing a Notification that the guard now hides until the list is read again, because live changes follow Notifications, not relationships.
   This is the same bounded staleness that ADR 0042 accepts.
-* An expired request leaves the unread count only when the count is read again, and the count says when that is.
+* An expired request leaves an open client's unread count when the sweep stores its offer's expiry, within about a minute of the expiry time.
+  A read during that minute already leaves it out.
 * Deleting a Profile, a Household or a library sends no news about it.
 * An accepted share that later ends leaves its offering side two lines, one for the answer and one for the end, because different kinds of news about one subject sit side by side.
 * A Notification never changes its kind or its concrete type.
@@ -843,7 +839,7 @@ The tests show that:
 
 * Address a group, such as a Household's HouseholdAdmins, and check membership when a member reads — each member still needs a read state of its own, an Account that joins later would inherit what was said before, and every list and count would read each group's membership.
 * Count waiting things from unread requests — a person who gains a role later would see no count, and the count would fall when a reader marks a request read or retention deletes it.
-* Store a request's resolution on the Notification — every path that decides, withdraws or invalidates an offer would need a correct write, and expiry would need a writer that the server has never needed.
+* Store a request's resolution on the Notification — every path that decides, withdraws, invalidates or expires an offer would need a correct write, and a request would still wait during the minute before the sweep stores its offer's expiry.
 * Write a read time when a request resolves — the same writes on every path, only to let one index cover requests too.
 * Keep a request unread for each recipient until that recipient answers — the other recipients would see a dot for something already settled.
 * Key "Offer waiting" on the Profile and the Household, and update it when an offer is replaced — the offer is what waits and what a HouseholdAdmin decides, and share codes already make each new offer one that the Household asked for.
@@ -859,7 +855,7 @@ The tests show that:
 * Keep a Notification after its subject is deleted — it has nothing to show or link to, and the guard would hide it from everyone.
 * Let retention delete unread news that the guard shows — news stays until it is read, and the noise rule already keeps unread news few.
 * Delete news as soon as the guard hides it — a reader whose authority returns within the period would lose news about what it may see again.
-* Push a change when an offer expires — it would need a timer for each offer, and the count's next expiry gives a client the same moment.
+* Push an offer's expiry at the very moment its time runs out — it would need a timer for each offer, while the sweep pushes it within about a minute and the offer reads as expired in between.
 * Mark Notifications read when the list opens — the dot would clear for lines that the reader never looked at.
 * `markAllNotificationsRead` with no position — it would mark read a Notification that arrived while the reader looked at the list.
 * A link in the Notification — the server would depend on one client's routes.

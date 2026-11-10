@@ -73,6 +73,7 @@ None at present.
 - [ADR 0055: A Viewer's Audio Delay Is a Playback Session Parameter, and the Server Shifts the Audio Renditions by It](adr/0055-a-viewers-audio-delay-is-a-playback-session-parameter-and-the-server-shifts-the-audio-renditions.adoc)
 - [ADR 0056: A Media Title's Profile-Dependent Fields Move under `selectedProfileState`, Which Is Null without a Selected Profile](adr/0056-a-media-titles-profile-dependent-fields-move-under-selected-profile-state.adoc)
 - [ADR 0057: The Worker Runs FFmpeg Built from Streamarr's Fork of the Pinned Build](adr/0057-the-worker-runs-ffmpeg-built-from-streamarrs-fork-of-the-pinned-build.adoc)
+- [ADR 0062: A Worker Sends Each Probe Report in a Call of Its Own, and the Worker Session Carries Only Commands and Events](adr/0062-a-worker-sends-each-probe-report-in-a-call-of-its-own.adoc)
 
 ## Domain language
 

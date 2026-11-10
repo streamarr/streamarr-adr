@@ -208,19 +208,6 @@ An output fits the declaration only when one capability entry accepts every prop
 Its maximum picture width and height bound a picture in either orientation (ADR 0049).
 _Avoid_: codec profile (a profile of the coding standard), device profile, condition
 
-**Candidate output**:
-One way in which the server may send a source's video stream unchanged: the direct play of the file, or one copy of the video stream over HLS.
-The server describes it with what the stream signals, such as the source container, the sample entry and the codec string, and the description is the same for every client.
-An encode is never a candidate output (ADR 0061, proposed).
-_Avoid_: candidate (alone), proposal, probe
-
-**Candidate output answer**:
-What a client reports for one candidate output: an outcome of accepted, refused or unanswered, with a typed reason.
-Accepted means that the client's rule for its platform says that the player opens that exact stream.
-Unanswered is never a refusal.
-The server copies or direct-plays a source only when a capability entry accepts the stream and the client accepted the candidate output (ADR 0061, proposed).
-_Avoid_: verdict, test, capability
-
 **Viewer's limits**:
 The limits that bound a stream session's output apart from the client capability declaration: the picture box of the fixed quality that the viewer picked, and the maximum picture width, maximum picture height and maximum bitrate that the client sends.
 They bound every encode. An encode that Original reaches plays in Auto (ADR 0052).

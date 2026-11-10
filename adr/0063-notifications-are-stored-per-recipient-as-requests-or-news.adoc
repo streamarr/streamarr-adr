@@ -48,7 +48,7 @@ A Notification never holds what waits: its subject does, and every count of wait
 A Notification has one recipient Account, one kind and one subject.
 The kind says what happened.
 It fixes the Notification's nature, its recipients and what it carries.
-The subject is the record, or the set of records, that the Notification is about, such as one share offer, one library or a library's unmatched items.
+The subject is the record that the Notification is about, such as one share offer or one library.
 The subject is also the Notification's link target.
 
 * A Notification is not the source of truth for anything that waits.
@@ -132,35 +132,52 @@ A stored resolution would need a correct write on every path that decides, withd
 Every such path also publishes a change for open screens (see <<live-changes>>), but a missed publication costs only freshness: the next read is still right.
 Expiry has no path at all, and a stored resolution would need a writer for it that the server has never needed.
 
-=== One unread Notification per subject and recipient
+=== One unread Notification per kind, subject and recipient
 
-A recipient has at most one unread Notification about one subject.
-A new event about that subject updates the unread Notification in place, whatever its kind.
-The Notification keeps its identity and takes the new event's kind and time.
-An event of the same kind combines its facts with the stored ones, as the kind's row in the table below says, and an event of another kind replaces them.
+A recipient has at most one unread Notification of each kind about one subject.
+A new event of that kind about that subject updates the unread Notification in place.
+The Notification keeps its identity and takes the new event's time.
+The event combines its facts with the stored ones, as the kind's row in the table below says.
 The Notification stays unread and moves to the top of the list.
-When the recipient has no unread Notification about that subject, the event makes a new one.
+When the recipient has no unread Notification of that kind about that subject, the event makes a new one.
 A read Notification is history, and no later event changes it.
 
 For example, a scan of a library named Movies leaves 14 unmatched items, and each ServerAdmin gets "Movies: 14 titles need matching".
-A later scan that adds more unmatched items updates the same unread Notification, and its line shows the new number.
+A later scan that adds more unmatched items updates the same unread Notification, and its line shows the new number, such as 20.
+The ServerAdmin still has one Notification about it.
 After a ServerAdmin reads it, the next such scan makes a new Notification for that ServerAdmin.
 
-An event of another kind updates the unread Notification too.
-An Account that manages a Profile has an unread "Offer answered" when the Household that accepted the offer later ends the share.
-The end updates that Notification: it becomes "Share ended", and the Account sees one line about the share, not two.
-Its concrete type changes with its kind, as the GraphQL contract says.
+Different kinds of news about one subject sit side by side.
+An Account offers a Profile to a Household.
+Before the Account next looks, the Household accepts the offer, and a week later it ends the share.
+The Account then has two unread Notifications about the share, "Offer answered" and "Share ended", and the second does not replace the first.
+Only an event of a Notification's own kind updates it, so a Notification never changes its kind or its GraphQL type.
 
-Requests never take part in an update in place.
-A request's subject waits only once, so no later request shares its subject.
-News about a request's subject comes only after the subject stops waiting, when its requests already count as read, and every kind keeps that order.
-A waiting request is therefore the only unread Notification about its subject.
+Requests never update in place.
+A request's subject waits only once, and a newer proposal is a new subject, so no later event of a request's kind is about the same subject.
 
-PostgreSQL holds the rule with a unique index over the unread news of each recipient and subject, so two events at the same moment update one Notification.
-The index covers news alone, because a resolved request counts as read although no read time is stored for it.
+PostgreSQL holds the rule with a unique index over the unread news of each recipient, kind and subject, so two events at the same moment update one Notification.
+The index covers news alone, because requests never update in place, and a resolved request counts as read although no read time is stored for it.
 
-A kind whose news must not give way to another kind's news about the same record takes a subject of its own.
-The library kinds do: a finished scan is about the library, while the unmatched items that scans leave are a subject of their own, the library's unmatched items (see <<library-kinds>>).
+[[order-and-paging]]
+=== The list's order and paging
+
+The list holds the reader's Notifications, newest first.
+A Notification's time is the time of its latest event, `latestEventAt`, so a Notification that is updated in place moves to the top.
+Notifications with the same time are ordered by their id, in the same direction.
+
+The list uses the server's shared pagination (link:0014-protocol-agnostic-pagination.adoc[ADR 0014]) and all of its rules, and it adds no paging of its own.
+It is a `PagedList` under the shared `Pager`, ordered by `latestEventAt` descending, and it reads its rows in SQL through the shared jOOQ `Keyset` query.
+Its cursors are the shared position cursors of `PositionCursorCodec`: each holds a position, which is a time and an id, with the list's name and the Account as its scope, so it continues only that Account's list.
+A cursor that cannot continue the list fails with `INVALID_CURSOR`, as on every list.
+Its edges implement `OrderedEdge`, because the list publishes live changes, and its integration test extends the shared `PagedListContract`.
+
+A cursor holds a position, never a Notification.
+When the Notification that a cursor names has since moved to the top, no row is left at the cursor's position.
+The next page then starts where that Notification was, as ADR 0014 says for an item that has left a list.
+The moved Notification now sits above the cursor, so a later page does not show it again.
+A client places it at the top from its live change, by its edge's `orderKey`, and a list read again from the start shows it there.
+`markAllNotificationsRead` reads its cursor the same way, so a Notification that moved above that position stays unread.
 
 === Read and unread
 
@@ -190,14 +207,21 @@ It also stores when it was made, when its latest event happened, and when its re
 It stores the facts of its events that the subject does not keep: an offer's answer, which side ended a share, or a scan's figures.
 
 A Notification stores one name only: a sharing Notification keeps the Profile's name as it was at its latest event.
-The Household's side may read a Profile only while it is offered to the Household or available there (ADR 0024), yet its history of offers and ended shares must still say which Profile it was.
-So a reader who may view the Profile's administration reads the Profile's current name, and any other reader reads the kept name.
-The Household's side saw the kept name at that moment, so the copy tells that side nothing that ADR 0024 hides, and a later rename never reaches a Household that the Profile has left.
+It keeps the name alone, never the Profile's picture or kind.
+The Household's side sees a Profile's name, picture and kind, and the offerer's name, only while the offer is pending or the share is active (ADR 0024, as https://github.com/streamarr/streamarr-adr/pull/127[streamarr/streamarr-adr#127] amends it).
+Yet its history of offers and ended shares must still say which Profile it was.
+The kept name is a record of what the reader was told at that moment, not a read of the Profile.
+The Household's side saw that name then, so the copy tells that side nothing that ADR 0024 hides, and a later rename never reaches a Household that the Profile has left.
+Retention bounds the record: the name goes when its Notification goes.
+
+So a reader who may see the Profile now reads its current name.
+The offering side may at every status, and the Household's side may while the offer is pending or the share is active.
+Any other reader reads the kept name, and nothing in a Notification lets that reader read the Profile itself.
 
 Every other name in a line comes from the subject when the server reads it, under the reader's authority at that moment.
 For a share, these are the Household's name for the offering side and the offerer's display name for the Household's side, which streamarr-server#871 adds to `ProfileShare`.
 streamarr-server#871 reads the offerer's name through the share's reference to the offerer's Account, so a deleted Account leaves its name in no other Account's Notifications.
-A line leaves out a name that its reader may not read.
+A line leaves out a name that its reader may not read, such as the offerer's name for the Household's side once the offer or the share is over.
 
 From its subject and its facts, a Notification gives one line of text and a link target, and later an email.
 The server also writes that line in English, for a client that shows a type but handles it no further.
@@ -212,11 +236,11 @@ The server keeps 90 days of history by default.
 History is the news that its recipient read and the requests that resolved.
 The server deletes such a Notification once its latest event is older than the retention period.
 
-The server also deletes unread news that the guard hides from its recipient, once its latest event is older than the retention period.
+The server also deletes unread news that the guard hides from its recipient, once its latest event is older than the same retention period, 90 days by default.
 Such news can never be read or marked, so without this rule it would stay forever, and it would come back unread whenever the role returned.
 
 Unread news that the guard shows, and waiting requests, stay.
-News stays until it is read, and unread news stays few, because the noise rule allows one unread Notification for each subject.
+News stays until it is read, and unread news stays few, because the noise rule allows one unread Notification for each kind and subject.
 The subjects of today's requests all expire, so a waiting request always ends.
 
 A recurring scheduled task deletes old history and old hidden news once a day.
@@ -284,7 +308,7 @@ A ServerAdmin sees the subjects themselves.
 | The offer
 | The answer, accepted or rejected, and the Profile's name
 | A HouseholdAdmin or a ServerAdmin accepts or rejects the offer
-| Becomes "Share ended" when the accepted share ends while it is unread
+| Never updates, because an offer has one answer
 
 | Share ended
 | First build
@@ -293,7 +317,7 @@ A ServerAdmin sees the subjects themselves.
 | The share: the same `ProfileShare` after it was active
 | Which side ended it, and the Profile's name when it ended
 | `endProfileShare`, `administrativelyEndProfileShare`, and the operations that end a share on their way, such as an Account transfer
-| Never updates, because a share ends once and nothing follows
+| Never updates, because a share ends once
 
 | Invitation received
 | With Profile management
@@ -326,7 +350,7 @@ A ServerAdmin sees the subjects themselves.
 | Specified only
 | News
 | Every ServerAdmin
-| The library's unmatched items
+| The library
 | How many unmatched items the scans added since it was made; its line reads how many the library holds now
 | A finished scan that added items it could not match
 | A later such scan adds its count to the unread one
@@ -375,7 +399,8 @@ The Notification carries which side ended the share.
 
 The guard of the three sharing kinds is the share's read rule: the reader may view the Profile's administration or the target Household's administration.
 A target HouseholdAdmin passes it at every status, because the share is also the Household's record.
-While the Profile is not available in the Household, that HouseholdAdmin may not view the Profile's administration, so it reads the Profile's kept name (see <<what-it-carries>>).
+Passing the guard lets that HouseholdAdmin read the Notification and the share's own facts, never the Profile.
+Once the offer or the share is over, that HouseholdAdmin may no longer see the Profile (ADR 0024), so it reads the Profile's kept name, and its line names no offerer (see <<what-it-carries>>).
 
 ==== The Profile management kinds
 
@@ -407,9 +432,9 @@ They are not in the live schema, and a later decision builds them.
 Only a ServerAdmin can scan, refresh or fix a match, so every ServerAdmin receives them.
 Their guard is ServerAdmin authority, read live, as for every library administration read (ADR 0042).
 
-The scan kind's subject is the library.
-The unmatched kind's subject is the library's unmatched items, and its link target is the library under the `unmatched` filter.
-The two subjects differ because the noise rule keeps one unread Notification for each subject, and a scan's figures and the unmatched items that it left must not give way to each other.
+Both kinds take the library as their subject.
+The noise rule counts each kind on its own, so a ServerAdmin can have one unread Notification of each kind about one library, and neither replaces the other.
+The unmatched kind opens its library under the `unmatched` filter.
 
 `ScanEndedEvent` and `RefreshEndedEvent` carry only the library's id, and the server publishes them for every conclusion.
 The decision that builds these kinds adds the library operation's id to them, and the writer reads the conclusion and the figures from that library operation.
@@ -504,8 +529,8 @@ type ProfileShareOfferedNotification implements RequestNotification & Notificati
     """
     share: ProfileShare!
     """
-    The Profile's name for this recipient's line: its current name when the recipient may view the
-    Profile's administration, and otherwise its name when the offer was made.
+    The Profile's name for this recipient's line: its current name while the recipient may see the
+    Profile, and otherwise its name when the offer was made, as the recipient was told it then.
     """
     profileName: String!
 }
@@ -517,8 +542,8 @@ type ProfileShareAnsweredNotification implements Notification {
     # ...the fields of Notification...
     share: ProfileShare!
     """
-    The Profile's name for this recipient's line: its current name when the recipient may view the
-    Profile's administration, and otherwise its name when the offer was answered.
+    The Profile's name for this recipient's line: its current name while the recipient may see the
+    Profile, and otherwise its name when the offer was answered, as the recipient was told it then.
     """
     profileName: String!
     answer: ProfileShareAnswer!
@@ -534,8 +559,8 @@ type ProfileShareEndedNotification implements Notification {
     # ...the fields of Notification...
     share: ProfileShare!
     """
-    The Profile's name for this recipient's line: its current name when the recipient may view the
-    Profile's administration, and otherwise its name when the share ended.
+    The Profile's name for this recipient's line: its current name while the recipient may see the
+    Profile, and otherwise its name when the share ended, as the recipient was told it then.
     """
     profileName: String!
     endedBy: ProfileShareEndedBy!
@@ -687,15 +712,16 @@ union ChangeNotificationRetentionError = NotificationRetentionOutOfRangeError
   A Notification of another Account, or one that the guard hides, reads as `NotificationNotFoundError`.
 * ADR 0042 requires a selected Profile for every subscription field except Library status, and the active streams of ADR 0013 need a ServerAdmin.
   This decision amends ADR 0042: `notificationsChanged` needs an Account session that is not device-bound, with or without a selected Profile, because Notifications belong to the Account.
+  ADR 0042 also records the other such exception, the share changes of streamarr-server#871.
 * Every concrete type exists only for a kind that the server sends.
   The three sharing types are the first build.
   The two Profile management types join the schema with Profile management.
   The library kinds are specified only, live in this ADR alone, and have no type in the schema.
 * A new concrete type is an addition to the schema, but a deployed client cannot match a type that its generated `possibleTypes` lack.
   As for union members in ADR 0026, clients that know a new kind ship before the server sends it.
-* An update in place by an event of another kind keeps the Notification's id and changes its concrete type.
-  A normalized cache keys an object by its type and its id, as the clients' Apollo caches do, so the changed edge points the list at a new entry, and the old entry drops out of the list.
-* The list pages through the shared `Pager` (link:0014-protocol-agnostic-pagination.adoc[ADR 0014]) and implements `OrderedEdge`, because it publishes live changes.
+* A Notification keeps its id and its concrete type for its whole life, because only an event of its own kind updates it in place.
+  A client's normalized cache therefore updates the one entry, and the changed edge moves it in the list.
+* The list's order and paging are the server's shared ones (see <<order-and-paging>>).
   An update in place moves a Notification to the top of the list, as a newer last watched moves an item in Continue Watching.
 * Clients keep the list in their normalized cache (link:0048-clients-keep-live-lists-in-their-normalized-cache.adoc[ADR 0048]).
   The list is one list per Account; a Profile or Household switch resets the client's store as ADR 0042 requires, and the client reads the list again.
@@ -734,7 +760,7 @@ It uses the parts that the server already has:
 * *Writing:* a Notification writer listens inside the publisher's transaction.
   It works out the recipients, leaves out the Account that acted, and applies the noise rule to news with one `INSERT … ON CONFLICT … DO UPDATE` against the unique index, so a Notification commits with its event.
 * *Delivery:* after commit, a listener passes each change to the recipient's open operations through a `KeyedSubscriptionBroadcaster` keyed by Account id, as `watchStateChanged` is keyed by Profile id (ADR 0042).
-* *Paging:* a `PagedList` under the shared `Pager`, with its contract test (ADR 0014).
+* *Paging:* the server's shared pagination of ADR 0014, as <<order-and-paging>> sets out: a `PagedList` under `Pager`, read through `Keyset`, with `PositionCursorCodec` cursors, `OrderedEdge` edges and `PagedListContract`.
 * *Authorization:* Cedar decides each read and mark through actions of its own, which the device-bound guardrail forbids.
   The guard reuses each subject's existing read action, such as `viewProfileAdministration`, `viewHouseholdAdministration`, `viewManagerInvitations` and `viewLibraryAdministration` (ADR 0025).
   It decides them for the recipient Account from the Account's stored relationships, as the acceptance of an offer already rechecks its offerer.
@@ -768,24 +794,16 @@ The tests show that:
 * the guard decides from the recipient Account's relationships in PostgreSQL: it hides a Notification as soon as its reader loses the authority, even while the reader's token still names the old role, and shows it again when the authority returns;
 * a person who gains a role later gets no Notification for what was already waiting;
 * a request reads as decided, withdrawn or expired from its subject, for every recipient, with no write;
-* a recipient keeps one unread Notification per subject, also under two events at the same moment; an event of another kind takes the Notification over, and a request never takes part;
-* a Household's side reads the kept Profile name once the share has ended, and the offering side reads the current one;
-* marking all as read leaves a Notification that arrived after the client's cursor unread;
+* a recipient keeps one unread Notification per kind and subject, also under two events at the same moment; news of another kind about the same subject makes a Notification of its own, and a request never updates in place;
+* a Household's side reads the current Profile name while the offer is pending or the share is active, and the kept name alone, with no picture or kind, once the offer or the share is over; the offering side reads the current one;
+* the list passes the shared `PagedListContract`, newest `latestEventAt` first, and a page that continues from a Notification that has since moved to the top starts where that Notification was;
+* marking all as read leaves a Notification that arrived after the client's cursor, or moved above it, unread;
 * the unread count gives the soonest expiry among the requests that it counts;
 * retention deletes history and hidden news older than the period, and keeps unread news that the guard shows;
 * deleting a subject, a record that a subject names, or a recipient deletes the Notifications;
 * a device-bound session gets `FORBIDDEN` from every Notification read, mark and subscription;
 * each path that changes a share pushes a change that carries the edge and the unread Notifications that a fresh query returns;
 * the two library kinds, defined only in test code, fit the general model: the same writer, noise rule, guard and retention handle them without a change.
-
-[[open-questions]]
-=== Open questions
-
-The question below remains open, and it does not change what this ADR decides.
-
-* The noise rule counts one unread Notification per subject and recipient, as agreed.
-  Counting it per kind instead would keep "Offer answered" and "Share ended" as two unread lines about one share, would let both library kinds take the library as their subject, and would never change a Notification's concrete type.
-  Whether to count it per kind stays open until it is agreed.
 
 === Explicitly deferred
 
@@ -814,10 +832,12 @@ The question below remains open, and it does not change what this ADR decides.
   This is the same bounded staleness that ADR 0042 accepts.
 * An expired request leaves the unread count only when the count is read again, and the count says when that is.
 * Deleting a Profile, a Household or a library sends no news about it.
-* A Notification can change its concrete type in an update in place, and clients replace its entry in the list.
+* An accepted share that later ends leaves its offering side two lines, one for the answer and one for the end, because different kinds of news about one subject sit side by side.
+* A Notification never changes its kind or its concrete type.
 * Each new kind adds a concrete type, which clients learn before the server sends it.
+* The list adds no paging of its own, so it keeps every rule of the shared pagination, and a change to those rules reaches it with every other list.
 * The server gains a retention setting and a daily task.
-* `notificationsChanged` is the first subscription that every Account may open without a selected Profile.
+* `notificationsChanged`, like the share changes of streamarr-server#871, is a subscription that every Account may open without a selected Profile, and ADR 0042 records both exceptions.
 
 == Rejected Alternatives
 
@@ -828,13 +848,14 @@ The question below remains open, and it does not change what this ADR decides.
 * Keep a request unread for each recipient until that recipient answers — the other recipients would see a dot for something already settled.
 * Key "Offer waiting" on the Profile and the Household, and update it when an offer is replaced — the offer is what waits and what a HouseholdAdmin decides, and share codes already make each new offer one that the Household asked for.
 * Decide the guard from the reader's access token — a demoted HouseholdAdmin would keep seeing the Household's requests until the token expired.
+* One unread Notification per subject across all kinds — it would replace a step of what happened with the next one: an unread "Offer answered" would become "Share ended", and the Account would never learn that the share was accepted.
 * A new Notification for every event, with no update in place — a daily scan would leave one line a day for each library.
 * Replace the stored figures when a later scan updates a scan's Notification — a quiet scan would overwrite the figures of one that changed the library.
 * One Notification for each unmatched item — the first scan of a new library could leave hundreds of lines.
 * Store the library's unmatched count on the Notification — the number would go stale as soon as a ServerAdmin fixed a match.
 * Unmatched items as a request — an unmatched item can be correct, nobody waits for it, and the request would never resolve or would ask again after every scan.
 * Copy every name into the Notification — the copy would show an old name after a rename and keep a deleted Account's name in other Accounts' Notifications.
-* Read the Profile's current name for the Household's side at every status — it would widen ADR 0024, which lets that side read a Profile only while it is offered there or available there.
+* Read the Profile's current name for the Household's side at every status — it would widen ADR 0024, which lets that side see a Profile only while the offer is pending or the share is active.
 * Keep a Notification after its subject is deleted — it has nothing to show or link to, and the guard would hide it from everyone.
 * Let retention delete unread news that the guard shows — news stays until it is read, and the noise rule already keeps unread news few.
 * Delete news as soon as the guard hides it — a reader whose authority returns within the period would lose news about what it may see again.

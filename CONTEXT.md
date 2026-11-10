@@ -736,7 +736,7 @@ A stored note to one Account that something happened to a subject, such as a sha
 Each recipient Account gets its own copy when it happens, with its own read state.
 A Notification is either a request, which waits for a decision and resolves for every recipient once anyone decides it or it expires or is withdrawn, or news, which needs no decision and stays unread until its recipient reads it.
 A Notification never holds what waits: an offer or an invitation waits on its own, and the page that lists it counts it (ADR 0063).
-A recipient has at most one unread Notification about one subject, and later news about that subject updates the unread news in place.
+A recipient has at most one unread Notification of each kind about one subject, and a later event of that kind updates it in place; news of different kinds about one subject sits side by side.
 _Avoid_: alert, inbox (neither the list of Notifications nor a list of work such as the numbering review is an inbox), message (no person writes one; the `message` field is the server's English line, as on a `MutationError`), activity feed, event (a subscription event updates an open screen and is stored nowhere), task (a portion of a job's work)
 
 **Request**:
@@ -748,4 +748,4 @@ _Avoid_: task (a portion of a job's work), action item, to-do, invitation (a Pro
 **News**:
 A Notification that needs no decision, such as an offer's answer or the end of a share.
 News stays unread until its recipient marks it read (ADR 0063).
-_Avoid_: alert, update (what a later event does to an unread Notification), announcement
+_Avoid_: alert, update (what a later event of the same kind does to an unread Notification), announcement

@@ -209,6 +209,7 @@ The unread count counts the unread Notifications that the guard shows the reader
 A Notification stores its recipient, its kind and a reference to its subject.
 It also stores when it was made, when its latest event happened, and when its recipient marked it read.
 It stores the facts of its events that the subject does not keep: an offer's answer, which side ended a share, or a scan's figures.
+A sharing Notification also stores the side that it was addressed to, which its guard reads (see <<sharing-kinds>>).
 
 A Notification stores one name only: a sharing Notification keeps the Profile's name as it was at its latest event.
 The kept name is for a reader who may no longer see the Profile.
@@ -311,7 +312,7 @@ A ServerAdmin sees the subjects themselves.
 | Request
 | The target Household's HouseholdAdmins
 | The offer: one `ProfileShare` while it is pending
-| The Profile's name when the offer was made
+| The Profile's name when the offer was made, and the side it was addressed to: the Household's side
 | Every offer, including one that replaces an older offer and an Account invitation's automatic re-offer
 | Resolves when the offer stops waiting: accepted or rejected (decided); canceled, replaced or invalidated (withdrawn); or expired. Never updates in place
 
@@ -320,7 +321,7 @@ A ServerAdmin sees the subjects themselves.
 | News
 | The offering side: the Profile's ProfileManagers and the Account that made the offer
 | The offer
-| The answer, accepted or rejected, and the Profile's name
+| The answer, accepted or rejected, the Profile's name, and the side it was addressed to: the offering side
 | A HouseholdAdmin or a ServerAdmin accepts or rejects the offer
 | Never updates, because an offer has one answer
 
@@ -329,7 +330,7 @@ A ServerAdmin sees the subjects themselves.
 | News
 | The side that did not end the share, or both sides when a ServerAdmin or another operation ended it
 | The share: the same `ProfileShare` after it was active
-| Which side ended it, and the Profile's name when it ended
+| Which side ended it, the side it was addressed to, and the Profile's name when it ended
 | `endProfileShare`, `administrativelyEndProfileShare`, and the operations that end a share on their way, such as an Account transfer
 | Never updates, because a share ends once
 
@@ -421,27 +422,38 @@ Who ended the share decides who is told:
 
 The Notification carries which side ended the share.
 
+Every sharing Notification also stores the side that it was addressed to: the offering side or the Household's side.
+It is the side that the kind tells, even when the recipient also stands on the other side: the Household's side for _Offer waiting_, the offering side for _Offer answered_, and for _Share ended_ the side that did not end the share, or the recipient's own side when both sides are told.
+When both sides are told, an Account that stands on both still receives one copy, and that copy is addressed to the Household's side, the side for which such an Account ends a share.
+The server sets the side when it writes the Notification, and nothing changes it later, an update in place included.
+
 The three sharing kinds have one guard, and it is a rule of its own.
 A reader passes it in either of two ways:
 
 * The reader may read the Notification's share now, by the rule that ADR 0024 gives for reading a share.
   A ProfileManager of the share's Profile, or a ServerAdmin, may read it at every status.
   A HouseholdAdmin of the share's target Household may read it while the offer is pending and not expired or the share is active.
-* The reader is now a HouseholdAdmin of the share's target Household, and the Notification is of a kind that goes to the Household's side: the _Offer waiting_ request, made with the offer, or the _Share ended_ news, made by the change that ended the share.
+* The Notification was addressed to the Household's side, and the reader is now a HouseholdAdmin of the share's target Household.
+  The stored side decides this way, and the kind never does.
 
 No other relationship passes.
 An Account that administers another Household that hosts the Profile may view the Profile's administration, but that does not let it pass for a share into a Household that it does not administer.
-An Account that made the offer and no longer manages the Profile passes only as a ServerAdmin or as a HouseholdAdmin of the target Household, by the rule above.
+An Account that made the offer and no longer manages the Profile passes only as a ServerAdmin or as a HouseholdAdmin of the target Household, by the two ways above.
 
 The second way keeps the Household's side its own history.
 A HouseholdAdmin of the target Household receives the change that ends the offer or the share, and no change of that share after it (ADR 0042).
-Its Notifications of the Household's side come from changes that it received, so it keeps reading them after the offer or the share is over, for as long as it administers that Household and the Notification is kept.
+Its Notifications addressed to the Household's side come from changes that it received, so it keeps reading them after the offer or the share is over, for as long as it administers that Household and the Notification is kept.
 That is not permission to read the share: the share queries still answer that HouseholdAdmin as if the share did not exist (ADR 0024).
 
-Inside such a Notification, the `share` field shows what the ending change showed that reader: that change, with every detail hidden that the reader may no longer see (ADR 0024, ADR 0042).
+The kind cannot decide the second way, because _Share ended_ news also goes to the offering side.
+It can reach an Account that may no longer read the share, such as an offerer who stopped managing the Profile before the Household ended the share, and its kept name can then be one that the Account was never allowed to see.
+When that Account later becomes a HouseholdAdmin of the target Household, it still reads nothing of that Notification, because the Notification was addressed to the offering side.
+It passes again only by the first way, when it may read the share again.
+
+When a reader passes by the second way alone, the `share` field shows what the ending change showed that reader: that change, with every detail hidden that the reader may no longer see (ADR 0024, ADR 0042).
 It shows the share's own facts as the ending change left them, such as its status and when it ended, and no Profile and no offerer.
 The line reads the Profile's kept name from the Notification (see <<what-it-carries>>).
-The server resolves the field under the Notification's guard, with that reduced view, and never by asking the share queries' rule, which would answer that the share does not exist.
+The server resolves the field under the Notification's guard, by the same two ways and with that reduced view, and never by asking the share queries' rule, which would answer that the share does not exist.
 The share's own field rules already hide the Profile and the offerer from that reader, so the field shows nothing that the ending change did not.
 
 ==== The Profile management kinds
@@ -617,8 +629,9 @@ type ProfileShareEndedNotification implements Notification {
     # ...the fields of Notification...
     """
     The share, resolved under this Notification's guard, never through the share queries. Its
-    fields follow the share's own field rules, so the target Household's HouseholdAdmins see the
-    share's own facts, such as its status and when it ended, and no Profile and no offerer.
+    fields follow the share's own field rules, so a reader who passes the guard only as a
+    HouseholdAdmin of the target Household sees the share's own facts, such as its status and
+    when it ended, and no Profile and no offerer.
     """
     share: ProfileShare!
     """
@@ -808,11 +821,11 @@ It uses the parts that the server already has:
 * *Events:* the services that change a subject publish application events (ADR 0010).
   For shares, this is `ProfileShareChangedEvent`, which `ProfileShareLifecycle` publishes for every write of a share, the expiry sweep's included; for the library kinds later, it is `ScanEndedEvent` and `RefreshEndedEvent` with the library operation's id added.
 * *Writing:* a Notification writer listens inside the publisher's transaction.
-  It works out the recipients, leaves out the Account that acted, and applies the noise rule to news with one `INSERT … ON CONFLICT … DO UPDATE` against the unique index, so a Notification commits with its event.
+  It works out the recipients, leaves out the Account that acted, stores the side that each sharing Notification was addressed to, and applies the noise rule to news with one `INSERT … ON CONFLICT … DO UPDATE` against the unique index, so a Notification commits with its event.
 * *Delivery:* after commit, a listener passes each change to the recipient's open operations through a `KeyedSubscriptionBroadcaster` keyed by Account id, as `watchStateChanged` is keyed by Profile id (ADR 0042).
 * *Paging:* the server's shared pagination of ADR 0014, as <<order-and-paging>> sets out: a `PagedList` under `Pager`, read through `Keyset`, with `PositionCursorCodec` cursors, `OrderedEdge` edges and `PagedListContract`.
 * *Authorization:* Cedar decides each read and mark through actions of its own, which the device-bound guardrail forbids.
-  For the sharing kinds, a Cedar policy of its own holds their guard (see <<sharing-kinds>>), from the Notification's kind and the share's status, expiry, Profile and target Household.
+  For the sharing kinds, a Cedar policy of its own holds their guard (see <<sharing-kinds>>), from the side that the Notification was addressed to, never its kind, and from the share's status, expiry, Profile and target Household.
   It never asks the share queries' decision, which hides a share that is over from the target Household's HouseholdAdmins, and `viewProfileAdministration` never decides it.
   For the invitation kinds and the library kinds, the guard reuses the subject's read actions, such as `viewManagerInvitations` and `viewLibraryAdministration` (ADR 0025).
   Cedar decides each guard for the recipient Account from the Account's stored relationships, as the acceptance of an offer already rechecks its offerer.
@@ -849,6 +862,8 @@ The tests show that:
 * the guard decides from the recipient Account's relationships in PostgreSQL: it hides a Notification as soon as its reader loses the authority, even while the reader's token still names the old role, and shows it again when the authority returns;
 * the guard of a sharing Notification asks about its own share: an Account that offered a Profile to one Household, then stopped managing the Profile, and still administers another Household that hosts it, reads nothing more about the first share, in the list or the count, and receives no live change of it, and the query's read filter leaves it out the same way;
 * a HouseholdAdmin of a share's target Household with no other authority, told that a ProfileManager ended the share, still reads that _Share ended_ news after the share is over, in the list and the count, and its share shows its status and when it ended, with no Profile and no offerer; the query's read filter admits it, and the share query for the same share answers not found;
+* each sharing Notification keeps the side that it was addressed to, and an Account on both sides of a share that a ServerAdmin ends receives one _Share ended_ news, addressed to the Household's side;
+* an Account told as the offering side that no longer may read the share, such as an offerer who stopped managing the Profile before the Household ended the share, still reads nothing of that Notification after it becomes a HouseholdAdmin of the target Household, in the list, the count or a live change, and the query's read filter leaves it out the same way;
 * a person who gains a role later gets no Notification for what was already waiting;
 * a request reads as decided, withdrawn or expired from its subject, for every recipient, with no write to the Notification, and it reads as expired from its offer's expiry time on, before the sweep stores the expiry;
 * a recipient keeps one unread Notification per kind and subject, also under two events at the same moment; news of another kind about the same subject makes a Notification of its own, and a request never updates in place;
@@ -889,7 +904,7 @@ The tests show that:
 * The unread count makes one guard decision for each unread Notification.
   The noise rule, the resolution of requests and the retention of hidden news keep that set small; a count that outgrows point decisions reopens ADR 0025's deferred partial evaluation.
   Before those decisions, the list and the count leave out, in the query itself, the Notifications that no guard could show the reader, so a person who lost access to many shares does not pay for each of them on every page.
-  That filter states the sharing guard a second time, beside the Cedar policy, and it follows the same rule (see <<sharing-kinds>>): it admits a HouseholdAdmin of the share's target Household for the Notifications of the Household's side after the offer or the share is over, and never a HouseholdAdmin of another Household that hosts the Profile.
+  That filter states the sharing guard a second time, beside the Cedar policy, and it follows the same rule (see <<sharing-kinds>>): after the offer or the share is over, it admits a HouseholdAdmin of the share's target Household only for the Notifications addressed to the Household's side, never for one addressed to the offering side, and never a HouseholdAdmin of another Household that hosts the Profile.
   A test must show that it admits every Account the policies allow, and the two change together.
 * An open list can keep showing a Notification that the guard now hides until the list is read again, because live changes follow Notifications, not relationships.
   This is the same bounded staleness that ADR 0042 accepts.
@@ -915,6 +930,7 @@ The tests show that:
 * Decide the guard from the reader's access token — a demoted HouseholdAdmin would keep seeing the Household's requests until the token expired.
 * Guard a sharing Notification with permission to view the Profile's administration — a HouseholdAdmin of every Household that hosts the Profile has it, so an Account that offered the Profile to another Household and stopped managing it would keep reading and receiving news of that share.
 * Guard a sharing Notification with the share queries' decision — those queries hide a share that is over from the target Household's HouseholdAdmins, so they would lose the _Share ended_ news that the end of the share made for them.
+* Let the kind decide which sharing Notifications a HouseholdAdmin of the target Household keeps after the offer or the share is over — _Share ended_ also goes to the offering side, so an Account told as that side, which later became a HouseholdAdmin of the target Household, would read news that was never the Household's side's, with a Profile name kept after it lost the right to see the Profile.
 * One unread Notification per subject across all kinds — it would replace a step of what happened with the next one: an unread "Offer answered" would become "Share ended", and the Account would never learn that the share was accepted.
 * A new Notification for every event, with no update in place — a daily scan would leave one line a day for each library.
 * Replace the stored figures when a later scan updates a scan's Notification — a quiet scan would overwrite the figures of one that changed the library.

@@ -234,6 +234,7 @@ The server sends no URL: each client maps the subject to its own screen, and a l
 
 A Notification never carries a secret, such as an invitation code, a share code or a pairing code.
 
+[[retention]]
 === Retention
 
 The server keeps 90 days of history by default.
@@ -249,6 +250,14 @@ The subjects of today's requests all expire, so a waiting request always ends.
 
 A recurring scheduled task deletes old history and old hidden news once a day.
 It decides the guard for the recipient of each unread candidate, as a read does, and it keeps a candidate whose decision fails.
+It never treats a disabled Account as one that may not read: it keeps a disabled recipient's unread news until the Account is enabled again, and the ordinary rule applies from then on.
+
+The task works a batch at a time: it reads its candidates, decides their guards, and then deletes them by id.
+Each delete repeats in its `WHERE` the row's own conditions: for hidden news, that the row is still unread news and that its latest event is still older than the retention period.
+An event that updates such news in place between the decision and the delete gives it a new latest event, so the delete keeps it.
+
+The delete does not decide the guard again, and that is an accepted limit: hidden news is lost only when its recipient regains the right to read it between the two statements of the batch that holds it.
+The sweep runs on a fixed schedule, the most that is lost is unread news already older than the retention period, and no lock is taken for it.
 
 The retention period is a server-wide setting.
 A ServerAdmin reads and changes it within the bounds that the setting reports, as with the idle segment retention setting.
@@ -265,6 +274,7 @@ A ServerAdmin reads and changes it within the bounds that the setting reports, a
 * *An Account is disabled:* nothing changes for its Notifications.
   The Account keeps receiving copies.
   Its open sockets close when their access tokens expire (ADR 0042), and it cannot sign in to read them until it is enabled again (ADR 0024).
+  Retention keeps its unread news meanwhile (see <<retention>>).
 * *An offer is canceled, replaced or invalidated:* its requests read as withdrawn.
   The offering side gets no news, because its own side or the server withdrew the offer.
 * *An offer expires:* its requests read as expired, and nobody gets news.
@@ -809,7 +819,8 @@ It uses the parts that the server already has:
   The `share` field of a sharing Notification loads the share by the Notification's reference under that guard, and the share's own field rules then decide each of its fields.
 * *Payloads:* the sealed service outcomes and the shared payload helpers of ADR 0026.
 * *Retention:* a sweep on a fixed schedule under the system actor, like the sweeps that expire share offers and delete old credential attempts, and a setting shaped like the idle segment retention setting, kept in the same server settings.
-  The sweep deletes by id, a batch at a time, so two servers that run it together delete nothing twice and nothing they should keep.
+  The sweep deletes by id, a batch at a time, and each delete repeats the row's own conditions in its `WHERE` (see <<retention>>).
+  Two servers that run it together therefore delete nothing twice, and neither deletes news that an event updated after it decided.
 
 === Later channels
 
@@ -847,7 +858,8 @@ The tests show that:
 * `markNotificationsRead` marks only the caller's own unread Notifications among the ids it receives, and skips an id that does not exist, another Account's, a hidden one and a read one alike, with no error;
 * a Notification whose transaction commits after the page was read stays unread when the page's ids are marked, even when its time sorts below the rows that the page showed;
 * a call to `markNotificationsRead` that changes at least one row pushes one live change, and a call that changes nothing pushes none;
-* retention deletes history and hidden news older than the period, and keeps unread news that the guard shows;
+* retention deletes history and hidden news older than the period, and keeps unread news that the guard shows and a disabled recipient's unread news;
+* retention keeps hidden news that an event updates in place between the sweep's decision and its delete, with the new event's time;
 * deleting a subject, a record that a subject names, or a recipient deletes the Notifications;
 * a device-bound session gets `FORBIDDEN` from every Notification read, mark and subscription;
 * each path that changes a share, the expiry sweep included, pushes a change that carries the edge and the unread count that a fresh query returns;
@@ -914,6 +926,7 @@ The tests show that:
 * Keep a Notification after its subject is deleted — it has nothing to show or link to, and the guard would hide it from everyone.
 * Let retention delete unread news that the guard shows — news stays until it is read, and the noise rule already keeps unread news few.
 * Delete news as soon as the guard hides it — a reader whose authority returns within the period would lose news about what it may see again.
+* Lock the recipients' relationships while a retention batch deletes — a role change would wait on the sweep, only to save news that was already older than the retention period and that the guard hid until that moment.
 * Push an offer's expiry at the very moment its time runs out — it would need a timer for each offer, while the sweep pushes it within about a minute and the offer reads as expired in between.
 * Mark Notifications read when the list opens — the dot would clear for lines that the reader never looked at.
 * Mark read every unread Notification — it would mark read a Notification that arrived while the reader looked at the list.

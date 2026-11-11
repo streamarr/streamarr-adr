@@ -75,6 +75,7 @@ _Avoid_: metadata for technical facts, probe metadata
 **Probe report**:
 Everything that a worker sends back for one probe attempt.
 A probe report always holds the result.
+A probe attempt that the server canceled has no probe report.
 A probe report holds the keyframe positions only when the probe found the keyframe positions and their number is within the server's limit.
 The same rule applies to the measurement.
 The worker sends each probe report in a call of its own, never on the worker session (ADR 0062).

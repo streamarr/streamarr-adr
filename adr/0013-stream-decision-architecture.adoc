@@ -71,8 +71,13 @@ An amendment of 2026-11-11 records which encodes keep 10 bits or a PQ or HLG ran
 Until this amendment, no ADR recorded that rule, and four ADRs still said that every encode is 8-bit SDR.
 Issue https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397] decided the rule.
 https://github.com/streamarr/streamarr-server/pull/809[streamarr/streamarr-server#809], https://github.com/streamarr/streamarr-server/pull/813[streamarr/streamarr-server#813], https://github.com/streamarr/streamarr-server/pull/817[streamarr/streamarr-server#817], https://github.com/streamarr/streamarr-server/pull/822[streamarr/streamarr-server#822], https://github.com/streamarr/streamarr-server/pull/829[streamarr/streamarr-server#829], https://github.com/streamarr/streamarr-server/pull/830[streamarr/streamarr-server#830], https://github.com/streamarr/streamarr-server/pull/831[streamarr/streamarr-server#831] and https://github.com/streamarr/streamarr-transcode-worker/pull/168[streamarr/streamarr-transcode-worker#168] built it.
-Those pull requests also built behavior that no issue or ADR decided.
-<<encode-range>> lists that behavior apart from the decisions, as built and not as decided.
+Those pull requests also built behavior that no issue or ADR had decided.
+The maintainer decided each of those points on 2026-11-11, and <<encode-range>> states them as decisions.
+One point was a defect: after a hardware encoder failed, a PQ encode could continue as 8-bit SDR with no format error.
+The software continuation now keeps the range and the bit depth of the failed encode (<<hardware-failure-range>>).
+Draft https://github.com/streamarr/streamarr-server/pull/913[streamarr/streamarr-server#913] builds that rule.
+The other points stand as the server on `main` builds them.
+Draft https://github.com/streamarr/streamarr-server/pull/911[streamarr/streamarr-server#911] adds the tests that pin a PQ or HLG encode before an SDR encode of a codec family that a worker encodes in hardware.
 The same amendment records a decision of 2026-11-11 that is not built yet.
 In Auto, the lower variants beside a copy of an HDR, 10-bit or Dolby Vision source keep the source's range and bit depth (<<lower-variant-range>>).
 Draft https://github.com/streamarr/streamarr-server/pull/759[streamarr/streamarr-server#759] is being changed to build that decision.
@@ -817,60 +822,95 @@ An H.264 encode is therefore always 8-bit SDR.
 Each worker lists, for each encoder, which of four things passed: 10 bits, PQ, HLG, and the reshape of Dolby Vision into PQ.
 A PQ encode of a Dolby Vision source with no compatible base needs both PQ and the reshape.
 The server sends the encode only to a worker whose encoder lists everything that the output needs.
+Only an encoder on a worker that can take the encode now counts.
+While the only worker whose encoder lists PQ is busy, the server plans an 8-bit SDR encode on an idle worker.
+A worker can take an encode when it has a free playback slot.
+Once encoder headroom replaces playback slots, the headroom rules of link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] decide instead.
 
 When no such output meets every condition, the encode is 8-bit SDR.
 A client that declares neither PQ nor the source's Dolby Vision profile therefore receives an SDR encode of a profile 5 or profile 10.0 source.
+An SDR encode of a source whose compatible base is PQ, HLG or none is always 8-bit, even in a codec profile that holds 10 bits.
 
-At the same frame rate, a PQ, HLG or 10-bit SDR encode comes before an H.264 encode, although the codec preference ranks H.264 before HEVC and AV1 in software (link:0009-h264-plus-av1-codec-strategy.adoc[ADR 0009]).
-H.264 holds neither an HDR range nor 10 bits.
-Without this order, the server would encode 8-bit SDR H.264 for every client that plays H.264, whenever no worker encodes HEVC or AV1 in hardware.
+Three rules order the encodes that meet these conditions, ahead of the codec preference of link:0009-h264-plus-av1-codec-strategy.adoc[ADR 0009]:
+
+. The frame rate comes before the range and the bit depth, as it comes before the codec preference (ADR 0049).
+A client that plays a 60 fps source's range or bit depth only at 30 fps receives an 8-bit SDR encode at 60 fps.
+. At the same frame rate, a PQ or HLG encode comes before every SDR encode.
+It comes before an H.264 encode, although the codec preference ranks H.264 before HEVC and AV1 in software.
+It also comes before an SDR encode of a codec family that a worker encodes in hardware, even when the PQ or HLG encode runs on a software encoder.
+A software encoder that lists PQ therefore comes before a hardware encoder that does not, when that hardware encoder writes another codec family or runs on another worker.
+The rule reads the one encoder that each worker lists for a codec family.
+It does not reach a software encoder on a worker that lists a hardware encoder for the same codec family, and <<explicitly-deferred>> leaves that case open.
+. At the same frame rate, a 10-bit SDR encode comes before an 8-bit H.264 encode, and before no other 8-bit encode.
+An 8-bit encode in a codec family that a worker encodes in hardware keeps its place before a 10-bit SDR encode in a codec family that the codec preference ranks later.
+
+Where these rules do not order two encodes, the codec preference decides.
+Between two PQ encodes, a codec family that a worker encodes in hardware therefore still comes first.
+The second rule changes no capacity rule.
+A PQ or HLG encode on a software encoder runs only on a worker that can take it, and ADR 0044's headroom rules apply to it as to every other encode.
+While no worker whose encoder lists the range can take the encode, the 8-bit SDR encode of the hardware codec family plays.
 
 A PQ encode writes the static HDR metadata of HDR10.
 The values come from stored probe facts, never from the frames at which a job attempt starts.
 Every job attempt of a variant therefore writes the same values.
+A PQ encode takes the source's mastering display and the source's content light level, each on its own.
+When the source has no content light level, the encode takes the content light level that the probe read from the source's RPUs (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]).
+When the source has no mastering display, the encode writes a P3 D65 display with a maximum of 1000 cd/m² and a minimum of 0.0001 cd/m².
+When no content light level is left, the encode writes 0, which means unknown.
+An HLG encode writes no static HDR metadata.
 No encode writes HDR10+ or Dolby Vision.
 
 A failed copy does not rule out an HDR encode.
 After a format error during an HDR copy, the encode that follows keeps the source's range when the conditions above hold (link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052]).
 In Auto, a format error during a PQ or HLG encode makes the next format attempt an SDR encode, within the playback session's format-attempt budget.
-A fixed quality never changes its encode's range after a format error.
-A format error during a fixed quality's encode ends playback with the typed terminal error (ADR 0052).
-
-The server on `main` also behaves as follows.
-The pull requests of https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397] built these points, and no issue or ADR decided them.
-This ADR records them as built behavior, not as decisions:
-
-* The frame rate comes before the range and the bit depth, as it comes before the codec preference (ADR 0049).
-A client that plays a 60 fps source's range or bit depth only at 30 fps receives an 8-bit SDR encode at 60 fps.
-* A PQ or HLG encode also comes before an SDR encode in a codec family that a worker encodes in hardware.
-A software encoder that lists PQ therefore replaces a hardware encoder that does not, although ADR 0009 ranks the hardware codec family first.
-* An SDR encode of a source whose compatible base is PQ, HLG or none is always 8-bit, even in a codec profile that holds 10 bits.
-* A 10-bit SDR encode comes before no 8-bit encode other than H.264's.
-An 8-bit encode in a codec family that a worker encodes in hardware keeps its place before a 10-bit SDR encode in a codec family that the codec preference ranks later (ADR 0009).
-* A PQ encode takes the source's mastering display and the source's content light level, each on its own.
-When the source has no content light level, the encode takes the content light level that the probe read from the source's RPUs (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]).
-When the source has no mastering display, the encode writes a P3 D65 display with a maximum of 1000 cd/m² and a minimum of 0.0001 cd/m².
-When no content light level is left, the encode writes 0, which means unknown.
-An HLG encode writes no static HDR metadata.
-* After a format error during a PQ, HLG or 10-bit SDR encode, that range and bit depth stay out of every later format attempt of the playback session, in every codec family.
+After a format error during a PQ, HLG or 10-bit SDR encode, that range and bit depth stay out of every later format attempt of the playback session, in every codec family.
 The same codec family can still encode 8-bit SDR.
 After a format error during an 8-bit SDR encode, the codec family stays out instead.
-* When a hardware encoder backend fails and the stream continues on the software encoder of the same codec family (link:0044-encoder-headroom-and-the-preset-scale.adoc#decision-hardware-failure[ADR 0044]), the server plans the range and the bit depth again from the software encoders.
-A PQ encode then continues as 8-bit SDR when no software encoder of that codec family lists PQ.
-No format error precedes that change, and it happens in every playback choice, a fixed quality with HDR chosen included.
-* Only an encoder on a worker that can take the encode now counts.
-While the only worker whose encoder lists PQ is busy, the server plans an 8-bit SDR encode on an idle worker.
-* The switch from Auto to a fixed quality keeps the picture through the HDR choice, with no new field in the contract.
-The server's contract asks the client to send the range that plays as the HDR choice of the fixed quality's request.
-https://github.com/streamarr/streamarr-web/issues/29[streamarr/streamarr-web#29] and https://github.com/streamarr/streamarr-apple/issues/60[streamarr/streamarr-apple#60] own the clients' half.
+A fixed quality never changes its encode's range after a format error.
+A format error during a fixed quality's encode ends playback with the typed terminal error (ADR 0052).
+<<hardware-failure-range>> decides what an encode keeps after its hardware encoder fails.
 
 *Why:* A 10-bit source that is reduced to 8 bits shows color bands.
 Before this rule, HDR reached a client only as a copy, so a client with an HDR display saw SDR whenever the server encoded.
 Almost no device decodes 10-bit H.264, so H.264 stays 8-bit SDR.
+Without the order before H.264, the server would encode 8-bit SDR H.264 for every client that plays H.264, whenever no worker encodes HEVC or AV1 in hardware.
+A PQ or HLG encode comes before a hardware codec family's SDR encode to keep a TV in its HDR mode as long as possible.
+Without that order, a hardware encoder that writes only 8-bit SDR would give every HDR source an SDR encode, although a software encoder of another codec family or another worker could keep the range.
 An older worker, and an encoder that did not pass its test encode, list no such output, so neither receives an encode that it cannot write.
 Values from stored facts are the same in every job attempt, and link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] requires a variant's initialization segment to stay identical across job attempts.
 In Auto, an SDR picture that plays is better than an error, so Auto gives HDR up within its budget.
 A fixed quality with HDR chosen is a manual choice, and the server never silently replaces a manual choice.
+
+[[hardware-failure-range]]
+=== A software continuation keeps the range and the bit depth of the encode whose hardware encoder failed
+
+When a hardware encoder backend fails during a stream, the server continues the variant on a software encoder of the same codec family (link:0044-encoder-headroom-and-the-preset-scale.adoc#decision-hardware-failure[ADR 0044]).
+That software continuation keeps the range and the bit depth of the failed encode.
+It runs only on a worker that can take the encode and whose software encoder of that codec family lists everything that the output needs (<<encode-range>>).
+Every connected worker counts, not only the worker whose hardware encoder failed.
+The continuation follows no format error, and it counts no format attempt.
+An 8-bit SDR encode continues as 8-bit SDR, even when the software encoder lists PQ and the source is HDR.
+
+When no such worker exists for a PQ, HLG or 10-bit SDR encode, the playback choice decides:
+
+* In Auto, the stream changes format as it does after a format error during that encode (<<encode-range>>).
+The next format attempt counts against the playback session's format-attempt budget, and the failed range and bit depth stay out of the rest of the playback session.
+That format attempt is an ordinary one, so it can use another codec family or another worker's hardware encoder.
+* In a fixed quality, playback ends and the playback session reports the failure.
+A fixed quality never changes its range or its bit depth silently.
+
+When no worker can take the software continuation of an 8-bit SDR encode, the stream session fails, as ADR 0044 decides.
+
+Before this decision, the server planned the range and the bit depth again from the software encoders.
+A PQ encode then continued as 8-bit SDR when no software encoder of the codec family listed PQ, and an 8-bit SDR encode of an HDR source could continue as PQ.
+No format error preceded either change, and both happened in every playback choice, a fixed quality with HDR chosen included.
+On 2026-11-11 the maintainer decided that this was a defect.
+Draft https://github.com/streamarr/streamarr-server/pull/913[streamarr/streamarr-server#913] builds the rule of this section, and the server on `main` keeps the defect until that pull request merges.
+
+*Why:* A software encoder that writes the failed encode's range keeps a TV in its HDR mode.
+A change of range that follows no format error reports no failure and counts no format attempt.
+In Auto, an SDR picture that plays is better than an error, and the change counts as any other failed HDR encode does.
+In a fixed quality, the range is the viewer's manual choice, and the server never silently replaces a manual choice.
 
 [[lower-variant-range]]
 === In Auto, the lower variants beside a copy keep the source's range and bit depth
@@ -907,9 +947,12 @@ The server names SDR as the output range in its answer.
 The client then shows SDR in its HDR toggle, with a notice.
 
 Auto gives HDR up for SDR after a format error during a PQ or HLG encode, as <<encode-range>> decides.
+Auto also gives HDR up when a hardware encoder fails during such an encode and no software encoder can continue it in that range (<<hardware-failure-range>>).
 When the viewer switches from Auto to a fixed quality, the picture that plays keeps its range.
 An SDR picture then stays SDR although the source is HDR.
-<<encode-range>> lists how the server as built keeps it.
+The switch keeps the picture through the HDR choice, with no new field in the contract.
+The server's contract asks the client to send the range that plays as the HDR choice of the fixed quality's request.
+https://github.com/streamarr/streamarr-web/issues/29[streamarr/streamarr-web#29] and https://github.com/streamarr/streamarr-apple/issues/60[streamarr/streamarr-apple#60] own the clients' half.
 In Auto, the lower variants beside a copy also keep the source's range (<<lower-variant-range>>).
 
 *Why:* Original promises the source's own picture, and a copy keeps the source's range.
@@ -990,7 +1033,18 @@ Reports are facts in PostgreSQL; no file is stored.
 
 * Dolby Vision and HDR10+ encodes.
 <<encode-range>> decides the 10-bit, PQ and HLG encodes, and https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397] adds neither Dolby Vision nor HDR10+ encodes.
-* A decision on each point that <<encode-range>> lists as built behavior.
+* Whether a PQ or HLG encode on a software encoder also comes before an SDR encode on the hardware encoder of the same codec family on the same worker (<<encode-range>>).
+A worker lists one encoder for each codec family that it encodes, and the server reads a worker's software encoders only after that worker's hardware encoder fails.
+One worker whose hardware encoder writes only 8-bit SDR and whose software encoder of the same codec family lists PQ therefore encodes an HDR source to 8-bit SDR.
+https://github.com/streamarr/streamarr-server/pull/911[streamarr/streamarr-server#911] read this from the code and the worker contract, and no test covers it.
+A change would change the worker contract.
+* The error type and the viewer's message when a fixed quality ends because no software encoder can continue the range (<<hardware-failure-range>>).
+As https://github.com/streamarr/streamarr-server/pull/913[streamarr/streamarr-server#913] builds it, the client receives the errors of a refused stream session, and the viewer's message for one of them advises another device, which does not help.
+* Whether a hardware encoder that a worker withdraws without a failure report of the variant's own job attempt counts as a hardware encoder failure of the variants pinned to it (<<hardware-failure-range>>).
+Such a variant gets no software continuation today, and its range never changes silently.
+streamarr/streamarr-server#913 read this from the code and did not run it.
+* Whether Auto's next format attempt may return to a hardware encoder that refused an encode at its driver's session limit (link:0044-encoder-headroom-and-the-preset-scale.adoc#decision-gpu-limits[ADR 0044]).
+The worker keeps offering such an encoder, so Auto can plan its 8-bit SDR encode there after it gave the range up.
 * Whether a lower variant beside a copy must also meet the other conditions of <<encode-range>>: the client's capability entry and the codec profile (<<lower-variant-range>>).
 * What a lower variant keeps beside a Dolby Vision copy.
 No encode writes Dolby Vision (<<encode-range>>).
@@ -1033,7 +1087,7 @@ No job attempt reshapes Dolby Vision with that table until the worker pins a bui
 * A PQ encode that reshapes Dolby Vision on the GPU can differ from the same encode with the CPU reshape, because the bound holds only the GPU reshape to the exact value (<<gpu-stages>>).
 When the hardware encoder backend fails during such a stream, the stream continues as link:0044-encoder-headroom-and-the-preset-scale.adoc#decision-hardware-failure[ADR 0044] decides, on a software backend with the CPU reshape, and the picture can shift at that point.
 With the color fixes of Streamarr's FFmpeg fork, the two chains differ most at chroma edges (<<evidence-gpu-reshape>>).
-When no software encoder of the codec family lists PQ and the reshape, the server as built continues the stream in 8-bit SDR instead (<<encode-range>>).
+When no worker that can take the encode has a software encoder of the codec family that lists PQ and the reshape, Auto changes format and a fixed quality ends (<<hardware-failure-range>>).
 * The worker does not report where a job attempt decodes or reshapes.
 The headroom model therefore still charges the decode and the reshape of a job attempt with the GPU reshape to the worker's cores.
 link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] decides that a hardware decode counts against the GPU's decode engines instead.
@@ -1097,6 +1151,17 @@ The viewer then waits through a failed start before the next format attempt or t
 * A viewer who picks a fixed quality below the size of an HDR source sees SDR and a notice when the encode cannot be PQ or HLG (<<hdr-choice>>, <<encode-range>>).
 * An HDR source plays in HDR through an encode only where a connected worker's encoder passed its test encode of that range.
 A server whose workers list no such output still encodes every HDR source to 8-bit SDR.
+* A server with a hardware encoder that writes only 8-bit SDR encodes an HDR source on a software encoder of another codec family or another worker that lists the range, for a client that declares it (<<encode-range>>).
+A software HEVC or AV1 encoder can fall behind the player on a large source, which is why ADR 0009 ranks hardware first.
+The headroom rules of ADR 0044 guard against that.
+The headroom model is not on `main` yet, and https://github.com/streamarr/streamarr-server/pull/828[streamarr/streamarr-server#828] builds its prediction.
+Until the model decides, the server checks only that the worker has a free playback slot.
+* When a hardware encoder fails during a fixed quality's PQ, HLG or 10-bit SDR encode and no software encoder can continue that range and bit depth, playback ends (<<hardware-failure-range>>).
+A new playback session in the same fixed quality then plays 8-bit SDR with the notice of <<hdr-choice>> while the hardware encoder stays withdrawn.
+A new playback session in Auto plays as well.
+* In Auto, a hardware encoder failure that no software encoder can continue in the same range and bit depth spends a format attempt.
+During Auto's last budgeted format attempt, playback then ends with the typed terminal error (ADR 0052).
+The default budget is four format attempts, so that end needs three earlier failures in the playback session.
 * Once https://github.com/streamarr/streamarr-server/pull/759[streamarr/streamarr-server#759] builds <<lower-variant-range>>, a copy of an HDR, 10-bit or Dolby Vision source plays alone in Auto when no worker's encoder can produce the source's range and bit depth.
 Such a copy then gives the player no lower variant when the viewer's bandwidth drops (link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc#decision-lower-variants[ADR 0050]).
 * Only whoever runs the server can see why a file was encoded, through the logs and the metric.
@@ -1252,6 +1317,8 @@ AVPlayer's refusal of such an entry is unmeasured.
 A TV would drop to SDR whenever the player switched down, and Auto would give HDR up without a format error.
 * No lower variants beside any copy of an HDR, 10-bit or Dolby Vision source: the copy would give the player no lower variant when the viewer's bandwidth drops (ADR 0050).
 A worker whose encoder writes the source's range and bit depth can encode one.
+* Keeping a hardware codec family's SDR encode before a PQ or HLG encode on a software encoder, as ADR 0009's order alone would: a TV would leave HDR on a server whose hardware encoder writes only 8-bit SDR, although a software encoder of another codec family or another worker could keep the range (<<encode-range>>).
+* Planning the range and the bit depth again from the software encoders after a hardware encoder fails: a PQ encode would continue as 8-bit SDR with no format error and no counted format attempt, also in a fixed quality with HDR chosen (<<hardware-failure-range>>).
 * Preparing an SDR output beside an HDR encode, to keep another format ready: the variants of the selected format start on demand, and another format starts only after a format error (<<encode-range>>).
 * A PQ or HLG H.264 encode: <<encode-range>> plans PQ and HLG at 10 bits only, and almost no device decodes 10-bit H.264 (https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397]).
 Firefox refused High 10 in 21 of 21 runs (<<evidence-sdr-output>>).
@@ -1612,17 +1679,28 @@ The tests run the stream decision and the playback session against declared clie
 
 * `TenBitAndHdrEncodeTest` covers the three outputs, their conditions, the static HDR metadata and the frame rate order.
 It covers a 10-bit SDR encode that replaces 8-bit H.264 and one that does not replace an 8-bit encode of a hardware codec family.
-It also covers the software continuation that plans 8-bit SDR in Auto, and the busy worker whose PQ encoder does not count.
-* No test names a PQ or HLG encode that replaces an SDR encode of a hardware codec family.
-The code orders them so.
+It also covers the busy worker whose PQ encoder does not count.
+* On `main`, no test names a PQ or HLG encode that comes before an SDR encode of a hardware codec family, although the code orders them so.
+Draft https://github.com/streamarr/streamarr-server/pull/911[streamarr/streamarr-server#911] adds 13 cases to `TenBitAndHdrEncodeTest` that pin the order and its limits, and it changes no production code.
+In a scratch copy, a ranking in which an HDR encode wins only over H.264 failed 2 of those cases and none of the 49 cases that the class had before.
 * `HdrFormatRecoveryTest` covers Auto's change to SDR after a failed PQ or HLG encode, a fixed quality that keeps its range until playback ends, and the switch from Auto to a fixed quality.
 In the switch, the test stands in for the client and sends the range that plays.
 * `PlannedVideoOutputTest` refuses a planned H.264 encode that is not 8-bit SDR.
 * The worker contract's `encode_features` field lists what each encoder passed, and https://github.com/streamarr/streamarr-transcode-worker/pull/168[streamarr/streamarr-transcode-worker#168] checks the worker's output with FFmpeg.
 * No recorded check yet shows the colors of a PQ encode of a real Dolby Vision profile 5 source.
 https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397] keeps that criterion open.
-* No test covers the software continuation in a fixed quality with HDR chosen.
-The code applies it in every playback choice.
+
+<<hardware-failure-range>> records draft https://github.com/streamarr/streamarr-server/pull/913[streamarr/streamarr-server#913] at its head `d59dc54be`, read on 2026-11-11.
+
+* On `main`, one test of `TenBitAndHdrEncodeTest` asserts in Auto that the software continuation plans its range from the software encoders.
+One of its two cases shows the defect: a PQ encode continues as 8-bit SDR.
+No test on `main` covers the software continuation in a fixed quality with HDR chosen.
+* The pull request reproduced the defect before its fix.
+Before the fix, 16 of the 187 cases of `HardwareEncoderFailureRangeTest` and `TranscodeDecisionServiceTest` failed, and all 16 were new.
+In a fixed quality with HDR chosen the picture continued in SDR, and in Auto the change of range counted no format attempt.
+* Its new `HardwareEncoderFailureRangeTest` holds 25 cases at the playback entry point.
+They cover a continuation in the same range and bit depth, Auto's counted change of format, the fixed quality's reported failure, another worker's software encoder, and a full worker that does not count.
+* The pull request deletes the test of `TenBitAndHdrEncodeTest` that asserts the defect.
 
 == References
 
@@ -1632,6 +1710,8 @@ The code applies it in every playback choice.
 * https://github.com/streamarr/streamarr-server/issues/501[streamarr/streamarr-server#501], which delivers this amendment.
 * https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397], which decides the 10-bit, PQ and HLG encodes (<<encode-range>>).
 * https://github.com/streamarr/streamarr-server/pull/759[streamarr/streamarr-server#759], which builds the lower variants beside a copy (<<lower-variant-range>>).
+* https://github.com/streamarr/streamarr-server/pull/911[streamarr/streamarr-server#911], which pins a PQ or HLG encode before an SDR encode of a hardware codec family (<<encode-range>>).
+* https://github.com/streamarr/streamarr-server/pull/913[streamarr/streamarr-server#913], which keeps the range and the bit depth when a failed hardware encode continues in software (<<hardware-failure-range>>).
 * https://github.com/streamarr/streamarr-server/issues/751[streamarr/streamarr-server#751], which adds playback reports (<<shared-playback-reports>>).
 * https://github.com/streamarr/streamarr-server/issues/512[streamarr/streamarr-server#512], which adds merged-slot segment lists.
 * link:0009-h264-plus-av1-codec-strategy.adoc[ADR 0009], which decides which codec family an encode uses.

@@ -530,8 +530,12 @@ A probe that no playback request waits for, such as one a scan requested. It use
 _Avoid_: scan probe, low-priority probe
 
 **Keyframe packet scan**:
-A probe that finds keyframe positions by scanning every packet of the chosen video stream. It uses its own capacity, which is 0 while the worker runs any job attempt, and runs at the lowest CPU priority.
+A probe that finds keyframe positions by scanning every packet of the chosen video stream. From probe version 9, it also reads where the chosen video stream and each audio stream ends (ADR 0032). It uses its own capacity, which is 0 while the worker runs any job attempt, and runs at the lowest CPU priority.
 _Avoid_: packet scan (unqualified), keyframe probe
+
+**Media end**:
+Where the media of a stream session ends: the later end time, as a keyframe packet scan read it, of the chosen video stream and the session's audio stream. Until a scan has read both, it is the container's duration. Every variant of the stream session advertises it, and watch progress is measured against it (ADR 0037).
+_Avoid_: real end, scanned video end, true duration
 
 **Bitrate scan**:
 A durable background step that reads every packet of a media file's chosen video stream and audio streams once, in chunks, and measures each stream's bytes in every keyframe interval. It uses the keyframe packet scan capacity, after any keyframe packet scan, and runs at the lowest CPU priority (ADR 0054).

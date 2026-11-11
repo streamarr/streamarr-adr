@@ -71,11 +71,17 @@ The probe reads none of the three with a new pass.
 Playback keeps using each file's probe version 7 outcome until the server stores the file's probe version 8 outcome.
 
 Another amendment adds probe version 9 (<<probe-version-9>>).
-Probe version 9 reports the start time correction that a job attempt's FFmpeg makes, which link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-media-time-zero[ADR 0037] cancels.
-When the worker cannot give an exact correction, the probe reports a fallback reason instead and still succeeds.
-The server sends a job that carries the correction only to a worker that lists probe version 9.
+With probe version 9, a keyframe packet scan also reports where the chosen video stream and each audio stream ends, as it read the end from the stream's packets.
+The server stores each scanned end time beside the probe facts, with the end times that job attempts learn.
+The scanned end times decide where a stream session ends (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-media-end[ADR 0037]).
 Playback keeps using each file's probe version 8 outcome until the server stores the file's probe version 9 outcome.
-The start time correction was first probe version 7, then probe version 8, and the facts that shipped first took each number, as <<later-probe-versions>> describes.
+
+Another amendment adds probe version 10 (<<probe-version-10>>).
+Probe version 10 reports the start time correction that a job attempt's FFmpeg makes, which link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-media-time-zero[ADR 0037] cancels.
+When the worker cannot give an exact correction, the probe reports a fallback reason instead and still succeeds.
+The server sends a job that carries the correction only to a worker that lists probe version 10.
+Playback keeps using each file's probe version 9 outcome until the server stores the file's probe version 10 outcome.
+The start time correction was first probe version 7, then probe version 8, then probe version 9, and the facts that shipped first took each number, as <<later-probe-versions>> describes.
 
 A further amendment removes the statistics that came from a sample of a private media library.
 Synthetic files, FATE samples and FFmpeg's own source now support the decisions that those statistics supported (<<evidence>>).
@@ -314,6 +320,8 @@ A learned end time never rewrites a probe outcome, and a new probe outcome for t
 A changed source snapshot discards it, with the stored outcome and its stream rows, because the server can't tell a re-mux from a tag edit.
 The server writes a learned end time only under the media file row lock that <<decision-probe-task-protocol,probe publication>> takes, and only when the snapshot that the attempt read equals the requested and stored snapshot, so a late report from a replaced source writes nothing.
 A learned end bound, the position from which an attempt read no sample of a stream (ADR 0037), follows the same rules.
+With probe version 9, a keyframe packet scan also reads where the chosen video stream and each audio stream ends (<<probe-version-9>>).
+The server stores a scanned end time with the learned end times, under the same rules, and stores with each end time whether a scan read it.
 * The sample rate of each audio stream.
 The MP3 copy rule needs the sample rate, because the fMP4 muxer refuses MP3 below 16 kHz.
 * The profile name of each audio stream, kept as ffprobe prints it, such as `Dolby Digital Plus + Dolby Atmos` or `DTS-HD MA`.
@@ -545,7 +553,7 @@ streamarr/streamarr-transcode-worker#117 records each case with mkvmerge 92.0, m
 The copy fact joins probe version 6 rather than a later version, because both changes ship together and each later version probes every file again.
 A copy without the filter delivers the source's packets unchanged, so a stream measurement of those packets matches the delivered bytes (ADR 0054).
 ADR 0054 gives the reason for each condition of the copy fact.
-Unlike the start time correction (<<probe-version-9>>), the copy fact never changes what a copy plays, so the server does not hold copy jobs for workers that list probe version 6.
+Unlike the start time correction (<<probe-version-10>>), the copy fact never changes what a copy plays, so the server does not hold copy jobs for workers that list probe version 6.
 While worker versions differ, the server accepts that a copy on an older worker can cost and peak above the measured values, by whatever the filter repeats before each keyframe for that source.
 
 [[probe-version-7]]
@@ -706,16 +714,77 @@ The media info shows whether a profile 7 source carries a MEL or a FEL, which te
 An HDR encode (streamarr/streamarr-server#397) needs a content light level for a Dolby Vision source whose bitstream carries none outside its RPUs.
 
 [[probe-version-9]]
-=== Probe version 9 reports the start time correction that a job attempt's FFmpeg makes
+=== Probe version 9 reports where a keyframe packet scan reads each stream's end
 
 Probe version 9 reports every fact of probe version 8.
-https://github.com/streamarr/streamarr-server/issues/664[streamarr/streamarr-server#664] adds probe version 9.
-Probe version 9 adds one container fact to a successful outcome: the start time correction, or the reason why the worker gives none.
+https://github.com/streamarr/streamarr-server/pull/900[streamarr/streamarr-server#900] adds probe version 9.
+With probe version 9, a keyframe packet scan reports one more fact beside the keyframe positions: where the chosen video stream and each audio stream ends.
+The probe itself reports no new fact, and it starts no new pass.
+A file whose keyframe positions come from its container index gets no keyframe packet scan and therefore no scanned end time.
+
+The scan reads the packets of the chosen video stream and of every audio stream that has a sample rate.
+A stream's end time is the latest end among its packets, where a packet ends at its presentation time plus its duration.
+A packet without a presentation time counts at its decode time.
+FFmpeg's stream copy gives such a packet its decode time as its presentation time, and the fragmented MP4 muxer writes the packet there, so a player presents it at that time.
+In a synthetic MPEG-TS file with one such video packet, the stream copy wrote the packet at decode time 276,000, the time that the source packet had.
+The scan reports each end time on the timeline of the keyframe positions, with the container's start time subtracted.
+The scan reads end times from packets only.
+It never reads one from the container header and never estimates one.
+
+The scan leaves out a stream's end time when it cannot read it:
+
+* The stream has no packet.
+* The packet that presents last has no positive duration.
+* A packet of the stream has neither a presentation time nor a decode time.
+* The end time is not above zero, or does not fit the contract's duration.
+
+A scan that cannot read the source to its end fails, as it does for the keyframe positions, and reports no end time.
+
+The server refuses a scan result as a contract violation (<<probe-contract-violations>>) in these cases:
+
+* The result lists end times without keyframe positions from a packet scan.
+* An entry lacks its stream index or its end time.
+* An end time is zero, negative or outside the range of a protobuf duration.
+* Two entries name one stream.
+* An entry names a stream that is neither the chosen video stream nor an audio stream.
+* A keyframe of the chosen video stream presents after that stream's end time.
+
+The server stores each scanned end time beside the probe facts, with the end times that job attempts learn, apart from the probe outcome.
+It stores with every end time whether a keyframe packet scan read it.
+The transaction that stores the scan's keyframe positions also stores its end times.
+That transaction locks the media file row first, as probe publication does, and verifies that the stored outcome holds the snapshot that the scan read.
+A scanned end time replaces an end time that a job attempt learned for the same stream, because the scan read every packet of the stream.
+An end time that a job attempt learns never replaces a scanned one of the same source snapshot.
+A changed source snapshot discards a scanned end time, as it discards a learned one.
+link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-media-end[ADR 0037] decides how a stream session uses the scanned end times.
+
+The upgrade to probe version 9 keeps every probe version 8 outcome.
+On the upgrade, the server queues a re-scan itself, as <<upgrade-rescan,the section on source changes and probe versions>> describes.
+A file that already had a keyframe packet scan holds keyframe positions but no end time.
+Its probe version 9 outcome asks for a keyframe packet scan again, and that scan stores the end times.
+Playback keeps using each file's probe version 8 outcome until the server stores the file's probe version 9 outcome.
+The server sends a job to any worker, whatever probe versions the worker lists, because no job carries a scanned end time that the worker must understand.
+
+*Why:* The header of a file that was cut short still states the length of the whole file, for the container and for each stream.
+A synthetic MP4 file cut near 14 s kept a header of 30 s, and a stream copy advertised its last media segment as 18 s long instead of about 2 s.
+Only the packets show where such a file ends.
+The keyframe packet scan already reads every packet of such a file, so the end times cost no further read.
+The origin of each stored end time matters, because the two origins fail differently.
+A scan fails when a read fails.
+A job attempt's FFmpeg can stop at a read error and still exit with status 0.
+With the pinned FFmpeg, a job attempt on a synthetic 20 s Matroska file whose reads failed from 60 % of its bytes reported end times of 12.291 s and 12.251 s.
+
+[[probe-version-10]]
+=== Probe version 10 reports the start time correction that a job attempt's FFmpeg makes
+
+Probe version 10 reports every fact of probe version 9.
+https://github.com/streamarr/streamarr-server/issues/664[streamarr/streamarr-server#664] adds probe version 10.
+Probe version 10 adds one container fact to a successful outcome: the start time correction, or the reason why the worker gives none.
 link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-media-time-zero[ADR 0037] defines the start time correction and decides how a job attempt uses it.
 
 The probe reads the start time correction as a job attempt's FFmpeg reads the source.
 A job attempt's FFmpeg keeps FFmpeg's default read limits, and the probe's limits (<<probe-limits>>) change which streams have a start time.
-So probe version 9 runs a second ffprobe with a job attempt's input options and FFmpeg's default limits.
+So probe version 10 runs a second ffprobe with a job attempt's input options and FFmpeg's default limits.
 The worker computes the correction from that run's container start time and stream start times.
 The rule follows FFmpeg's command line in the pinned FFmpeg: its list of demuxers that allow timestamp discontinuities, the earliest start time over every stream, and its rounding to microseconds.
 The worker owns the rule.
@@ -733,29 +802,29 @@ FFmpeg measures its wrap check from the corrected start time, so the correction 
 A source that becomes unavailable still fails the probe, as it does without the second run.
 
 A fallback never fails the probe.
-The server stores the outcome as a success without a correction, and the file's job attempts read the source as they did before probe version 9.
+The server stores the outcome as a success without a correction, and the file's job attempts read the source as they did before probe version 10.
 The server counts each stored fallback in a metric, tagged with its reason.
-A probe version 9 outcome carries either the correction or one fallback reason.
+A probe version 10 outcome carries either the correction or one fallback reason.
 An outcome with neither, or with a correction that is positive or finer than a microsecond, is a contract violation (<<probe-contract-violations>>).
 
-The server sends a job that carries the start time correction only to a worker that lists probe version 9.
-Listing probe version 9 tells the server that the worker applies the correction wherever a job attempt's FFmpeg places media time zero.
+The server sends a job that carries the start time correction only to a worker that lists probe version 10.
+Listing probe version 10 tells the server that the worker applies the correction wherever a job attempt's FFmpeg places media time zero.
 The check covers the first job attempt and every replacement attempt.
 A job without the correction goes to any worker.
 Probe version 7 holds back jobs in the same way: a job that names a layout of 3, 4, 7 or 8 channels goes only to a worker that lists probe version 7 (<<probe-version-7>>).
 
-The upgrade to probe version 9 keeps every probe version 8 outcome.
+The upgrade to probe version 10 keeps every probe version 9 outcome.
 On the upgrade, the server queues a re-scan itself, as <<upgrade-rescan,the section on source changes and probe versions>> describes.
-Playback keeps using each file's probe version 8 outcome until the server stores the file's probe version 9 outcome.
-An outcome of probe version 8 or earlier carries no correction, so its job attempts read the source as before.
-An earlier outcome and a probe version 9 outcome of the same file share one media time zero.
+Playback keeps using each file's probe version 9 outcome until the server stores the file's probe version 10 outcome.
+An outcome of probe version 9 or earlier carries no correction, so its job attempts read the source as before.
+An earlier outcome and a probe version 10 outcome of the same file share one media time zero.
 
 *Why:* Without the correction, a job attempt on an MPEG-TS source measured media time zero from the streams that the attempt mapped.
 With `-discard none` alone, a data stream that started 12 s early moved media time zero by 11.977 s.
 link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#evidence-timeline[ADR 0037] has the measurements.
 The probe already reads every source once, so the correction adds no work to a job attempt's start.
 The probe's limits give some subtitle streams a start time that FFmpeg's defaults do not (<<evidence-probe-limits>>), so a correction read under those limits could disagree with a job attempt's FFmpeg.
-In each fallback case, the command without the correction behaves as it did before probe version 9.
+In each fallback case, the command without the correction behaves as it did before probe version 10.
 When no stream has a start time, FFmpeg 8.1.3 computes the same wrong offset with or without `-discard none`, and no `-itsoffset` value cancels it.
 So a fallback keeps every file at least as playable as before, and failing the probe would stop a file that still plays.
 
@@ -826,7 +895,7 @@ An MPEG-TS probe can then stop once every stream has its parameters.
 Without this option, an MPEG-TS probe reads to those limits.
 The limits apply to the probe only.
 A job attempt's FFmpeg input keeps FFmpeg's defaults.
-So probe version 9 reads the start time correction in a second run with FFmpeg's defaults (<<probe-version-9>>).
+So probe version 10 reads the start time correction in a second run with FFmpeg's defaults (<<probe-version-10>>).
 
 *Why:* By default, ffprobe stops after 5 s of media or 5 MB.
 PGS is the Blu-ray image subtitle format.
@@ -870,7 +939,8 @@ The step also runs for AVI files.
 The step also runs for Matroska files whose Cues are sparse or missing.
 The step also runs for a file whose index lists a last keyframe that the probe cannot read.
 Such a file gets the same packet scan as a file without a usable index.
-A stream copy's media playlist therefore never advertises media segments past the source's real end.
+A stream copy's media playlist therefore never opens a media segment past the source's real end.
+The keyframes alone do not say where the last segment ends, so the scan also reports where the streams end (<<probe-version-9>>).
 link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] decides what happens when a copied variant still runs short.
 Like the probe step, the keyframe step survives a server restart.
 Stored keyframe positions are probe facts.
@@ -1026,7 +1096,9 @@ streamarr/streamarr-transcode-worker#117 adds those facts.
 https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] decides the rule that reads the layout.
 * Probe version 8 adds the maximum frame rate, the Dolby Vision enhancement layer type and the RPU's level 6 light levels that <<probe-version-8,the probe version 8 section>> describes.
 https://github.com/streamarr/streamarr-server/issues/652[streamarr/streamarr-server#652], https://github.com/streamarr/streamarr-server/issues/651[streamarr/streamarr-server#651] and https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397] need those facts.
-* Probe version 9 adds the start time correction that <<probe-version-9,the probe version 9 section>> describes.
+* Probe version 9 adds the scanned stream end times that <<probe-version-9,the probe version 9 section>> describes.
+https://github.com/streamarr/streamarr-server/pull/900[streamarr/streamarr-server#900] adds those facts.
+* Probe version 10 adds the start time correction that <<probe-version-10,the probe version 10 section>> describes.
 https://github.com/streamarr/streamarr-server/issues/664[streamarr/streamarr-server#664] adds that fact.
 
 Probe version 2 is unused.
@@ -1041,6 +1113,8 @@ The channel layout blocks lower audio steps that keep a copy's 3 or 4 channels (
 No server requested and no worker advertised probe version 7 for the start time correction.
 The maximum frame rate, the enhancement layer type and the level 6 light levels were then ready first, so they took version 8, and the start time correction became version 9.
 No server requested and no worker advertised probe version 8 for the start time correction.
+The scanned stream end times were then ready first, so they took version 9, and the start time correction became version 10.
+No server requested and no worker advertised probe version 9 for the start time correction.
 
 A change after probe version 4 does not add its facts to probe version 4.
 A change after probe version 5 does not add its facts to probe version 5.
@@ -1048,6 +1122,7 @@ A change after probe version 6 does not add its facts to probe version 6.
 A change after probe version 7 does not add its facts to probe version 7.
 A change after probe version 8 does not add its facts to probe version 8.
 A change after probe version 9 does not add its facts to probe version 9.
+A change after probe version 10 does not add its facts to probe version 10.
 A later probe version adds caption detection: whether the video carries CEA-608 or CEA-708 captions.
 The probe detects the captions by decoding keyframes.
 https://github.com/streamarr/streamarr-server/issues/505[streamarr/streamarr-server#505] adds the caption detection.
@@ -1795,15 +1870,15 @@ The worker would then decide what a disposition means, which the server decides 
 * Send a job of 3, 4, 7 or 8 channels to any worker.
 A worker that does not list probe version 7 would encode a 3- or 4-channel job by channel count, in FFmpeg's default layout, and does not follow ADR 0043's rules for the FLAC, Opus and ALAC encodes that have 7 or 8 channels.
 * Fail the probe when a job attempt's FFmpeg reads a different container start time, or when no exact start time correction exists.
-The file would stop playing, although the command without the correction plays it as it did before probe version 9.
+The file would stop playing, although the command without the correction plays it as it did before probe version 10.
 * Have the server compute the start time correction from reported start times.
 The server would encode FFmpeg's command-line behaviour, and each FFmpeg upgrade in the worker would need a server change.
 * Compute the start time correction from the stream start times that the probe reads under its limits.
 The probe's limits change which streams have a start time, so the correction could disagree with a job attempt's FFmpeg.
-* Treat an earlier outcome of a source whose demuxer allows timestamp discontinuities as missing, so that playback waits for the probe version 9 outcome.
+* Treat an earlier outcome of a source whose demuxer allows timestamp discontinuities as missing, so that playback waits for the probe version 10 outcome.
 The server would need its own copy of FFmpeg's demuxer list, and those files play during the re-scan as they did before.
 * Add a separate worker capability for the job's start time correction.
-Listing probe version 9 already tells the server that the worker applies the correction.
+Listing probe version 10 already tells the server that the worker applies the correction.
 * Trust every Matroska statistics tag.
 A file that FFmpeg cut or encoded again keeps tags that describe packets it no longer holds.
 * Trust statistics tags whose date is no earlier than the file's `DateUTC`.

@@ -52,6 +52,11 @@ Every encode may now hold its last picture and pad its audio with digital silenc
 That narrows the earlier rejection of padding every attempt's audio.
 A completed attempt reports where each stream ended and whether the source ended early, and the server stores each learned end time beside the probe facts.
 
+NOTE: An amendment ends every stream session at its media end (<<decision-media-end>>).
+The media end is the later end time, as a keyframe packet scan read it from the packets, of the chosen video stream and the session's audio stream.
+Every variant of the stream session advertises that end, whether it copies or encodes.
+Until a scan has read both end times, the media ends at the container's duration, as before the amendment.
+
 NOTE: An amendment settles how merged segment lists ship (<<decision-segment-list>>).
 Each job attempt carries the stream session's segment list, and the segment cap of 128 MiB is a constant of the worker contract.
 Every variant and rendition shares the list, so the server bounds every advertised output's largest segment against the segment cap when it creates the stream session.
@@ -268,7 +273,7 @@ A subtitle or data stream that starts 1 s or more before the others then still m
 
 The start time correction is the earliest start time over every stream, minus the container's start time.
 It is zero or negative.
-The probe reports it, as link:0032-media-file-probe-results-are-persisted.adoc#probe-version-9[ADR 0032] decides.
+The probe reports it, as link:0032-media-file-probe-results-are-persisted.adoc#probe-version-10[ADR 0032] decides.
 Every FFmpeg that reads the source for a job attempt passes `-discard none -copyts -avoid_negative_ts disabled -start_at_zero`, except the first FFmpeg of the path that moves RPUs, which keeps the source's raw timestamps.
 When the start time correction is not zero, that FFmpeg also passes `-itsoffset` with the correction.
 When FFmpeg corrects the start time, it replaces the timestamp offset with minus the corrected start time and then adds the `-itsoffset` value, so the value cancels the correction.
@@ -281,16 +286,16 @@ The scan subtracts the probe's container start time itself, so this rule would s
 
 FFmpeg also measures its timestamp wrap check from the corrected start time, not from the container's start time.
 A source whose timestamps reach more than half a stream's wrap range past the earliest stream start time would then lose a full wrap range.
-For such a source, the probe reports a fallback instead of the correction (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-9[ADR 0032]).
+For such a source, the probe reports a fallback instead of the correction (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-10[ADR 0032]).
 
 The worker owns the rule that computes the start time correction, because the rule follows FFmpeg's command line and the server runs no FFmpeg (link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033]).
 The server stores the correction and passes it on unchanged.
 A stream session reads the correction with its segment list and keyframe positions, and every job attempt of the stream session carries that value.
 A replacement attempt never reads the correction again.
-The server sends a job that carries the correction only to a worker that lists probe version 9.
+The server sends a job that carries the correction only to a worker that lists probe version 10.
 
 A job attempt passes neither `-discard none` nor `-itsoffset` when the stored probe outcome carries no correction.
-That covers an outcome from before probe version 9 and a probe version 9 outcome that reports a fallback (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-9[ADR 0032]).
+That covers an outcome from before probe version 10 and a probe version 10 outcome that reports a fallback (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-10[ADR 0032]).
 Such an attempt reads the source as it did before this rule.
 No source therefore plays worse than before this rule, during the re-scan or after it.
 
@@ -449,9 +454,9 @@ Exact starts need a copy to place each source keyframe at its stored tick.
 FFmpeg makes no start time correction for a container whose demuxer does not allow timestamp discontinuities, such as MP4, MOV and Matroska, so a copy of such a source keeps the stored ticks.
 A copy of any other source keeps the stored ticks only when the stored probe outcome carries the start time correction (<<decision-media-time-zero>>).
 The server refuses a stream copy with the reason `no_start_time_correction` when neither condition holds, and encodes the video instead.
-That refusal covers an MPEG-TS, MPEG-PS or Ogg source whose probe outcome predates probe version 9 or reports a fallback.
+That refusal covers an MPEG-TS, MPEG-PS or Ogg source whose probe outcome predates probe version 10 or reports a fallback.
 The refusal narrows the media-time-zero rule's promise that no source plays worse during the re-scan.
-Such a source encodes until its probe version 9 outcome carries a correction.
+Such a source encodes until its probe version 10 outcome carries a correction.
 
 *Why exact starts:* With whole slots, a copied segment opens at the first source keyframe in its slot.
 An encoded segment with the same number then starts at the slot's start.
@@ -1137,6 +1142,11 @@ The server stores each learned end time beside the file's probe facts, apart fro
 A learned end time never rewrites a probe outcome, and a new probe outcome for the same source snapshot never discards it.
 A changed source snapshot discards it, with the stored outcome and its stream rows, because the server can't tell a re-mux from a tag edit.
 
+A keyframe packet scan also reads where the chosen video stream and each audio stream ends, from the stream's packets (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-9[ADR 0032]).
+The server stores a scanned end time with the learned end times, under the same rules, and stores with each end time whether a scan read it.
+For the rules of this section, a scanned end time replaces the end time that the header states for the stream, and one that a job attempt learned.
+The scan read every packet of the stream, and the header of a file that was cut short still states the length of the whole file.
+
 An attempt that starts after a stream's unknown end reads no sample of that stream, so it learns no end time this way.
 It reports instead that the stream delivered no sample from the position where it began reading, and names the stream and that position.
 The server stores that position as the stream's learned end bound, under the same snapshot fence as a learned end time.
@@ -1162,6 +1172,41 @@ The server publishes learned end times as ADR 0032 publishes a probe outcome: on
 A request that saves a changed snapshot deletes the learned end times under the same row lock, in the transaction that deletes the outcome.
 A report from an attempt that read a replaced source therefore finds another snapshot, whenever it arrives, and the server drops its end times.
 The tests of https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511] complete an attempt that read snapshot A only after the watcher saved snapshot B and B's probe published, and check that A's end times never reach B's padding or seeks.
+
+[[decision-media-end]]
+A stream session ends at its media end.
+The media end is the later of two scanned end times: the chosen video stream's and the session's audio stream's.
+Those are the streams that the stream session delivers.
+In a file without audio, the media end is the video's scanned end time.
+A stream that the session does not deliver, such as a second audio track, never moves the media end.
+Every variant of the stream session advertises the media end, whether it copies or encodes.
+Each media playlist ends there, and each job attempt carries it as the advertised end.
+A player that changes variant near the end therefore finds the same end in both playlists.
+An encode holds its last picture and pads its audio up to the media end, as the rules below describe.
+A copy cannot pad, so its playlist lists the media through the end of the stream that ends later.
+A healthy file whose audio outlasts its last picture is therefore never advertised short.
+A stream session reads the media end when it starts and keeps it, so an end time that the server stores later changes only later stream sessions.
+
+While no scan has read the end time of each delivered stream, the media ends at the container's duration.
+Only a scanned end time moves the media end.
+An end time that the header states for a stream does not move it, because a stream's header is no better evidence than the container's.
+An end time that a job attempt learned does not move it either.
+An attempt's FFmpeg can stop at a read error and still exit with status 0, where a scan fails (link:0032-media-file-probe-results-are-persisted.adoc#probe-version-9[ADR 0032]).
+A learned end time keeps its earlier uses: it fills an end time that the header does not state, for the rules below and for seeks.
+
+The container's duration also stands while it runs less than 1 s past the scanned end.
+A healthy file's packets can end shortly before its last sample does.
+Matroska counts packet times in whole milliseconds, and a track's last packet can state less time than its frame decodes to.
+With the pinned FFmpeg, the scanned end of a FLAC track in a synthetic Matroska file lay 0.70 ms before the track's last decoded sample, and the scanned end of an AC-3 track lay 4.56 ms before it.
+Both containers stated a duration that covers the audio.
+A file that is cut short by less than 1 s is therefore advertised up to 1 s too long, and an encode pads that time.
+A scanned end past the container's duration replaces the duration, because that header understates the file or states no duration.
+
+The media end counts up to the next whole millisecond, which is the unit of the segment list.
+No media playlist therefore ends before the last sample does.
+A start position must lie before the media end.
+Watch progress is measured against the media end, and a playback token stays valid through it.
+A file that is cut short therefore completes when playback reaches its real end.
 
 These rules apply to a stream that ends early:
 
@@ -1755,6 +1800,12 @@ Each replacement attempt meets the same flush at the end of its input, so none c
 It cannot apply to copied audio, and FFmpeg still gives no signal that a stream has ended.
 This rejection once covered padding every attempt's audio.
 It now covers only stopping at the shortest stream: every encode may carry padding trimmed at the advertised end, because padding changes no sample that the source feeds the encoder (<<decision-early-ends>>).
+* Ending a stream session at the video's scanned end would advertise a healthy file short whenever its audio outlasts its last picture.
+A copy of a synthetic source whose audio ends at 14.083 s and whose video ends at 12.083 s was advertised to 12.083 s that way.
+* Letting every learned end time move the media end would let one failed read shorten every later stream session of the file.
+A job attempt's FFmpeg that stops at a read error exits with status 0, and the attempt reports where it stopped as each stream's end.
+* Letting a stream's header end time move the media end would cut a healthy file short when a stream header understates the stream.
+A stream header is no better evidence than the container header, and only the packets show where a stream ends.
 * Padding only the streams that the probe shows ending early leaves a source that ends before its probe says, or whose header states no end time, without padded segments.
 The server would need a second attempt to pad what the first attempt found.
 * Letting the segment that holds the last video keyframe take in every later audio sample held 1,704 s of audio in one segment, which arrived after 44.7 s.

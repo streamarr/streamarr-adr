@@ -123,7 +123,7 @@ A copy's refusal stays `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED`.
 A producer that outgrows its reservation waits for unreserved bytes only while one of the worker's segments is queued or uploading, and at most until the upload acknowledgment timeout.
 
 NOTE: An amendment lets the worker find the keyframe that an encoded attempt reads from while a file has no stored keyframe positions (<<decision-seek>>).
-The server sends a keyframe search time in place of the fixed read-back of one period.
+The server sends a keyframe search time with every encode from a later segment, in place of the fixed read-back of one period, and the worker checks the read of each such attempt before FFmpeg starts.
 The worker fails an encoded attempt whose first segment opened late with `JOB_ATTEMPT_FAILURE_FIRST_SEGMENT_OPENED_LATE`, and the server then ends the stream session (https://github.com/streamarr/streamarr-server/pull/915[streamarr/streamarr-server#915], https://github.com/streamarr/streamarr-transcode-worker/pull/198[streamarr/streamarr-transcode-worker#198]).
 
 == Context
@@ -786,22 +786,26 @@ The server no longer sends the requested segment's boundary as the seek position
 The worker no longer computes a seek position of its own.
 
 A file without a usable container index has no stored keyframe positions until its keyframe scan finishes (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]).
-Until that scan finishes, the server sends no seek position.
-It sends a keyframe search time instead: the first segment's start minus 0.5 s.
-The attempt reads from the last keyframe of the chosen video that presents at or before that time.
-The worker finds that keyframe in the source before FFmpeg starts.
+Every encode from a later segment carries a keyframe search time: the first segment's start minus 0.5 s.
+When the server stores the file's keyframe positions, the job also carries the stored keyframe's seek position, chosen as above.
+Before FFmpeg starts, the worker checks the read that the attempt would run, with the attempt's own seek.
+A read passes when the decoder's first picture from it presents at or before the search time.
+The check decodes with one thread up to that first picture, and reads at most 1 s past the search time.
+The attempt keeps the stored seek position when its read passes.
+Otherwise, and whenever no position is stored, the worker finds the keyframe in the source.
 It reads the chosen streams' packets, without decoding them, over intervals that run back from the search time.
 The first interval is one segment period long, and each interval before it is twice as long as the one after it.
 The search stops at the first interval that holds a keyframe that presents at or before the search time.
-The worker then checks where its own seek lands, with the same seek that the attempt runs.
-It reads from the keyframe's presentation time when a seek there lands at or before the keyframe, and otherwise from its decode time when a seek there does.
-When neither seek lands at or before the keyframe, or no keyframe presents that early, the attempt reads from the source's start.
-The worker decodes the media from that keyframe up to the first segment's start, and the worker does not encode that media either.
-A job that encodes video from a later segment carries exactly one of a seek position and a keyframe search time.
-The worker refuses any other job as an invalid specification, and it refuses a keyframe search time on any other attempt.
+The attempt reads from the first of three positions whose read passes: the keyframe's presentation time, its decode time, and its decode time less 3/23 s.
+Before it decodes one of these reads, the worker copies the read's first video packet, and a read whose first packet decodes after the keyframe fails without a decode.
+When none passes, the search tries the keyframe before, up to four keyframes, and the attempt then reads from the source's start.
+The worker decodes the media from that position up to the first segment's start, and does not encode it.
+An attempt that holds the last picture is the exception: it encodes from the position and discards what it encodes before the first segment (<<decision-early-ends>>).
+The worker refuses a job that encodes video from a later segment without a keyframe search time as an invalid specification, and it refuses a keyframe search time on any other attempt.
 
 The worker refuses an encoded attempt whose first segment opens late.
-A seek that lands after the keyframe that fills the first segment's start makes the first decoded picture late.
+A read that starts after the keyframe that fills the first segment's start makes the first decoded picture late.
+The checks keep such reads out, so the refusal guards against a read that passes its check but still opens late in the attempt.
 The attempt's first segment then opens on a keyframe after the first output frame at or after the segment's start.
 The worker fails such an attempt as a first segment that opened late, and it uploads no media segment of the attempt.
 An attempt that reads from the source's start is never refused, because it decodes every picture before its first segment.
@@ -812,6 +816,22 @@ It ends the stream session with a playback failure.
 The fixed read-back of one period that the server sent before landed inside the GOP before the keyframe that fills the first segment's start whenever keyframes lay more than about 6 s apart.
 The attempt then lost pictures and still reported success.
 Only the worker sees where its own demuxer lands.
+
+*Why the worker checks a stored position too:* FFmpeg's command line tool moves a seek 3/23 s earlier when its probe saw a video stream's B-frames.
+A probe that decodes no picture misses them, as in a capture that starts inside a GOP or a file whose video starts late.
+A seek to the stored keyframe's decode time then reads from the packet after the keyframe, and the attempt decodes nothing until the next keyframe.
+The read 3/23 s earlier reads the keyframe.
+
+*Why the decoder's first picture:* a keyframe that the parser flags can be a recovery point, which x264's periodic intra refresh writes in place of IDR pictures.
+A decoder that starts there shows its first picture only when the refresh ends, 1.6 s later in the measured 320x180 source.
+A read that starts at the right packet can therefore still open the first segment late, and only a decode shows it.
+The keyframe before fills the first segment.
+
+*Why a job carries both fields:* the worker checks the stored position's read against the search time, so the two fields are not alternatives.
+
+*Why a stored position's read is only decoded:* a read whose first picture presents by the search time decodes every picture of the first segment, wherever it lands.
+A copy of the first packet only ends a late read sooner, and a stored position's read is rarely late.
+Each FFmpeg that runs before the attempt's own delays the first segment by its start and the source's probe, about 250 ms on the measured storage.
 Evidence: <<evidence-keyframe-search>>.
 
 *Why:* A seek to the boundary itself can lose the frame that the start-0 attempt repeats there, and can land late on an MPEG-TS source.
@@ -1759,8 +1779,9 @@ The attempt then loses pictures and still completes, and no read-back length cov
 A resume an hour into a film would read an hour of source first.
 * Running the search as a separate probe job before the attempt: the server would dispatch a second job and wait for its result before it dispatches the attempt.
 The probe could run on another worker whose demuxer lands elsewhere, and the attempt would still need its own landing check.
-* Moving the choice between a stored keyframe's presentation and decode time into the worker, with the server's stored keyframes as hints: the server's choice by container is correct for every container it stores keyframes for today, and the refusal of a late first segment catches a seek that lands late.
-Reconsider it when a container's seek proves the server's choice wrong.
+* Sending the stored seek position and the keyframe search time as alternatives, a oneof: the worker could not check the stored position's read, and a seek to a stored decode time that FFmpeg reads from the packet after the keyframe lost every picture before the next keyframe.
+* Trusting a seek that lands at or before the keyframe without decoding: a recovery point's first picture comes after the refresh, so such a read can still open the first segment late.
+* Copying the read's packets beside the decoded picture in one FFmpeg, to end a late read early: FFmpeg's muxer writes nothing until every output stream's encoder has its first frame, so the copied packets arrive only with the picture, or never.
 * Having each job attempt report the keyframes it read, for the server to store: the stored positions come from the keyframe scan, whose completeness rules a partial report would have to meet (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]).
 The search does not need stored positions to be correct.
 * Handling stream sessions whose attempts run on different worker versions, by adding the worker version to the affinity key or a recipe version to the worker's capabilities, handles a case that cannot occur while Streamarr has no production instances.
@@ -2209,35 +2230,60 @@ The MPEG-PS attempt opened at 20 s with 96 of them.
 The picture times came from the segments' bytes: `tfdt` plus the composition offset.
 * A stored seek position of 17.5 s on the MPEG-TS source landed inside the GOP from 0 s.
 Worker `main` completed that attempt with a late segment 3.
-The worker now fails it as a first segment that opened late, and uploads no media segment.
-* The table gives the time from the start command to the first media segment's upload, for a 60 s 1080p MPEG-TS source encoded to 1080p with libx264 from segment 9, at 54 s.
-Each cell is the median of 5 runs after one warm-up, with the range.
-The runs shared a 32-core Linux workstation whose load average was 14 to 17.
+The check now finds no picture by 17.5 s from that read, and the attempt reads from the keyframe at 0 s instead.
+With a search time of 20.5 s, past the keyframe at 20 s, the check passed that read, and the worker failed the attempt as a first segment that opened late and uploaded no media segment.
+* A capture cut 2 s into the first 10 s GOP of the same H.264 and AAC starts with no parameter set, so FFmpeg's probe decoded no picture in its 5 s.
+The seek to the stored decode time of the keyframe before segment 7, at 42 s, read from the packet after that keyframe.
+Without the check, that attempt failed as a first segment that opened late.
+With it, the attempt read from 3/23 s before the decode time, and segment 7 held the picture times of the attempt from segment 2.
+* x264's periodic intra refresh at 320x180 wrote a recovery point every 5 s and no IDR picture after the first.
+A decoder that started at the recovery point at 35.125 s showed its first picture at 36.708 s, after segment 6's start at 36 s.
+Without the decode, that attempt failed as a first segment that opened late.
+With it, the attempt read from the recovery point 5 s earlier, and segments 1 and 6 held the picture times of the attempt from the start.
+* At 1 fps from segment 4, and at 24000/1001 fps from segment 5, the attempts held the picture times of the attempt from the start.
+At 24000/1001 fps the first frame of segment 5 presents 0.03 s after its start, which the refusal allows.
+* The table gives the time from the start command to the first media segment's upload, for an encode to 1080p with libx264 from segment 109, at 654 s, of a 900 s 1080p MPEG-TS source at 30 Mbit/s.
+FFmpeg read the source through a throttle of 110 MB/s and 2 ms per seek, about 80 MB/s in effect.
+Each cell is the median of 5 interleaved runs, with the range.
+The runs shared a 32-core Linux workstation whose load average was 5 to 18.
 
-[cols="1,2,2"]
+[cols="1,2,2,2,2"]
 |===
-|Keyframe spacing |One-period read-back (`main`) |Search
+|Keyframe spacing |No stored keyframes, worker `main` |No stored keyframes, search |Stored keyframe, worker `main` |Stored keyframe, checked
 
 |2 s
-|623 ms (580 to 733)
-|501 ms (464 to 508)
+|1,816 ms (1,795 to 5,104)
+|2,529 ms (2,493 to 3,803)
+|1,759 ms (1,739 to 3,619)
+|1,802 ms (1,745 to 3,262)
 
 |10 s
-|682 ms (656 to 830)
-|529 ms (515 to 565)
+|1,802 ms (1,732 to 4,175)
+|3,046 ms (2,745 to 4,456)
+|1,967 ms (1,921 to 3,040)
+|2,951 ms (1,926 to 3,408)
 
 |20 s
 |No media segment
-|670 ms (656 to 679)
+|4,441 ms (4,297 to 6,124)
+|2,999 ms (2,801 to 4,303)
+|2,957 ms (2,899 to 3,635)
 
 |60 s
 |No media segment
-|1,224 ms (1,187 to 1,392)
+|12,637 ms (11,832 to 13,424)
+|6,657 ms (6,447 to 9,027)
+|6,600 ms (6,530 to 7,690)
 |===
 
-* The read-back read from 48 s in every row, so with 20 s or 60 s keyframe spacing it landed after the last keyframe before 54 s.
-By the search's rule, the attempts read from the keyframes at 52 s, 50 s, 40 s and 0 s.
-The search therefore reads less than the read-back when keyframes lie closer than a period, and reads back to the keyframe that fills the first segment when they lie further apart.
+* Without stored keyframes, worker `main` read back one period, from 648 s, and started the attempt's FFmpeg 15 to 19 ms after the start command.
+With 20 s or 60 s keyframe spacing that read landed after the last keyframe before 654 s, and the attempt failed.
+* The search started the attempt's FFmpeg after 1.05 s with 2 s or 10 s spacing, 1.8 s with 20 s spacing, and 5.6 s with 60 s spacing.
+At 60 s spacing it scanned 91.5 s of source in four intervals before it found the keyframe at 600 s.
+* With a stored keyframe, worker `main` scanned for a keyframe before a held encode's first segment and started the attempt's FFmpeg after 264 to 286 ms; the decode of the stored position's read started it after 273 to 297 ms.
+A build that also copied that read's first packet started it after 509 to 563 ms.
+* First segment times of one build varied by up to 3 s between runs, because the encode's start shared the workstation with other jobs.
+FFmpeg start times varied by less than 0.1 s.
 
 [[evidence-svt-av1]]
 === SVT-AV1 study

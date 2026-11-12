@@ -235,6 +235,15 @@ Every other failure follows the failure rules of the work's own ADR, such as the
 When the server cannot reach the database to mark a scheduled task as no longer running, the scheduled task stays marked as running.
 db-scheduler then finds that scheduled task dead and runs the scheduled task again, as after a crash.
 
+A scheduled task can also fail just before the shutdown's interrupt, for a reason that the shutdown did not cause.
+The server stores that failure by the failure rules of the work's own ADR.
+Storing the failure can wait for the database.
+When the shutdown's interrupt ends that wait, the server stores no failure.
+That scheduled task then stays marked as running.
+db-scheduler finds that scheduled task dead and runs the scheduled task again, as after a crash.
+db-scheduler counts one failure for that scheduled task when db-scheduler finds the scheduled task dead.
+link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032] gives the same rule when the server cannot save a probe's failure reason.
+
 A server shutdown is the only path that interrupts a library operation's running tasks.
 The process ends, and the next server start runs the operation again from the start.
 The library keeps its busy status until then.
@@ -326,7 +335,7 @@ They return when an operation needs membership beyond the operation id that artw
 == Consequences
 
 * A restart no longer turns a busy library `UNHEALTHY`; the operation runs again, and the normal rules skip completed work.
-* After a crash, or after the platform kills a server whose shutdown outlasts the grace period, a library stays busy without progress until db-scheduler finds the lost scheduled task dead.
+* After a crash, after the platform kills a server whose shutdown outlasts the grace period, or after a shutdown stops the server from storing a failure, a library stays busy without progress until db-scheduler finds the lost scheduled task dead.
 * A shutdown redoes work that the old 30 s drain would have let finish.
 A probe, a scan, a library operation's task or an artwork step that the shutdown interrupts runs again from its start after the restart.
 * A web request that the shared deadline does not end, such as a stream session request that waits for a probe, holds the shutdown until the deadline.
@@ -361,6 +370,11 @@ The next scan or refresh runs the check and reports the problem.
 * Counting a shutdown interrupt as a failure — the backoff delays the work after the restart, and the failure count reports a failure that nobody caused.
 * Bounding the whole last metrics publish, gauge reads included, instead of keeping the database off every publish — the server would have to own the meter registry that Spring Boot also closes, and a publish would still wait for the database outside a shutdown.
 * Leaving each interrupted scheduled task marked as running — the next server runs the scheduled task only once db-scheduler finds the scheduled task dead, 45 to 90 s later.
+Only a scheduled task whose failure the server was still storing at the interrupt stays marked as running (<<server-shutdown>>).
+* Marking a scheduled task as no longer running when the shutdown's interrupt stops the server from storing the scheduled task's failure — the server would drop a failure that the work reported.
+A scheduled task that keeps failing would then run again at once after every such shutdown.
+The case needs a failure in the last seconds before the interrupt and a database wait that outlasts the time to finish.
+* Marking such a scheduled task as no longer running and counting one more failure — ADR 0032 saves a probe's failure reason and schedules the probe's retry in one transaction, and a count without a reason would separate the two.
 * Starting the work in memory after storing the operation and compensating when the work cannot start, as the first proposal did — scheduling the scheduled task in the mutation's transaction leaves no gap to compensate.
 * Running every missed scheduled scan after downtime — the scans would repeat back to back and find the same state.
 * Intervals that do not divide 24, or cron expressions — start times would move from day to day, and cron adds a syntax for one setting.

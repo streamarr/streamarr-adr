@@ -317,6 +317,10 @@ _Avoid_: overhead, container overhead, fragment overhead
 The `ftyp` and `moov` boxes a player needs before any media segment of a variant or an audio rendition. There is one per variant. A variant's initialization segment is identical across every attempt that the same encoder backend produces. Once the server delivers audio renditions (ADR 0043), there is also one per audio rendition. An audio rendition's initialization segment is the same whatever job attempt writes it.
 _Avoid_: init file, header, init.mp4
 
+**Segment folder**:
+The folder, named by `STREAMING_SEGMENT_BASE_PATH`, where the server stores the initialization segments and media segments of its stream sessions, and below which the server deletes only the entries that the segment store writes (ADR 0064).
+_Avoid_: segment directory, segment root, base path, transcode folder, segment disk (the disk that holds the segment folder)
+
 **Media time**:
 Presentation time measured from the source container's start time that the probe reports, on the zero-based timeline that every attempt of a stream session shares.
 _Avoid_: PTS, source time, wall-clock time

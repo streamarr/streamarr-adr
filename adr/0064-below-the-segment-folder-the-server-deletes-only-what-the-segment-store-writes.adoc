@@ -1,0 +1,221 @@
+= ADR 0064: Below the Segment Folder, the Server Deletes Only the Entries That the Segment Store Writes
+
+== Status
+
+Proposed
+
+This decision narrows how the server deletes a stream session's stored segments under link:0019-recoverable-jit-hls-segment-delivery.adoc#decision-idle-retention[ADR 0019].
+The server still deletes every media segment and initialization segment that the server stored for the stream session.
+The server no longer deletes an entry that the server did not write.
+
+=== Implementation status
+
+Not implemented.
+https://github.com/streamarr/streamarr-server/issues/942[streamarr/streamarr-server#942] plans the work.
+That plan replaces the closed draft https://github.com/streamarr/streamarr-server/pull/928[streamarr/streamarr-server#928].
+
+== Context
+
+An operator gives the server a segment folder and one or more library folders.
+The segment folder is the folder where the server stores the media segments and initialization segments of its stream sessions.
+`STREAMING_SEGMENT_BASE_PATH` names the segment folder (ADR 0019).
+A worker uploads each initialization segment and each media segment to the server (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]).
+The segment store is the server module that writes each upload into the segment folder, reads each stored segment back, and deletes the stored segments.
+The local segment store is the segment store that keeps the files on the server's own disk.
+
+A media file belongs to the operator.
+The server has no way to get a deleted media file back.
+The server must therefore never delete a media file.
+
+Before this decision, seven paths deleted below the segment folder:
+
+* the end of a stream session, when a viewer closes playback, when a viewer switches the audio track, or when the server replaces a format attempt;
+* the expiry of an idle stream session, which the server checks every 15 s by default;
+* the eviction of idle stream sessions when less than 10 % of the segment folder's disk is free (ADR 0019);
+* the removal of a library, which ends the library's stream sessions;
+* the rollback of a stream session that failed to start;
+* the exit of the server process, which ends every stream session that is still registered;
+* the cleanup at the server's start, which deletes what an earlier server process left behind.
+
+The cleanup at the start runs only in a segment folder that carries the server's folder mark, the file `.streamarr-segment-folder`.
+Every path except the cleanup at the start deleted a stream session's folder with a recursive delete.
+The recursive delete deleted every name that the recursive delete found.
+The recursive delete also entered any file system that was mounted below the stream session's folder.
+So a media file that sat below a stream session's folder was lost when the stream session ended.
+A library that was mounted at a variant's folder lost every file that the server could delete.
+An adversarial review reproduced the loss of a media file that sat beside a stored media segment.
+
+The cleanup at the start kept a second copy of the segment store's naming rules.
+The upload check accepted any name that ends in `.mp4` or `.m4s`, and the segment store wrote a file under that name.
+So the names that the segment store writes did not form a closed set, and no delete rule could be stated from those names.
+
+== Decision
+
+=== The segment store owns every delete below the segment folder
+
+Every path that deletes below the segment folder deletes through one delete routine.
+The delete routine lives inside the local segment store.
+The delete routine sits behind the existing segment store interface.
+The segment store interface does not change.
+The callers of the segment store interface do not change.
+The in-memory segment store that tests use does not change.
+
+*Why:* Every caller already reaches the disk through the segment store interface.
+A rule inside the local segment store therefore covers every caller, and the rule that keeps a media file safe lives in one place.
+
+[[decision-closed-set]]
+=== The delete routine deletes only the entries that the segment store writes
+
+The delete routine deletes only the entries in a closed set.
+Each name in the closed set is bound to one depth and one file type.
+The depth counts folders below the segment folder.
+An entry at depth 1 sits directly inside the segment folder.
+
+[cols="1,4,1"]
+|===
+|Depth |Entry |File type
+
+|1
+|A stream session's folder, named by the stream session's UUID
+|folder
+
+|1
+|An upload's temporary file, named `.upload-` followed by digits and `.tmp`
+|regular file
+
+|1
+|The folder mark, `.streamarr-segment-folder`
+|regular file
+
+|2
+|`init.mp4` and `segment<N>.m4s` of the default variant, which has no folder of its own
+|regular file
+
+|2
+|A variant's folder, named by the variant's label, such as `720p`
+|folder
+
+|3
+|`init.mp4` and `segment<N>.m4s` inside a variant's folder
+|regular file
+|===
+
+The delete routine deletes nothing below depth 3.
+
+Every entry outside the closed set stays in place.
+An entry with a name of the closed set at another depth stays in place.
+An entry with a name of the closed set and another file type stays in place.
+For example, a regular file named `720p` stays, and a folder named `init.mp4` stays.
+A folder that still holds an entry that stays also stays.
+The delete routine counts every entry that stays.
+
+The delete routine opens each folder without following a soft link.
+A soft link below the segment folder stays in place, and the soft link's target stays untouched.
+A file system that is mounted below the segment folder appears to the delete routine as a folder.
+The closed set applies to that folder as to any other folder.
+
+A new kind of stored file, such as an audio rendition's media segment, joins the closed set before the segment store writes that kind of file.
+A kind of stored file that is missing from the closed set stays in place and is counted.
+
+=== The server is the only writer inside its segment folder while the server runs
+
+The server is the only writer inside its segment folder while the server runs.
+A person or a process that changes a running server's segment folder is outside what the server defends against.
+The server therefore does not defend against an entry that another writer puts in place of a checked entry between the check and the delete.
+
+*Why:* Under the single-writer rule, a live stream session's folder holds only what the server wrote.
+The closed set then deletes exactly the files that the server wrote.
+Between two runs of the server, a person may change the segment folder.
+The cleanup at the start applies the same closed set, so a foreign entry that a person left in the segment folder stays in place.
+
+=== One server process uses one segment folder
+
+One server process uses one segment folder.
+The server takes no lock between server processes.
+This decision is revisited if horizontal scaling ever lets several server processes share one segment folder.
+
+*Why:* Streamarr runs one control-plane process (link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018]).
+A second server process on the same segment folder would be a second writer, which the single-writer rule already excludes.
+
+[[decision-start-refusals]]
+=== The start refuses a segment folder that is dangerous to use
+
+The start deletes nothing and creates nothing when the segment folder is dangerous to use.
+The segment folder is dangerous to use in each of these cases:
+
+* the segment folder is the root folder `/`;
+* the segment folder is the home folder of the server's user;
+* the segment folder is a folder above the home folder of the server's user;
+* the segment folder lies inside a library folder;
+* the segment folder lies above a library folder;
+* the segment folder lies inside the artwork storage folder (link:0039-catalog-entries-hold-metadata-edits-and-user-data.adoc[ADR 0039]);
+* the segment folder lies above the artwork storage folder.
+
+The start compares the real paths of these folders.
+A real path resolves every soft link and every relative part of the path.
+The start reads no mount table.
+
+*Why:* Each of these folders holds files that the operator or the server keeps.
+A real path stops a soft link or a relative path from hiding a library folder or the artwork storage folder.
+The closed set already protects a foreign entry that lies below the segment folder.
+The start refusals stop a configuration mistake before the server writes or deletes anything.
+
+=== Explicitly deferred
+
+* The methods of the delete routine and the type of the delete routine's outcome.
+The pull request that adds the delete routine designs the methods and the outcome type.
+* Several server processes on one segment folder.
+The design of horizontal scaling decides whether several server processes may share one segment folder.
+
+== Consequences
+
+* The server still deletes every media segment and initialization segment of a stream session that ends.
+ADR 0019 promises to delete a stream session's stored segments, and the server still deletes every stored segment.
+* A media file that a person moves into a stream session's folder stays in place.
+* A library that is mounted at a stream session's folder or at a variant's folder keeps every file that does not carry a name of the closed set.
+* The upload check accepts only names in the segment store's naming scheme, `init.mp4` and `segment<N>.m4s`.
+Without that narrower upload check, a file that the segment store wrote under another name would stay in the segment folder for good.
+* Entries that the server keeps use disk space.
+Under disk pressure, the server may end more idle stream sessions than before, because deleting a stream session frees none of the space that the kept entries use.
+The server reports the deleted, kept and failed entries in a metric and in the segment folder's health.
+An operator can therefore see the kept entries and remove them.
+
+=== The remaining risk
+
+A media library can hold the exact names of the closed set.
+For example, an HLS folder can hold `init.mp4` and `segment1.m4s`.
+When such a library is mounted at a variant's folder of a stream session, the delete routine deletes those files.
+Every other entry in that library stays in place.
+Entries that the server keeps pile up until an operator removes them.
+The metric and the segment folder's health make those entries visible.
+
+== Rejected Alternatives
+
+* Deleting every entry below a stream session's folder, which the server did before this decision.
+A media file that is moved into the folder, or a library that is mounted below the folder, is lost.
+* A mark in each stream session's folder and each variant's folder that says the server created the folder.
+The JDK cannot create a folder relative to an open folder handle, so the server can never create a folder and mark the folder in one step.
+A copied mark also makes a foreign folder look like the server's folder.
+* A record in memory of the files that the current server process created.
+Under the single-writer rule, the record deletes the same files as the closed set.
+The record is gone after a restart, so the cleanup at the start needs the closed set anyway.
+* A mount table that detects a library mounted below the segment folder.
+Such a mount is rare.
+Under the closed set, such a mount loses only files with the exact names of the closed set.
+* A persisted record of the files that the server wrote.
+ADR 0018 rejects a persisted cleanup ledger, wherever the ledger is stored.
+* Refusing a segment folder that is not a file system of its own.
+The refusal helps an operator configure the server.
+The refusal proves nothing about entries that appear below the segment folder later.
+* A lock between server processes on one segment folder.
+One server process uses one segment folder, so no second server process writes there.
+
+== References
+
+* link:0008-server-generated-hls-playlists.adoc[ADR 0008: Server-Generated HLS Playlists] — the segment store interface that playlists read
+* link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018: Live Playback Authority and Outbound Transcode Workers] — one control-plane process, and no persisted cleanup ledger
+* link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019: Recoverable Just-In-Time HLS Segment Delivery] — the segment folder, idle retention and disk-pressure eviction
+* link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037: The Worker Delivers Fragmented MP4 Segments From FFmpeg's Standard Output, and HLS Media Segments Are fMP4 Only] — the uploads that the segment store writes
+* link:0039-catalog-entries-hold-metadata-edits-and-user-data.adoc[ADR 0039: Durable Catalog Entries Hold Metadata Edits and User Data; Library Items Hold What Scans Produce] — the artwork storage path
+* https://github.com/streamarr/streamarr-server/issues/942[streamarr/streamarr-server#942: Delete below the segment folder only the files and folders that the segment store writes, through one delete routine] — the plan that implements this decision
+* https://github.com/streamarr/streamarr-server/pull/928[streamarr/streamarr-server#928] — the closed draft that this plan replaces

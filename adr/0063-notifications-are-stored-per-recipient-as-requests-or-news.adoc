@@ -124,10 +124,15 @@ Its state is stored on the request, and only events write it:
 ** _withdrawn_, when its proposer cancels the subject, a newer proposal replaces it, or the server invalidates it (ADR 0024), and the request does not store which;
 ** _expired_, when the subject's expiry passes with no decision.
 * The domain that owns the subject publishes each resolution in the transaction that changes the subject.
-  The module writes the state and its time to every request about that subject that no event has resolved yet.
-* A request stores its subject's expiry when it is made, so it reads as expired from its own data once that time passes, before any event says so.
+  The resolution carries the instant of that change: the one instant that the subject's domain takes for the change, checks the subject's expiry against and records on the subject.
+  The module writes the state and that instant to every request about that subject that no event has resolved yet.
+* A request stores its subject's expiry, which the event that makes it carries, so it reads as expired from its own data once that time passes, before any event says so.
   A subject's expiry never changes: a change of the lifetime setting applies only to offers and invitations made after it (ADR 0024).
-* A request whose stored expiry has passed resolves as expired, whatever resolution arrives for it later, so it never stops reading as it already read.
+* The module compares the resolution's instant with the stored expiry, never the time at which it handles the resolution.
+  A resolution whose instant is before the expiry is written as it is, even when it reaches the module after the expiry, for example because its transaction waited for locks.
+  An offer or an invitation waits only for its lifetime (ADR 0024), so its domain accepts, rejects or declines it only at an instant before its expiry, and an acceptance never leaves an active share beside an expired request.
+  A request that read as expired while such a resolution was on its way then reads as decided or withdrawn, and the change is pushed like any other resolution.
+  A resolution whose instant is at or after the expiry is written as expired, at the expiry, so a request that already read as expired goes on reading so.
 * A resolved request counts as read.
   It stays in the list as history, with how it resolved, and it never becomes unread again.
 * A recipient may mark a waiting request read.
@@ -569,6 +574,8 @@ interface Notification {
 """
 A Notification that waits for a decision on its subject. Its state is stored on it, and the
 subject's events write it. Once expiresAt has passed, an unresolved request reads as EXPIRED.
+A decision or a withdrawal made before expiresAt that arrives after it still replaces EXPIRED,
+and the change is pushed.
 """
 interface RequestNotification implements Notification {
     id: ID!
@@ -834,8 +841,8 @@ The first build adds the module's own table and events, and no other mechanism.
 It uses the parts that the server already has:
 
 * *The module's inputs:* four kinds of application event (ADR 0010), which any domain may publish inside its transaction, and which the module hears inside that transaction:
-** _tell_, with a kind, a subject reference, the recipients, the snapshot and the event's time;
-** _resolve_, with a request kind, a subject reference, the resolution, the answer when the subject was decided, and the time;
+** _tell_, with a kind, a subject reference, the recipients, the snapshot and the event's time, and for a request its subject's expiry, which every request kind built now gives;
+** _resolve_, with a request kind, a subject reference, the resolution, the answer when the subject was decided, and the instant of the subject's change;
 ** _dismiss_, with a selector (see <<dismissal>>);
 ** _recipient deleted_, with the Account that its domain deletes.
 * *Where they live:* the four events, and one record type for each kind's snapshot, live in the shared events package below the domains, as ADR 0010 places the library events.
@@ -843,7 +850,7 @@ It uses the parts that the server already has:
   Unlike ADR 0010's library events, which carry only ids and are heard after commit, these carry the snapshot and are heard inside the publisher's transaction.
   The snapshot is what the module may not read for itself, and a Notification must commit or roll back with its event.
 * *Publishing:* each domain turns its own events into the module's.
-  For shares, the identity domain hears `ProfileShareChangedEvent` inside the transaction, works out the recipients from the relationship rows that it holds, leaves out the Account that acted, builds the snapshot, and publishes _tell_ and _resolve_.
+  For shares, the identity domain hears `ProfileShareChangedEvent` inside the transaction, works out the recipients from the relationship rows that it holds, leaves out the Account that acted, builds the snapshot, and publishes _tell_, with the offer's expiry for its requests, and _resolve_, with the instant that the change recorded on the share.
   The identity domain publishes _dismiss_ when a HouseholdAdmin loses the role or moves to another Household, and when it deletes a share, a Profile or a Household, and it publishes _recipient deleted_ when it deletes an Account.
   For the library kinds later, the library domain does the same from `ScanEndedEvent` and `RefreshEndedEvent`, with the library operation's id added, and publishes _dismiss_ when it removes a library.
 * *Storage:* one table that the module owns.
@@ -858,8 +865,9 @@ It uses the parts that the server already has:
   With one structured column, a new kind brings a name, a form, a subject type and a record type for its snapshot, and the module's shape does not change.
   A test writes and reads the snapshot of every kind, so a document that its record type cannot read fails the build, not a page.
 * *Writing:* _tell_ applies the noise rule to news with one `INSERT … ON CONFLICT … DO UPDATE` against the unique index, and makes requests with `INSERT … ON CONFLICT DO NOTHING` against the request index.
+  A request's expiry column takes the expiry that _tell_ carries, and the module asks no other domain for it.
   _Scan or refresh finished_ adds its figures in the same statement, and the decision that builds it fixes how.
-  _resolve_ updates the requests of its kind about its subject that no event has resolved yet, and writes expired to those whose stored expiry has passed.
+  _resolve_ updates the requests of its kind about its subject that no event has resolved yet: it writes the resolution and its instant where that instant is before the request's stored expiry, and expired, at the stored expiry, where it is not.
   _dismiss_ deletes what its selector selects.
   Both return the rows that they changed, for delivery.
 * *Delivery:* after commit, a listener passes each change to the recipient's open operations through a `KeyedSubscriptionBroadcaster` keyed by Account id, as `watchStateChanged` is keyed by Profile id (ADR 0042).
@@ -903,7 +911,8 @@ The tests show that:
 * a HouseholdAdmin who is demoted, or whose Account moves to another Household, loses its waiting requests about offers into that Household from the list, the count and a live change; it keeps its resolved requests and its news, and it gets no request back when it is promoted again;
 * an offer and a demotion of one of the target Household's HouseholdAdmins that run at the same moment leave that Account no waiting request, whichever commits first;
 * a person who gains a role later gets no Notification for what was already waiting;
-* a request reads as decided with its answer, withdrawn or expired as the subject's events write its state, for every recipient, and it reads as expired from its stored expiry before the sweep stores the offer's expiry;
+* a request reads as decided with its answer, withdrawn or expired as the subject's events write its state, for every recipient, and it reads as expired from the expiry that _tell_ carried before the sweep stores the offer's expiry;
+* an acceptance whose instant is before the offer's expiry, and whose resolution reaches the module after that expiry, resolves the requests as decided, with the answer and the acceptance's instant, and pushes the change; a withdrawal whose instant is at or after the expiry leaves them expired, at the expiry;
 * each path that changes a share, the expiry sweep included, writes the requests' state and pushes a change that carries the edge and the unread count that a fresh query returns;
 * a recipient keeps one unread news per kind and subject, also under two events at the same moment; news of another kind about the same subject makes a Notification of its own, a request never updates in place, and a repeated _tell_ makes no second request;
 * when an Account's management of a Profile is removed, granted again and removed again before the Account reads the first removal, the Account has one unread Notification, with the second removal's time and the Profile's name at that removal; after the Account reads it, a further removal makes a new one;
@@ -970,6 +979,8 @@ The tests show that:
 * Store on each Notification the relationship or the side through which it reached its recipient — the module would keep a copy of another module's relationships and answer for their changes, while the domain that owns a relationship already knows which waiting requests its change ends.
 * A separate notification service behind a message broker — Streamarr runs one server on one database (ADR 0027), and events inside the publisher's transaction give the same decoupling with no delivery guarantees to manage.
 * Read a request's state from its subject at each read — the module would read another module's tables and apply the subject's read rule again; the subject's domain already publishes every change, and the stored expiry bounds a missed one.
+* Resolve as expired every request whose stored expiry has passed when its resolution reaches the module — an acceptance made in time whose transaction waited for locks would leave a request that reads as expired beside the share that it made active.
+* Find a request's expiry from its subject or from the lifetime setting — the module would read another domain, and the setting applies only to subjects made after it changes, so _tell_ carries the expiry.
 * Keep a dismissed Notification in a third state — every list, count and mark would have to leave it out, and nothing needs it back.
 * Dismiss a person's news when it loses the relationship through which it was told — the news was true, and its recipient could know it when it was told; only a request asks something of its recipient.
 * Let the module work out a dismissal from a reason, such as a lost role — the module would have to know each domain's relationships, while a selector by id or by subject keeps the reason with the domain that owns it.

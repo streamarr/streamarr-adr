@@ -245,6 +245,9 @@ After the shared deadline, the server closes its stream sessions, its subscripti
 The server waits at most 1 s for each of those closes.
 The server ends its TMDB downloads without waiting for the downloads to finish.
 The server's last metrics publish also waits at most 1 s.
+No metrics publish reads the database.
+A gauge that counts database rows reports the count that a background count last read, so the gauge can lag by one count interval.
+Until a count succeeds, and after a count fails, such a gauge reports no value.
 
 *Why:* A deploy by `docker compose down` and `docker compose up` waits for the old server's shutdown.
 A shutdown should therefore take no longer than the work needs to end safely.
@@ -256,6 +259,8 @@ A killed server leaves its running scheduled tasks marked as running.
 Those scheduled tasks ran again only once a later server found those scheduled tasks dead, 45 to 90 s later.
 An interrupted probe or scan also counted a failure and moved its due time out by its backoff.
 The work of a scheduled task is durable, so ending the work early loses nothing that the next start cannot run again.
+The last metrics publish reads every gauge before it sends.
+A gauge that counted rows on that read waited up to the connection pool's 30 s timeout while PostgreSQL was stopped, and every other shutdown step waited behind the publish.
 
 https://github.com/streamarr/streamarr-server/pull/929[streamarr/streamarr-server#929] measured the seconds from SIGTERM to the server's exit, with synthetic media:
 
@@ -354,6 +359,7 @@ The next scan or refresh runs the check and reports the problem.
 * Letting running work finish for up to 30 s at shutdown, one scheduler after another — the waits added up past the grace period, the platform killed the server, and the killed work ran again only 45 to 90 s later.
 * A longer grace period — a deploy waits for the whole shutdown, and work that waits on a worker or an image host that stopped answering never ends by itself.
 * Counting a shutdown interrupt as a failure — the backoff delays the work after the restart, and the failure count reports a failure that nobody caused.
+* Bounding the whole last metrics publish, gauge reads included, instead of keeping the database off every publish — the server would have to own the meter registry that Spring Boot also closes, and a publish would still wait for the database outside a shutdown.
 * Leaving each interrupted scheduled task marked as running — the next server runs the scheduled task only once db-scheduler finds the scheduled task dead, 45 to 90 s later.
 * Starting the work in memory after storing the operation and compensating when the work cannot start, as the first proposal did — scheduling the scheduled task in the mutation's transaction leaves no gap to compensate.
 * Running every missed scheduled scan after downtime — the scans would repeat back to back and find the same state.

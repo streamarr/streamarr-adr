@@ -70,6 +70,9 @@ Until a scan has read each of those end times, the media ends at the container's
 A scan counts an audio stream's last packet at the stream's longest packet duration, plus a margin of 2 ms or two ticks of the stream's time base, whichever is longer.
 A media end that comes from scanned end times therefore never lies before the last sample while each audio stream's longest packet states a whole frame and its packet times do not overlap.
 
+NOTE: An amendment checks an early end only between the chosen video stream and the session's audio stream (<<decision-early-ends>>).
+No other audio track of the file refuses a copy of the video, because the player never receives that track.
+
 NOTE: An amendment settles how merged segment lists ship (<<decision-segment-list>>).
 Each job attempt carries the stream session's segment list, and the segment cap of 128 MiB is a constant of the worker contract.
 Every variant and rendition shares the list, so the server bounds every advertised output's largest segment against the segment cap when it creates the stream session.
@@ -1271,7 +1274,15 @@ The same rules apply when rounding the media end caused the playlist to advertis
 [[decision-early-ends]]
 === Encoded output plays to the advertised end when a stream or the source ends early
 
-A stream ends early when its end time falls at least one segment before another stream of the same source ends.
+A stream ends early when its end time falls at least one segment before the other stream that the stream session delivers ends.
+The rule compares only the chosen video stream and the session's audio stream.
+The video ends early when the session's audio stream ends at least one segment after it, and the session's audio stream ends early when the video ends at least one segment after it.
+The server does not compare either stream with every stream of the file.
+No other stream of the file counts, neither another audio track nor a second video stream.
+Other audio tracks of the file therefore never refuse a copy of the video, however long they run.
+A switch to another audio track makes the decision again for that track, so the server keeps no copy that the new track's later end forbids.
+Apart from a learned end bound, described below, a stream whose end time the server does not know never ends early, and never makes the other stream end early.
+In a file without audio, the video never ends early.
 The server reads each stream's end time from the probe, where the container header states it (link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032]).
 The probe never estimates an end time.
 When the header states none, the server learns the end time from the first job attempt that reads the stream's last sample.
@@ -1288,7 +1299,7 @@ The scan read every packet of the stream, and the header of a file that was cut 
 An attempt that starts after a stream's unknown end reads no sample of that stream, so it learns no end time this way.
 It reports instead that the stream delivered no sample from the position where it began reading, and names the stream and that position.
 The server stores that position as the stream's learned end bound, under the same snapshot fence as a learned end time.
-An audio stream whose learned end bound lies at least one segment before the video's end ends early under the rules below.
+The session's audio stream also ends early when its learned end bound lies at least one segment before the video's end.
 An encode that pads the audio stands in for it.
 Its audio carries generated silence from the attempt's first segment, with the same initialization segment as the variant's other attempts, so the attempt completes and carries the report.
 An encode that holds the last picture stands in for the video, because it finds the video's last keyframe, as described below, and reads the last sample after all.
@@ -1397,12 +1408,12 @@ A file that is cut short therefore completes when playback reaches its real end.
 
 These rules apply to a stream that ends early:
 
-* When an audio stream ends at least one segment before the video, or before another audio track that has a rendition in the stream session, that audio stream is encoded and padded with silence up to the advertised end.
+* When an audio track that the stream session delivers ends at least one segment before the video, or before another audio track that has a rendition in the stream session, that audio track is encoded and padded with silence up to the advertised end.
 The stream is encoded even when the stream session copies the video.
 An attempt that starts after the audio stream's end encodes generated silence for that stream.
 Every attempt therefore carries the same tracks, and no playlist needs `EXT-X-GAP`.
 An attempt that carries only generated silence writes the same initialization segment as the variant's other attempts, because the server's comparison stays strict.
-* When the video ends at least one segment before the audio, the video is encoded and holds its last picture up to the advertised end.
+* When the video ends at least one segment before the session's audio stream, the video is encoded and holds its last picture up to the advertised end.
 The video is encoded even when the stream session would otherwise copy it.
 The held picture is the last picture that the video filters make from the source, after deinterlacing and scaling, repeated at the output frame rate.
 No repeated picture passes through the deinterlacer again.
@@ -1485,6 +1496,9 @@ In a 64 s video with 84 s of audio, no keyframe opened the segments after the vi
 Answering 404 for those segments broke hls.js, AVPlayer and WebKit's native player.
 With a padded source standing in for the worker, a held last frame played to 84 s in hls.js in four browsers, in WebKit's native player and in AVPlayer, with two runs each.
 With audio renditions, AVPlayer played to the end with silence padding and with `EXT-X-GAP`, in 3 runs each, but `EXT-X-GAP` left hls.js stuck on the iPhone.
+
+*Why only the session's audio stream counts:* The player receives only the stream session's own tracks: the chosen video stream and the session's audio stream.
+An audio track that the session does not play therefore can't leave sound without a picture, and holding the last picture for it would encode the video for sound that the player never receives.
 
 *Why no segment takes in audio past its interval's end:* When the segment that holds the last keyframe took in the audio after it, that segment held 24 s of audio in the 64 s case and the segments after it never arrived, although the attempt completed.
 With 1,764 s of 6-channel audio, that one segment held 1,704 s of audio and arrived after 44.7 s, past the 22 s that the server waits for a replacement attempt's first segment.
@@ -1832,8 +1846,8 @@ With FFmpeg's fragments, 40 of 42 such runs from 0 failed fatally before playing
 * A stream-copy replacement attempt whose first fragment holds the boundary keyframe inside it now delivers its first segment whole.
 With the previous producer, that segment lost 2 s of video, and Chromium, WebKit and AVPlayer each lost 24 to 26 frames at the junction.
 With rebuilt segments, none of them lost a frame there.
-* A source whose audio or video ends at least one segment early plays to its end in every player, because the early-ending stream is encoded and padded.
-A stream session that copies such a source's video still encodes an early-ending audio track, and it encodes early-ending video.
+* A stream session whose video or audio stream ends at least one segment before the other plays to its end in every player, because the early-ending stream is encoded and padded.
+A stream session that would copy the video still encodes an early-ending audio stream, and it encodes early-ending video.
 * A copied audio stream that ends less than one segment before the media end is never padded.
 When a segment starts at or after that stream's end, the segment carries no sound of that stream, and a player can stall or stop there (<<decision-early-ends>>).
 * A lossy encode that carries the padding can code its last frames before the source's real end differently, so its last decoded frame can differ from the encode without padding.
@@ -2050,6 +2064,8 @@ An E-AC-3 track with Atmos would lose its objects, and a TrueHD or DTS track wou
 * Merging the last segments so that no segment starts at or after a copied audio stream's end was never tested in a player.
 The merge would also work only where a scan has read the audio's end, and an Apple player may still stop where the sound ends.
 * Having the worker refuse a segment that lacks the copied audio, so that the server moves playback to a stream session that encodes the audio, would spend a format attempt and replace the stream session near the end of the title.
+* Comparing the video and the session's audio stream with every stream of the file would refuse a copy of the video whenever another audio track runs at least one segment past it.
+A file whose video and default audio track end together, beside a second track that runs on, would then encode its whole video, although the player never receives the second track.
 * Padding only the streams that the probe shows ending early leaves a source that ends before its probe says, or whose header states no end time, without padded segments.
 The server would need a second attempt to pad what the first attempt found.
 * Letting the segment that holds the last video keyframe take in every later audio sample held 1,704 s of audio in one segment, which arrived after 44.7 s.

@@ -134,7 +134,7 @@ Every message on the worker session is then a command or a short event.
 The server still accepts at most 128 KiB in one message of every call.
 
 *Why:* The server counts a probe's unit as used until the probe attempt ends on the server (ADR 0032).
-A probe attempt ends on the server when the attempt's report call ends or when the event arrives.
+A probe attempt ends on the server when the server has stored the outcome of the attempt's probe report, when the attempt's report call ends without an outcome to store, or when the event arrives.
 The server must therefore learn the end of every probe attempt.
 A probe report can be large, and a command or an event must never wait behind a probe report.
 A probe report therefore travels in a call of its own.
@@ -226,11 +226,12 @@ At 2 keyframes each second, 150,000 keyframes cover more than 20 hours.
 A four-hour file stays within the default keyframe limit up to 10 keyframes each second.
 A video stream whose every frame is a keyframe reaches 150,000 keyframes after 104 minutes at 24 frames per second.
 The default of `probe_report_length_limit_bytes` is 16 MiB.
-With the largest values that the contract's fields can hold, the keyframe positions and the measurement at both defaults take 12.4 MiB, so 16 MiB leaves 3.6 MiB for the result.
+With the largest values that the contract's fields can hold, the keyframe positions and the measurement at both defaults take 12.4 MiB, so 16 MiB holds them beside a result of 128 KiB.
 The default of `probe_result_length_limit_bytes` is 128 KiB, the length that the limit for one session message allowed a result before this decision.
 A result holds at most 16 KiB of titles and handler names and at most 32 KiB of chapters (ADR 0032).
-A stream entry with every field at its largest encoding takes about 320 bytes beside its other text, so 100 streams take about 32 KiB.
-Those parts add up to about 80 KiB.
+The server refuses a `probe_result_length_limit_bytes` below those 48 KiB.
+A stream entry with every field at its largest encoding takes about 320 bytes beside its other text.
+Beside the 48 KiB of titles, handler names and chapters, 128 KiB leaves room for about 256 such stream entries.
 
 *Why:* Each limit bounds the server's memory and storage, so the server owns each limit.
 The server can change a limit without a new worker.
@@ -243,14 +244,21 @@ The server reads the encoded fields of a probe report as the messages of the rep
 The server reads each field's number, length and count, and the server builds no message from the bytes.
 The server counts every occurrence of a field, in any order of the fields.
 The server ends the report call at the first message after which the result is longer than `probe_result_length_limit_bytes`.
-The server also ends the report call at the first message after which the keyframes exceed `keyframe_limit`, or the measured keyframe intervals exceed `measured_keyframe_interval_limit`.
+The server also ends the report call at the first message after which either list of keyframe deltas holds more entries than `keyframe_limit`.
+The server counts each list on its own.
+The same rule applies to each of the two lists of measured keyframe intervals, added up over the measured streams, against `measured_keyframe_interval_limit`.
+The server also ends the report call when the measurement holds more measured streams than half of `probe_result_length_limit_bytes`.
+Every measured stream also appears in the result, and a stream entry of the result takes at least 2 bytes.
+The server also ends the report call at a field that `ProbeAttemptReport` or a measured stream does not declare, or at a field of the wrong wire type.
+Inside the result, only the result's length limit applies.
 Each of these ends is a contract violation (<<decision-limits>>).
 The server decodes the probe report only after the last message, and only when every limit holds.
 
 *Why:* The memory budget counts encoded bytes (<<decision-playback-first>>).
 A probe report within the length limit can decode to far more heap than its length, because each small entry of a repeated field becomes an object.
 In a measurement of the server's code, a probe report of 16 MiB whose result held only empty stream entries decoded to about 1.6 GiB of the heap.
-By the same ratio, a result within the default of 128 KiB decodes to about 13 MiB at most.
+At the same ratio, a result of 128 KiB would take about 13 MiB.
+A decoder keeps every field that the message does not declare, so an undeclared field can take heap in the same way.
 Before this decision, the limit of 128 KiB for one session message capped the result.
 An end at the first message that exceeds a limit also frees the probe report's room in the budget at once, instead of after the whole probe report has arrived.
 
@@ -299,6 +307,7 @@ A report call therefore times out only when the probe report stops advancing, ne
 
 The server answers as soon as the server has checked the probe report against the contract and matched the probe report to the probe attempt.
 The server answers before the server stores the probe report in the database.
+The server still counts the probe until the server has stored the probe report's outcome (<<decision-report-call>>).
 When the server cannot store a probe report that the server accepted, the probe runs again (ADR 0032).
 The worker never sends a probe report a second time.
 A probe report that breaks the contract counts toward ADR 0032's limit of three consecutive contract violations for that probe.
@@ -308,6 +317,8 @@ The server treats the probe attempt the same way when the event arrives while th
 The probe then retries with backoff (ADR 0032).
 
 *Why:* A bound on the whole probe report would fail the same large probe report on a slow link at every retry.
+A decoded probe report stays in the server's memory until the server has stored the outcome.
+The count therefore bounds the decoded probe reports that the server holds at once by the probes that the server has started.
 The server already retries a probe whose worker is lost, so the worker needs no retry of its own.
 A report call can fail before the server reads the call's first message, for example when a proxy between the worker and the server resets that one call.
 The server then cannot tell which probe attempt the failed report call reported.
@@ -427,7 +438,7 @@ A probe report that is longer than its first message stated is an example.
 * ADR 0032's limit of 16,384 bytes on a result's titles and handler names no longer protects the worker session.
 That limit stays until a later probe version removes the limit (<<explicitly-deferred>>).
 * Where ADR 0032 says that a worker's reply breaks the contract, the reply is the probe report.
-* The server counts a probe until the probe's report call ends, or until the event `ProbeAttemptEndedWithoutReport` names the probe attempt (<<decision-report-call>>).
+* The server counts a probe until the server has stored the outcome of the probe's report, until the probe's report call ends without an outcome to store, or until the event `ProbeAttemptEndedWithoutReport` names the probe attempt (<<decision-report-call>>).
 * After a cancel command, the server waits for that event, not for the probe's result (<<decision-cancel>>).
 
 [[explicitly-deferred]]
@@ -452,7 +463,7 @@ A probe error that the server stored earlier for such a file stays (<<decision-b
 * The server can slow a probe report, and the server bounds the bytes of probe reports that the server has read.
 The transport can hold further bytes of each open report call, up to the flow-control window of one call.
 * The worker holds each probe report in memory until the probe report's call ends.
-The server starts a probe only on a unit that the server counts as free, and the server counts a probe until the probe's report call ends (ADR 0032).
+The server starts a probe only on a unit that the server counts as free, and the server counts a probe at least until the probe's report call ends (ADR 0032).
 The worker therefore holds at most one probe report that the server has not answered for each probe that the server counts.
 The server never counts more probes than the largest capacities that the worker has granted in the worker session, added together (ADR 0032).
 A capacity that the worker lowers afterwards does not lower that number, because the probe reports of the probes that ran before stay.
@@ -467,6 +478,12 @@ When that wait passes the worker's bound for a message, the report call fails, a
 * A worker whose canceled probe does not end within the server's wait still loses the worker session, as before this decision.
 A probe that reads a stalled network share can be such a probe (ADR 0032).
 * The server decodes only a probe report whose fields keep every stated limit (<<decision-scan-before-decode>>).
+In measurements of the server's code, a probe report within every default limit decoded to about 11 MiB, and a measurement of 65,536 empty measured streams to about 14 MiB.
+The server holds at most one decoded probe report for each probe that the server counts.
+Many malformed probe reports at once could still exhaust the server's heap.
+Only a defective or compromised worker inside the trust boundary of ADR 0035 sends such probe reports, and this decision accepts that.
+* A probe report of another probe version that breaks a limit counts as a contract violation, not as a misconfigured worker (ADR 0032).
+The server ends the report call before the server decodes the probe version.
 While the server decodes a probe report, the server holds the probe report's encoded bytes and the decoded message at the same time.
 The encoded bytes add at most the length limit, 16 MiB by default, to the heap that a probe report holds.
 * A file whose chosen video stream holds between 150,000 and 1,048,576 keyframes got a copy before this decision.
@@ -508,6 +525,11 @@ The worker discards the probe report after every refusal, so nothing would read 
 The probe report of a playback probe would wait behind the probe report of a keyframe packet scan.
 * Decode every probe report, and then check the decoded probe report against the limits.
 A probe report within the length limit could take more than a gigabyte of the server's heap before any check refused the probe report.
+* Require the fields of a probe report in field-number order, decode the result first, and let the budget weigh each probe report's decoded size.
+Protobuf does not order fields, and a reservation that grows while probe reports arrive can leave every waiting probe report short of room.
+* Limit the probe reports that the server decodes and stores at once across all workers.
+The limit would need room kept for playback probes' reports and would cross from the report call to the thread that stores the outcome.
+The count of each probe until its outcome is stored bounds the same probe reports with no new mechanism.
 * Check a probe report's limits once, after the last message of the report call.
 The probe report would hold its room in the budget until the probe report's last byte arrived, also when the probe report's first bytes already exceeded a limit.
 * Bound the time for a whole probe report.

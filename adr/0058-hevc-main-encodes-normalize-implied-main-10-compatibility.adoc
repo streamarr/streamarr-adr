@@ -1,0 +1,68 @@
+= ADR 0058: HEVC Main Encodes Normalize Implied Main 10 Compatibility
+
+== Status
+
+Proposed
+
+== Context
+
+link:0013-stream-decision-architecture.adoc[ADR 0013] promises an encode's codec string before the first initialization segment arrives and requires the worker to check the delivered string exactly.
+Its original wording assumed that forcing profile, level, tier and bit depth determined that string completely.
+HEVC codec strings also include general profile compatibility flags and constraint flags.
+An encoder can write different compatibility flags while producing the requested picture format.
+
+On 2026-11-07, the same immutable worker image encoded one second of FFmpeg's synthetic `testsrc2` pattern with `hevc_nvenc`, Main profile, Main tier, level 3.0 and 8-bit 4:2:0.
+An RTX A2000 12GB with driver 580.82.07 produced `hvc1.1.2.L90.90`.
+An RTX 5090 with driver 615.78.08 produced `hvc1.1.6.L90.90`.
+The image digest was `sha256:399f66aca5d58fbd22d8864e8b7b3ccb5e572349a90ce14f331ee068f971b4df`.
+The common FFmpeg binary's SHA-256 was `002932042931418b18dd535d159941f8c4757de97d49b6238b104122bb5b5031`.
+The experiment separates the GPU/driver combination from the image and recipe, but does not separate GPU generation from driver version.
+The worker's producer reproduced the playback failure from the A2000 recording with `OUTPUT_MISMATCH`.
+
+ITU-T H.265 A.3.2 explains that Main streams also conform to Main 10 and recommends signaling compatibility flag 2 beside flag 1.
+The codec-string compatibility values `2` and `6` differ by that implied flag.
+The decoder configuration record's compatibility flags must agree with the parameter sets; changing only the string or the record would leave conflicting descriptions.
+
+== Decision
+
+The server keeps `hvc1.1.6.L<level>.90` for its HEVC Main encodes.
+For a Main encode whose `hvcC` declares Main, 8-bit 4:2:0 and only Main compatibility, the worker adds the implied Main 10 compatibility flag to `hvcC` and every VPS and SPS in that record.
+Each rewritten parameter set must itself declare Main and either Main-only or Main-and-Main-10 compatibility.
+The worker removes and reapplies emulation prevention when rewriting a parameter set and updates its length and enclosing box sizes.
+The worker preserves the encoded pictures, profile, tier, level and constraint flags.
+Copies retain the source's compatibility signaling.
+Main 10 encodes retain their own signaling.
+The existing exact output check runs on the rewritten initialization segment and continues to fail genuine mismatches.
+
+Encoder qualification evidence names the immutable FFmpeg build, GPU and driver alongside the recipe and delivered initialization segment.
+Encoding a frame to FFmpeg's null muxer establishes that an encoder starts; it does not establish its delivered codec string.
+Regression media and probe-answer fixtures use synthetic, copyright-free data.
+The worker's `hevc-compatibility` recordings contain only generated test patterns and record their reproduction command and provenance.
+
+Explicitly deferred:
+
+* General normalization of arbitrary compatibility or constraint flags.
+* Automatic startup qualification of every encoder output profile on each host.
+
+== Consequences
+
+Both measured NVENC implementations deliver the server's advertised codec string without changing encoded picture samples.
+The worker owns a narrow parameter-set rewrite in addition to its existing initialization rewrites.
+A passing matrix from one GPU/driver combination remains scoped evidence.
+The web client's Main-tier-only declaration was a separate cause of requesting an encode: under link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049], a High-tier source cannot fit a Main-tier maximum.
+The web client can declare High tier only from High-tier measurements and the Main-tier support implied by that maximum, separately for codec profile and dynamic range.
+
+== Rejected Alternatives
+
+* Change the server's constant to `.2` — exchanges the A2000 failure for a mismatch on the measured RTX 5090 and software encoder outputs.
+* Accept unequal advertised and delivered codec strings — abandons the output contract and can hide incompatible output.
+* Change only `hvcC` — leaves the VPS and SPS signaling inconsistent with the record.
+* Delay playlist construction until encoding begins — changes session startup and output planning to discover an implied compatibility flag.
+
+== References
+
+* https://www.itu.int/rec/T-REC-H.265-201304-S/en[ITU-T H.265 (04/2013), Annex A.3.2]
+* https://github.com/FFmpeg/FFmpeg/blob/master/libavformat/hevc.c[FFmpeg HEVC configuration-record construction]
+* https://github.com/streamarr/streamarr-server/pull/824[HEVC output planning]
+* https://github.com/streamarr/streamarr-transcode-worker/pull/116[NVENC recording evidence]
+* https://github.com/streamarr/streamarr-web/pull/130[Original web capability declaration]

@@ -107,7 +107,7 @@ A copy, or an encode that starts at the first segment, receives the stall thresh
 After the first publication, media segment upload chunk or progress report, the steady-state stall threshold applies by itself, and each of them restarts it.
 A long merged segment (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-segment-list[ADR 0037]) therefore needs no allowance of its own.
 Its producer reports progress while it encodes the segment, however far below real time it runs, and a producer whose output stops advancing is replaced after the stall threshold, whatever the segment's length.
-The local store writes every segment completely to a temporary file before moving it into its final name. It requests an atomic replacement, but falls back to a same-filesystem replacement when the filesystem does not support atomic moves. Under the segment-store contract, only the final name is observable as ready; supported deployments must therefore provide rename visibility consistent with that contract. No successor-segment inference is needed or permitted.
+The local store writes every segment completely to a temporary file in the segment folder before moving it into its final name. A segment is stored once: the first publication under a name moves the file into place atomically, and a later publication of that name leaves the stored file untouched. The segment folder must be one filesystem that renames a file atomically; on a filesystem that does not, a publication fails and stores nothing. A later publication of a media segment still succeeds, so a job attempt that reproduces stored media continues and is credited for it. The bytes under a final name therefore never change. On a connection that the web server can send a file on, the server hands a stored segment's file to the web server, which opens the file by its name after the request has ended; because the bytes never change, the file that it opens holds the bytes whose length the response headers announced. Unchanging bytes do not keep the file. When the stream session ends between the request and the moment the web server opens the file, the response carries its headers and no body, and the connection closes. That player's stream session has ended, so the player starts again at the viewer's position (<<decision-idle-retention>>). Under the segment-store contract, only the final name is observable as ready; supported deployments must therefore provide rename visibility consistent with that contract. No successor-segment inference is needed or permitted.
 The wait ends when the segment is ready, when no producer can be made to produce it, or on request cancellation — never on a fixed wall-clock timeout.
 A slow or resource-starved transcode must not surface to the client as a missing segment.
 
@@ -581,6 +581,10 @@ With the `faster` preset, which ADR 0044 makes the default for libx264, hls.js s
 
 == Rejected Alternatives
 
+* Falling back to a plain move when the segment folder's filesystem refuses an atomic one.
+A plain move that fails can leave part of a file under the final name, and the next publication of that name would keep that part as the stored segment.
+* Holding a stored segment's file until the web server has sent it, with a hard link for each request and a sweep that deletes old links.
+The web server reports no end of a file's send, so every segment request would pay two more file operations to finish a response for a stream session that has already ended.
 * Keeping an idle stream session's segments for 24 hours fills the segment disk with stream sessions that no viewer resumes.
 * Deleting a stream session's segments as soon as its player stops requesting them would make a short pause or a dropped connection start new job attempts for media that the server already stored.
 * A retention time that only an environment variable sets would make the ServerAdmin restart the server to change it.

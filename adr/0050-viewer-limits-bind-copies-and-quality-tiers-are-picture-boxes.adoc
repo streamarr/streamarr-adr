@@ -72,10 +72,10 @@ A source that the server cannot encode still copies over the viewer's limits in 
 When the player refuses that copy, no encode can replace the copy.
 Playback then ends with the typed terminal error, unless another eligible format remains, such as the copy with Dolby Vision stripped (https://github.com/streamarr/streamarr-server/issues/401[streamarr/streamarr-server#401]).
 
-NOTE: link:0013-stream-decision-architecture.adoc#lower-variant-range[ADR 0013] decides the range and bit depth of the lower variants beside a copy of an HDR, 10-bit or Dolby Vision source (<<decision-lower-variants>>).
-It also decides what plays when such a copy lists no lower variants and does not fit the upload budget (<<decision-upload-budget>>).
+NOTE: link:0013-stream-decision-architecture.adoc#lower-variant-range[ADR 0013] decides that the lower variants beside a copy keep the copy's range and bit depth and use the copy's codec family, and that a copy that the playlist describes as Dolby Vision is listed alone for now (<<decision-lower-variants>>).
+ADR 0013 also decides that a lower variant's failure withdraws the lower variants while the copy plays on (link:0013-stream-decision-architecture.adoc#lower-variant-failure[ADR 0013]), and what plays when a copy of an HDR, 10-bit or Dolby Vision source lists no lower variants and does not fit the upload budget (<<decision-upload-budget>>).
 Those decisions date from 2026-11-11.
-Draft https://github.com/streamarr/streamarr-server/pull/759[streamarr/streamarr-server#759] builds the range and the bit depth, except beside a copy that keeps its Dolby Vision, and no pull request builds the upload budget's rule yet.
+Draft https://github.com/streamarr/streamarr-server/pull/759[streamarr/streamarr-server#759] builds every one of them but the upload budget's, which no pull request builds yet.
 An edit of the same day replaces this ADR's text that said the budget never turns a copy into an encode.
 
 == Context
@@ -243,10 +243,12 @@ Refusing a copy for an unknown bitrate would encode many files that the client p
 === In Auto, encoded lower variants sit beside a copy
 
 When the server copies the video in Auto, the multivariant playlist lists the copy and the encoded variants of Auto's ladder below the copy's picture.
-Beside a copy of an HDR, 10-bit or Dolby Vision source, each lower variant keeps the source's range and bit depth.
-Beside a Dolby Vision copy, a lower variant keeps the range of the source's compatible base, or PQ for a source with no compatible base, because no encode writes Dolby Vision.
-Each lower variant also fits a codec profile that holds its bit depth and a capability entry of the client that accepts its range and bit depth.
-When no such encode exists, or no worker's encoder can produce it, the playlist lists such a copy alone (link:0013-stream-decision-architecture.adoc#lower-variant-range[ADR 0013]).
+Each lower variant keeps the copy's range and bit depth and uses the copy's codec family.
+It also fits a codec profile that holds its bit depth and a capability entry of the client that accepts it in that codec family, range and bit depth.
+When no such encode exists, or no worker has a worker-verified encoder that can produce it, the playlist lists the copy alone (link:0013-stream-decision-architecture.adoc#lower-variant-range[ADR 0013]).
+A copy that the playlist describes as Dolby Vision is listed alone for now, because every lower variant would leave Dolby Vision.
+The codec preference of link:0009-h264-plus-av1-codec-strategy.adoc[ADR 0009] chooses no codec family beside a copy.
+When a lower variant fails, the stream session withdraws its lower variants, and the copy plays on alone in its range without spending a format attempt (link:0013-stream-decision-architecture.adoc#lower-variant-failure[ADR 0013]).
 The copy is the first-listed variant, so creating the stream session starts only the copy.
 link:0008-server-generated-hls-playlists.adoc[ADR 0008]'s rule that lists the variant nearest 2000 kb/s first applies to a ladder of encodes.
 Each lower variant encodes only when the player switches to it, as link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019] starts a variant on demand.
@@ -265,6 +267,7 @@ With whole slots, a lower variant's segment `N` would start up to one slot befor
 *Why:* A copy alone gives the player no lower variant when the viewer's bandwidth drops, so playback stalls.
 The viewer would then have to pick a fixed quality by hand.
 With lower variants listed, the player's own variant switching moves down and back up by itself.
+Players that move only within one codec family and one range do so only when the copy and its lower variants share both.
 A lower variant that the player never requests costs no worker capacity.
 The copy starts without an encoder, so listing it first does not delay the start.
 Variants without the shared segment list would make a switch fall inside a segment.
@@ -965,8 +968,10 @@ When the player refuses the copy of such a source, no encode can replace the cop
 * A copy of a source whose copied video's bitrate and container bitrate are both unknown can exceed the viewer's maximum bitrate.
 * In Auto and in a fixed quality, a video copy can play beside lower audio than the session would otherwise get.
 The viewer keeps the source's full picture in exchange.
-* Once https://github.com/streamarr/streamarr-server/pull/759[streamarr/streamarr-server#759] merges, the playlist lists a copy of an HDR, 10-bit or Dolby Vision source alone when no encode in the range and bit depth of link:0013-stream-decision-architecture.adoc#lower-variant-range[ADR 0013] fits the client and a worker's encoder.
+* Once https://github.com/streamarr/streamarr-server/pull/759[streamarr/streamarr-server#759] merges, the playlist lists a copy alone when no encode in the copy's range, bit depth and codec family fits the client and a worker's encoder, and it lists every copy that the playlist describes as Dolby Vision alone (link:0013-stream-decision-architecture.adoc#lower-variant-range[ADR 0013]).
 Playback of such a copy can stall when the viewer's bandwidth drops below the copy's bitrate.
+* After a lower variant fails, the copy plays alone for the rest of the stream session, so its playback can stall in the same way (link:0013-stream-decision-architecture.adoc#lower-variant-failure[ADR 0013]).
+When the upload budget had left the copy out, the copy then plays over the budget.
 * Under the upload budget, a copy of an HDR, 10-bit or Dolby Vision source that lists no lower variants and does not fit the streams' share plays as an encode, which uses a video encode's encoder headroom where the copy encoded no video.
 That encode is SDR when no encoder writes the source's range, so the budget can take such a stream session out of HDR.
 * When the probe does not know the copied video's bitrate, the copy's cost over-counts.
@@ -1073,7 +1078,7 @@ It encodes at the bitrate of the tier that holds that size.
 == Rejected Alternatives
 
 * Offering every copy alone in Auto stalls playback when the viewer's bandwidth drops below the copy's bitrate.
-Only a copy that has no lower variant in the range and bit depth of <<decision-lower-variants>> is listed alone.
+Only a copy that has no lower variant in its range, bit depth and codec family under <<decision-lower-variants>>, and a copy that the playlist describes as Dolby Vision, are listed alone.
 * Encoding the lower variants beside a copy from the start spends worker capacity on variants that the player may never request.
 * Listing the variant nearest 2000 kb/s first beside a copy, as ADR 0008 does for encodes, starts an encode when the stream session starts, for a player that may never need it.
 * Giving the lower variants their own segment list makes a switch from the copy fall inside a segment.

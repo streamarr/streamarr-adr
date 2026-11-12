@@ -123,6 +123,7 @@ The worker sends the event in two cases:
 * The attempt's report call ended without the server's answer (<<decision-flow-control>>).
 
 When the event names a probe attempt that has not ended on the server, the server ends the attempt.
+Once the server has answered the attempt's report call, the event changes nothing, because the attempt ends when the server has handled the outcome.
 The server then no longer counts the probe (ADR 0032), and the server ends a report call that is still open for the attempt.
 The server ignores the event when the attempt has already ended.
 
@@ -134,7 +135,8 @@ Every message on the worker session is then a command or a short event.
 The server still accepts at most 128 KiB in one message of every call.
 
 *Why:* The server counts a probe's unit as used until the probe attempt ends on the server (ADR 0032).
-A probe attempt ends on the server when the server has stored the outcome of the attempt's probe report, when the attempt's report call ends without an outcome to store, or when the event arrives.
+A probe attempt ends on the server when the server has handled the outcome of the attempt's probe report, when the attempt's report call ends without the server's answer, when the event arrives before the server answers a report call, or when the worker session ends.
+The server has handled an outcome when the server has stored the outcome, discarded the outcome under ADR 0032's rules, or failed to store the outcome.
 The server must therefore learn the end of every probe attempt.
 A probe report can be large, and a command or an event must never wait behind a probe report.
 A probe report therefore travels in a call of its own.
@@ -248,9 +250,13 @@ The server also ends the report call at the first message after which either lis
 The server counts each list on its own.
 The same rule applies to each of the two lists of measured keyframe intervals, added up over the measured streams, against `measured_keyframe_interval_limit`.
 The server also ends the report call when the measurement holds more measured streams than half of `probe_result_length_limit_bytes`.
-Every measured stream also appears in the result, and a stream entry of the result takes at least 2 bytes.
-The server also ends the report call at a field that `ProbeAttemptReport` or a measured stream does not declare, or at a field of the wrong wire type.
+A probe's measured streams also appear in the probe's result, where a stream entry takes at least 2 bytes, so the cap derives from the result's limit.
+A bitrate scan chunk's result lists no streams, and the same cap bounds the chunk's measured streams.
+The server also ends the report call at a declared field whose wire type the field cannot have.
+A repeated number field may arrive packed or unpacked.
+The server reads past a field that `ProbeAttemptReport` or a measured stream does not declare, still checks the field's encoding and still counts the field's bytes against the stated length.
 Inside the result, only the result's length limit applies.
+The server discards every undeclared field when the server decodes the probe report, at every level of the probe report.
 Each of these ends is a contract violation (<<decision-limits>>).
 The server decodes the probe report only after the last message, and only when every limit holds.
 
@@ -258,7 +264,8 @@ The server decodes the probe report only after the last message, and only when e
 A probe report within the length limit can decode to far more heap than its length, because each small entry of a repeated field becomes an object.
 In a measurement of the server's code, a probe report of 16 MiB whose result held only empty stream entries decoded to about 1.6 GiB of the heap.
 At the same ratio, a result of 128 KiB would take about 13 MiB.
-A decoder keeps every field that the message does not declare, so an undeclared field can take heap in the same way.
+A decoder that kept every undeclared field would let an undeclared field take heap in the same way.
+Discarding undeclared fields keeps ADR 0033's removal of a field possible: an older worker that still sends a removed field does not break the contract.
 Before this decision, the limit of 128 KiB for one session message capped the result.
 An end at the first message that exceeds a limit also frees the probe report's room in the budget at once, instead of after the whole probe report has arrived.
 
@@ -307,7 +314,7 @@ A report call therefore times out only when the probe report stops advancing, ne
 
 The server answers as soon as the server has checked the probe report against the contract and matched the probe report to the probe attempt.
 The server answers before the server stores the probe report in the database.
-The server still counts the probe until the server has stored the probe report's outcome (<<decision-report-call>>).
+The server still counts the probe until the server has handled the probe report's outcome (<<decision-report-call>>).
 When the server cannot store a probe report that the server accepted, the probe runs again (ADR 0032).
 The worker never sends a probe report a second time.
 A probe report that breaks the contract counts toward ADR 0032's limit of three consecutive contract violations for that probe.
@@ -317,7 +324,7 @@ The server treats the probe attempt the same way when the event arrives while th
 The probe then retries with backoff (ADR 0032).
 
 *Why:* A bound on the whole probe report would fail the same large probe report on a slow link at every retry.
-A decoded probe report stays in the server's memory until the server has stored the outcome.
+A decoded probe report stays in the server's memory until the server has handled the outcome.
 The count therefore bounds the decoded probe reports that the server holds at once by the probes that the server has started.
 The server already retries a probe whose worker is lost, so the worker needs no retry of its own.
 A report call can fail before the server reads the call's first message, for example when a proxy between the worker and the server resets that one call.
@@ -438,7 +445,7 @@ A probe report that is longer than its first message stated is an example.
 * ADR 0032's limit of 16,384 bytes on a result's titles and handler names no longer protects the worker session.
 That limit stays until a later probe version removes the limit (<<explicitly-deferred>>).
 * Where ADR 0032 says that a worker's reply breaks the contract, the reply is the probe report.
-* The server counts a probe until the server has stored the outcome of the probe's report, until the probe's report call ends without an outcome to store, or until the event `ProbeAttemptEndedWithoutReport` names the probe attempt (<<decision-report-call>>).
+* The server counts a probe until the probe attempt ends on the server: the server has handled the outcome of the probe's report, the probe's report call ended without the server's answer, the event `ProbeAttemptEndedWithoutReport` named the probe attempt before the server answered a report call, or the worker session ended (<<decision-report-call>>).
 * After a cancel command, the server waits for that event, not for the probe's result (<<decision-cancel>>).
 
 [[explicitly-deferred]]
@@ -480,8 +487,10 @@ A probe that reads a stalled network share can be such a probe (ADR 0032).
 * The server decodes only a probe report whose fields keep every stated limit (<<decision-scan-before-decode>>).
 In measurements of the server's code, a probe report within every default limit decoded to about 11 MiB, and a measurement of 65,536 empty measured streams to about 14 MiB.
 The server holds at most one decoded probe report for each probe that the server counts.
-Many malformed probe reports at once could still exhaust the server's heap.
-Only a defective or compromised worker inside the trust boundary of ADR 0035 sends such probe reports, and this decision accepts that.
+The count grows with the capacities of every worker, and the heap does not.
+Many probe reports at once could still exhaust the server's heap: valid probe reports near the limits, while the database stores slowly, or malformed probe reports from a defective or compromised worker inside the trust boundary of ADR 0035.
+A valid probe report at both defaults holds about 28 MiB at the highest point (<<evidence-server-heap>>).
+This decision accepts that, and a ServerAdmin can lower the limits or the workers' capacities.
 * A probe report of another probe version that breaks a limit counts as a contract violation, not as a misconfigured worker (ADR 0032).
 The server ends the report call before the server decodes the probe version.
 While the server decodes a probe report, the server holds the probe report's encoded bytes and the decoded message at the same time.

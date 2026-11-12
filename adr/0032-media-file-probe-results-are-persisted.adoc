@@ -80,6 +80,11 @@ The start time correction was first probe version 7, then probe version 8, and t
 A further amendment removes the statistics that came from a sample of a private media library.
 Synthetic files, FATE samples and FFmpeg's own source now support the decisions that those statistics supported (<<evidence>>).
 
+link:0062-a-worker-sends-each-probe-report-in-a-call-of-its-own.adoc[ADR 0062] amends this ADR.
+A worker sends each probe report in a call of its own, not on the worker session.
+The probe timeout stops running when the first message of the probe report reaches the server.
+When a file's chosen video stream holds more keyframes than the server's keyframe limit, the worker reports the keyframes as unavailable, and the server encodes the file's video.
+
 == Context
 
 Streamarr learns a media file's technical properties by running ffprobe.
@@ -359,6 +364,8 @@ The worker leaves a longer value out and never shortens it.
 The titles and handler names of one result take at most 16,384 bytes in their protobuf encoding.
 When the titles and handler names would take more, the worker reports neither and marks both as omitted.
 The server accepts at most 128 KiB in one session message, so the two limits keep the titles and handler names from closing the worker's session (https://github.com/streamarr/streamarr-server/issues/554[streamarr/streamarr-server#554]).
+Since link:0062-a-worker-sends-each-probe-report-in-a-call-of-its-own.adoc[ADR 0062], a worker no longer sends a probe's result in a session message.
+The second limit stays until a later probe version removes the limit.
 Without the second limit, one video stream and 256 subtitle streams with 512-byte titles took 139,438 bytes.
 Video streams report none of these three facts, because nothing reads a video stream's title, handler name or flag yet.
 * The exact codec string of every video and audio stream, in the form that RFC 6381 defines.
@@ -877,6 +884,8 @@ Stored keyframe positions are probe facts.
 The <<probe-version-rules,probe version rules>> therefore apply to stored keyframe positions.
 The server offers a stream copy only after it knows the source's keyframe positions.
 Until the server knows those keyframe positions, the server encodes the video.
+A chosen video stream can hold more keyframes than the server's keyframe limit.
+The probe or the keyframe packet scan then reports the keyframes as unavailable, and the server encodes the video (link:0062-a-worker-sends-each-probe-report-in-a-call-of-its-own.adoc#decision-beyond-a-limit[ADR 0062]).
 The server applies this keyframe condition for a stream copy from probe version 3, which stores keyframe positions.
 https://github.com/streamarr/streamarr-server/issues/66[streamarr/streamarr-server#66] adds probe version 3.
 Before probe version 3 takes effect, the server copies the video under ADR 0013's interim copy rule.
@@ -1160,11 +1169,13 @@ For example, the server keeps retrying when a worker is lost, unreachable or mis
 An unrecognized failure value from a newer worker is not a contract violation.
 That failure value stays retryable and has no limit.
 
-Some contract violations break the worker session rather than one reply.
-An oversized message for one probe's result is an example.
-When the server can tie such a violation to one probe, the violation counts toward that probe's limit.
-When the server cannot tie the violation to one probe, the server ends the worker session.
-The probe then fails as an ordinary retryable failure, as when a worker is lost.
+Some contract violations end the call that carries the message.
+A worker sends each probe's reply, the probe report, in a call of its own (link:0062-a-worker-sends-each-probe-report-in-a-call-of-its-own.adoc[ADR 0062]).
+That call names its probe, so a violation that the server finds in that call counts toward that probe's limit.
+A probe report that is longer than its first message stated is an example.
+The server cannot tell an oversized message from a lost connection.
+An oversized message of a probe report ends only its call, and the probe fails as an ordinary retryable failure, as when a worker is lost.
+An oversized message on the worker session ends the worker session, and every probe on that worker session fails in the same way.
 
 A changed source and a new probe version retry a stopped file, as they retry every terminal error.
 Unlike other terminal errors, a scan also retries a file that contract violations stopped.
@@ -1251,13 +1262,14 @@ A playback probe therefore never waits behind a background probe, behind a keyfr
 No probe holds a particular unit.
 The server and the worker each count the playback probes and the background probes that run.
 Both compute the background units in use with the same formula: the background probes, plus the playback probes beyond the playback probe capacity.
-The server counts a probe until the probe's result arrives, so the server's counts never fall below the worker's counts.
+The server counts a probe until the server has stored the outcome of the probe's report, until the probe's report call ends without an outcome to store, or until the worker reports that the probe attempt ended without a probe report (link:0062-a-worker-sends-each-probe-report-in-a-call-of-its-own.adoc#decision-report-call[ADR 0062]).
+The server's counts thus never fall below the worker's counts.
 The worker therefore accepts every probe that the server sends while no capacity drops.
 The server measures how long each playback probe waits for a free unit.
 
 *Why:* Two units cover two viewers who start unprobed files at the same moment.
 A probe that held the unit it arrived on would let the two sides disagree.
-The server learns that a probe ended only when the probe's result arrives.
+The server learns that a probe ended on the worker only when the first message of the probe's report call arrives, or when the worker reports that the probe attempt ended without a probe report.
 Until then, the worker can place the next playback probe on a playback unit that the server still counts as used.
 The server would then count a free background unit that the worker has filled, and the worker would refuse a background probe although no capacity dropped.
 Other systems reserve similarly small pools: Apache Flink reserves 2 buffers for each channel, and PostgreSQL reserves 3 connections for superusers.
@@ -1337,6 +1349,7 @@ The probes that run then finish within seconds, so the brake takes effect almost
 ==== The brake for timed-out probes
 
 The server ends every probe that has not finished within the probe timeout.
+For the probe timeout, a probe has finished when the first message of the probe's report call reaches the server (link:0062-a-worker-sends-each-probe-report-in-a-call-of-its-own.adoc#decision-probe-timeout[ADR 0062]).
 The probe timeout is a server setting.
 The default is 60 s.
 The server alone owns the probe timeout.
@@ -1346,6 +1359,8 @@ The reason is the probe timeout, a server shutdown or another reason.
 The server retries a timed-out probe later, as the section on transient failures describes.
 
 A probe that the server cancels for the probe timeout applies a brake, which halves the limit.
+Only a probe that still runs on the worker when the cancel command arrives applies that brake.
+A probe that has ended on the worker applies no brake, whether the probe report waits for a report call or travels in one (link:0062-a-worker-sends-each-probe-report-in-a-call-of-its-own.adoc#decision-probe-timeout[ADR 0062]).
 Both a background probe and a playback probe apply that brake.
 A cancel command with the server shutdown reason or another reason never applies a brake.
 A keyframe packet scan has a timeout of its own and applies no brake.

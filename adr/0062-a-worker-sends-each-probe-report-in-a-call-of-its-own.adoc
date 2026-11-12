@@ -1,0 +1,628 @@
+= ADR 0062: A Worker Sends Each Probe Report in a Call of Its Own, and the Worker Session Carries Only Commands and Events
+
+== Status
+
+Accepted
+
+This decision amends link:0032-media-file-probe-results-are-persisted.adoc[ADR 0032] (<<amends-0032>>).
+A worker no longer sends any part of a probe report on the worker session.
+The probe timeout stops running when the first message of the probe report reaches the server.
+A worker answers a cancel command with a short event on the worker session, and a canceled probe attempt has no probe report.
+When a file's chosen video stream holds more keyframes than the server accepts, the worker reports the keyframes as unavailable.
+The server then encodes the file's video.
+This decision changes the worker contract, which link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033] gives to the server repository.
+This decision adds no capability, and it sets ADR 0033's upgrade order aside for this one change (<<rollout>>).
+This decision adds a call, `ReportProbeAttempt`, with the shape of the segment upload call of link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037].
+
+== Context
+
+A worker session is the long-lived gRPC call, `EstablishWorkerSession`, that a worker opens to the server (link:0018-live-playback-authority-and-outbound-workers.adoc[ADR 0018], ADR 0033).
+The server sends commands on the worker session, and the worker sends events.
+Commands start and stop job attempts and probes.
+The worker uploads each segment in a call of its own, `UploadSegment` (ADR 0037).
+
+A probe attempt is one execution on a worker of a probe of any kind (ADR 0032, link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc[ADR 0054]).
+The kinds are a playback probe, a background probe, a keyframe packet scan and a bitrate scan chunk.
+A probe report is everything that the worker sends back for one probe attempt.
+Every probe report holds a result.
+The result is the probed container and streams, a failure value, or the totals of a bitrate scan chunk.
+A probe report can also hold the keyframe positions of the chosen video stream.
+A keyframe interval runs from one keyframe of the chosen video stream to the next keyframe (ADR 0054).
+A probe report can also hold a measurement.
+A measurement holds the bytes and the packet count of every keyframe interval of each measured stream.
+
+Today, the worker sends a probe report on the worker session.
+The worker sends the keyframe positions first, in parts.
+Each part holds at most 4,096 keyframes.
+The worker sends the measurement next, in parts of at most 4,096 keyframe intervals.
+The worker sends the result last, in one message.
+The contract allows 1,048,576 keyframes and 8,388,608 measured keyframe intervals in one probe report.
+A probe report at both limits takes 2,305 session messages.
+A synthetic probe report at both limits took 30,219,205 bytes, which is 28.8 MiB (<<evidence-session-delay>>).
+The contract limits the number of entries in a probe report and not the number of bytes.
+With the largest values that the contract's fields can hold, the same entries take about 100 MiB (<<evidence-session-delay>>).
+At the synthetic probe report's 28.8 bytes for each keyframe, the probe report of a two-hour film with 7,200 keyframes and eight measured streams takes about 200 KiB.
+
+The server accepts at most 128 KiB in one message of any call.
+The server ends a call that carries a larger message.
+A result above 128 KiB therefore ended the worker session and every job attempt on that worker (https://github.com/streamarr/streamarr-server/issues/554[streamarr/streamarr-server#554]).
+Since that issue, the worker checks the result's size.
+The worker fails a probe whose result exceeds 128 KiB with `PROBE_FAILURE_RESULT_TOO_LARGE`.
+A file with that failure cannot play.
+Under ADR 0032, the worker also leaves out every title and every handler name of a result when the titles and handler names together exceed 16,384 bytes.
+That limit exists only to keep the result below 128 KiB.
+streamarr/streamarr-server#554 considered a separate call for probe results.
+The issue deferred that call until results came near the limit.
+ADR 0054 has since added the measurement, which is the largest part of a large probe report.
+
+Flow control lets the receiver of a call slow the sender.
+The worker uses no flow control on the worker session.
+The worker hands every message of a probe report to gRPC at once.
+gRPC keeps in the worker's memory whatever the network link to the server has not yet carried.
+Every later session message waits behind the probe report.
+Such a message can be another probe's result, or an event that says that a job attempt started, progressed or ended.
+In a measurement with the worker's own code, a short session message waited until the link had carried every byte of the probe report that the worker had handed to gRPC before that message (<<evidence-session-delay>>).
+Behind the synthetic probe report at both limits, the wait was about 50 ms on loopback.
+The wait was 2.4 s on a link of 100 Mbit/s and 24.2 s on a link of 10 Mbit/s.
+Until the link had carried that probe report, gRPC held 32 to 36 MiB of memory in the worker, outside the Java heap.
+
+After a cancel command, the server waits for the canceled probe's result.
+The wait is a server setting with a default of 5 s.
+When the result does not arrive in that time, the server ends the worker session and abandons every job attempt on that worker.
+The server's code holds this rule, and no ADR described the rule before this decision.
+A canceled probe's result can wait behind another probe's report.
+In the same measurement, the result of a canceled probe arrived 4.8 s after the cancel command on a link of 50 Mbit/s.
+The result arrived after 12.1 s on a link of 20 Mbit/s and after 24.2 s on a link of 10 Mbit/s.
+So the probe report at both limits exceeded the default wait on links of 20 Mbit/s and 10 Mbit/s.
+Behind a probe report of 16,384 keyframes and eight measured streams, the same result arrived within 0.35 s on a link of 10 Mbit/s.
+
+The server cannot slow or refuse the parts of a probe report.
+The server holds every part in memory until the result arrives.
+The contract's limits and the number of running probes are the only bounds on that memory.
+In a measurement of the server's own code, one synthetic probe report at both limits held 228 MiB of the server's heap at the highest point (<<evidence-server-heap>>).
+The smallest heap that stored that probe report was 370 MiB, against 134 MiB for a probe report of 64 keyframes.
+While the server joined the parts of that probe report, the server allocated about 10.7 GiB, because each part copied every earlier part of the same list.
+
+Three places state each limit.
+The places are a comment in the contract, a constant in the worker and a constant in the server.
+The server cannot change a limit without a new worker.
+
+When a file's chosen video stream holds more than 1,048,576 keyframes, the file's probe ends in an error, and the file cannot play.
+An encode needs no keyframe positions (ADR 0032), so an encode of that file could play.
+For scale, a two-hour film with a keyframe every 1 to 10 seconds holds 720 to 7,200 keyframes.
+A video stream whose every frame is a keyframe reaches 1,048,576 keyframes after about 12 hours at 24 frames per second, and after about 5 hours at 60.
+
+gRPC's performance guide advises a streaming call for a long-lived flow of data.
+The guide warns that calls beyond a connection's limit wait in the client.
+The server accepts at most 33 calls on one connection, a fixed value in the server's code.
+Google's ByteStream API sends bytes that exceed one message through a client-streaming `Write` call.
+The client names the resource in its first request and sends the bytes in order, and the server answers once.
+`UploadSegment` has the same shape.
+
+== Decision
+
+[[decision-report-call]]
+=== A worker ends every probe attempt with a report call or with a short event
+
+The worker contract gains the call `ReportProbeAttempt`.
+This ADR calls a `ReportProbeAttempt` call a report call.
+The worker makes at most one report call for every probe attempt that the server starts on the worker.
+The worker makes that report call only while the worker session that started the probe attempt lasts.
+When that worker session ends, the worker discards every probe report that the worker has not sent.
+The report call carries the attempt's probe report.
+A probe that succeeded ends with a report call.
+A probe that failed also ends with a report call.
+A probe that the worker refused because no unit of the probe's capacity was free also ends with a report call.
+
+The worker contract also gains the event `ProbeAttemptEndedWithoutReport`, which the worker sends on the worker session.
+The event names one probe attempt.
+The event says that the probe attempt has ended on the worker and that the worker sends no further message of a probe report for the attempt.
+The worker sends the event in two cases:
+
+* The server canceled the probe attempt (<<decision-cancel>>).
+* The attempt's report call ended without the server's answer (<<decision-flow-control>>).
+
+When the event names a probe attempt that has not ended on the server, the server ends the attempt.
+The server then no longer counts the probe (ADR 0032), and the server ends a report call that is still open for the attempt.
+The server ignores the event when the attempt has already ended.
+
+The worker no longer sends three events on the worker session.
+The three events are a probe attempt's result, a keyframe positions part and a stream measurement part.
+The contract reserves the numbers and the names of those three events (ADR 0033).
+For probes, the worker session carries the start command, the cancel command, the worker's capacity changes and the event `ProbeAttemptEndedWithoutReport`.
+Every message on the worker session is then a command or a short event.
+The server still accepts at most 128 KiB in one message of every call.
+
+*Why:* The server counts a probe's unit as used until the probe attempt ends on the server (ADR 0032).
+A probe attempt ends on the server when the server has stored the outcome of the attempt's probe report, when the attempt's report call ends without an outcome to store, or when the event arrives.
+The server must therefore learn the end of every probe attempt.
+A probe report can be large, and a command or an event must never wait behind a probe report.
+A probe report therefore travels in a call of its own.
+An attempt that ends without a probe report has nothing large to send.
+A short event tells the server of that end, and the event waits for no report call.
+
+[[decision-call-opens-late]]
+=== The worker opens the report call when the probe report is ready
+
+The worker opens the report call after the probe has ended, not when the probe starts.
+A probe that still runs has no report call.
+
+*Why:* A keyframe packet scan can run for 30 minutes, the default of the scan's timeout on the server.
+A report call that stayed open for that time would carry nothing.
+That report call would still take one of the 33 calls that the server accepts on the worker's connection.
+Job attempts already follow this rule.
+Commands on the worker session start and stop a job attempt, and the worker sends each segment in a call that opens when the segment is ready.
+
+[[decision-first-message]]
+=== The first message names the probe attempt, and the server accepts one report call for each attempt
+
+`ReportProbeAttempt` is a client-streaming call.
+The worker sends several messages on the call, and the server answers once.
+The first message, `ProbeAttemptReportMetadata`, names the worker session, the worker and the probe attempt.
+The first message also states the length of the probe report in bytes.
+The server accepts the report call only when all of these conditions hold:
+
+* The worker session is the worker's live session, not an earlier session.
+* The server started the probe attempt on that worker session, and the attempt has not ended.
+* No other report call has reported the attempt.
+* The worker's open report calls stay within the `probe_report_limit` that the server stated (<<decision-playback-first>>).
+
+The server refuses a report call that fails any of these conditions, with a gRPC status.
+The contract has no message that says why the server refused a report call, because the worker discards the probe report after every refusal.
+After the worker's last message, the server answers once with `ReportProbeAttemptResponse`.
+The answer names the probe attempt and the number of bytes that the server accepted.
+
+[[decision-one-message]]
+=== The probe report is one protobuf message, and the report call carries that message's bytes
+
+`ProbeAttemptReport` is one protobuf message.
+`ProbeAttemptReport` holds the attempt's result, the keyframe positions and the measurement.
+The result is `ProbeAttemptResult`.
+This decision does not change `ProbeAttemptResult`.
+The result keeps its typed outcome.
+The outcome is the probed container and streams, a failure value, or the totals of a bitrate scan chunk.
+Every message of the report call after the first holds consecutive bytes of the encoded `ProbeAttemptReport`.
+Each message of the report call stays within the limit of 128 KiB for one message.
+The server joins the bytes and decodes one `ProbeAttemptReport` (<<decision-scan-before-decode>>).
+A probe report breaks the contract when its bytes number more or fewer than the first message stated.
+
+This decision removes the messages for keyframe positions parts and stream measurement parts from the contract.
+This decision also removes the limit of 4,096 entries in a part.
+
+*Why:* Segments and probe reports then use the same way to send bytes that exceed one message.
+A new large probe fact becomes a field of the probe report.
+The fact needs no part message and no part rules of its own.
+Both ends still read and write a typed message.
+The size of a probe report no longer depends on the limit for one message.
+
+[[decision-limits]]
+=== The server states its limits when it accepts a worker session
+
+`WorkerSessionAccepted` states five limits beside `segment_upload_limit`:
+
+* `probe_report_limit` is the largest number of report calls that the server accepts from the worker at once.
+* `probe_report_length_limit_bytes` is the length of the largest probe report that the server accepts.
+* `keyframe_limit` is the largest number of keyframes in one probe report.
+* `measured_keyframe_interval_limit` is the largest number of measured keyframe intervals in one probe report, added up over the measured streams.
+* `probe_result_length_limit_bytes` is the length of the largest encoded result in one probe report.
+
+The server sets each field from the value that the server enforces, so a stated limit and an enforced limit cannot differ.
+The server always states all five limits.
+The contract reads a limit of 0 as no limit, and the server never states 0.
+The last four limits are server settings.
+The server derives `probe_report_limit` from the number of calls that the server accepts on one connection (<<decision-playback-first>>).
+The derived `probe_report_limit` is 24: the 33 calls of one connection, less the worker session, less the 8 segment uploads that the server accepts from one worker at once (ADR 0037).
+The worker checks a probe report against the limits before the worker opens the report call.
+A probe report that exceeds a stated limit breaks the contract (link:0032-media-file-probe-results-are-persisted.adoc#probe-contract-violations[ADR 0032]).
+The default of `keyframe_limit` is 150,000, and the default of `measured_keyframe_interval_limit` is 1,000,000.
+Before this decision, the contract fixed the two limits at 1,048,576 and 8,388,608.
+By the fit of the measurement, a probe report at both defaults holds 28 MiB of the server's heap at the highest point (<<evidence-server-heap>>).
+The measurement's nearest probe report, with 131,072 keyframes and 1,048,576 measured keyframe intervals, held 28.7 MiB.
+The probe report at the earlier limits held 228 MiB.
+Each default must accommodate the files of an ordinary library, so that no such file loses a copy to a limit.
+A two-hour film with a keyframe every second and eight measured streams holds 7,200 keyframes and 57,600 measured keyframe intervals.
+Each number is at most a seventeenth of its default.
+At 2 keyframes each second, 150,000 keyframes cover more than 20 hours.
+A four-hour file stays within the default keyframe limit up to 10 keyframes each second.
+A video stream whose every frame is a keyframe reaches 150,000 keyframes after 104 minutes at 24 frames per second.
+The default of `probe_report_length_limit_bytes` is 16 MiB.
+With the largest values that the contract's fields can hold, the keyframe positions and the measurement at both defaults take 12.4 MiB, so 16 MiB holds them beside a result of 128 KiB.
+The default of `probe_result_length_limit_bytes` is 128 KiB, the length that the limit for one session message allowed a result before this decision.
+A result holds at most 16 KiB of titles and handler names and at most 32 KiB of chapters (ADR 0032).
+The server refuses a `probe_result_length_limit_bytes` below those 48 KiB.
+A stream entry with every field at its largest encoding takes about 320 bytes beside its other text.
+Beside the 48 KiB of titles, handler names and chapters, 128 KiB leaves room for about 256 such stream entries.
+
+*Why:* Each limit bounds the server's memory and storage, so the server owns each limit.
+The server can change a limit without a new worker.
+A default that an ordinary file exceeded would cost that file its copy on every server whose ServerAdmin never changed the setting.
+
+[[decision-scan-before-decode]]
+=== The server checks a probe report's limits while the bytes arrive, before the server decodes the probe report
+
+The server reads the encoded fields of a probe report as the messages of the report call arrive.
+The server reads each field's number, length and count, and the server builds no message from the bytes.
+The server counts every occurrence of a field, in any order of the fields.
+The server ends the report call at the first message after which the result is longer than `probe_result_length_limit_bytes`.
+The server also ends the report call at the first message after which either list of keyframe deltas holds more entries than `keyframe_limit`.
+The server counts each list on its own.
+The same rule applies to each of the two lists of measured keyframe intervals, added up over the measured streams, against `measured_keyframe_interval_limit`.
+The server also ends the report call when the measurement holds more measured streams than half of `probe_result_length_limit_bytes`.
+Every measured stream also appears in the result, and a stream entry of the result takes at least 2 bytes.
+The server also ends the report call at a field that `ProbeAttemptReport` or a measured stream does not declare, or at a field of the wrong wire type.
+Inside the result, only the result's length limit applies.
+Each of these ends is a contract violation (<<decision-limits>>).
+The server decodes the probe report only after the last message, and only when every limit holds.
+
+*Why:* The memory budget counts encoded bytes (<<decision-playback-first>>).
+A probe report within the length limit can decode to far more heap than its length, because each small entry of a repeated field becomes an object.
+In a measurement of the server's code, a probe report of 16 MiB whose result held only empty stream entries decoded to about 1.6 GiB of the heap.
+At the same ratio, a result of 128 KiB would take about 13 MiB.
+A decoder keeps every field that the message does not declare, so an undeclared field can take heap in the same way.
+Before this decision, the limit of 128 KiB for one session message capped the result.
+An end at the first message that exceeds a limit also frees the probe report's room in the budget at once, instead of after the whole probe report has arrived.
+
+[[decision-beyond-a-limit]]
+=== Beyond the keyframe limit or the interval limit the file still plays, and beyond the length limit the probe fails
+
+The worker's report of unavailable keyframes names a reason.
+This decision adds the reason `KEYFRAMES_UNAVAILABLE_REASON_TOO_MANY_KEYFRAMES`.
+When the chosen video stream holds more keyframes than `keyframe_limit`, the worker reports the keyframes as unavailable for that reason.
+That probe report holds no keyframe positions and no measurement.
+The server never copies a source whose keyframes are unavailable (ADR 0032), so the server encodes the file's video.
+
+When a measurement holds more keyframe intervals than `measured_keyframe_interval_limit`, the worker leaves the measurement out.
+The worker already left such a measurement out before this decision.
+A copy of that file keeps the cost that ADR 0054 gives a copy without a measurement.
+
+The probe report of a bitrate scan chunk holds the chunk's measurement and no keyframe positions (ADR 0054).
+The server sizes each bitrate scan chunk so that the chunk's measurement stays within `measured_keyframe_interval_limit`.
+The worker fails a bitrate scan chunk whose measurement exceeds the interval limit with `PROBE_FAILURE_RESULT_TOO_LARGE`.
+
+When a probe report is longer than `probe_report_length_limit_bytes` after those rules, or the probe report's result is longer than `probe_result_length_limit_bytes`, the worker fails the probe attempt with `PROBE_FAILURE_RESULT_TOO_LARGE`.
+The kind of the probe attempt decides what follows.
+For a playback probe or a background probe, the server stores that failure until the file or the probe version changes (ADR 0032), and the file cannot play.
+For a keyframe packet scan, the scan has failed (ADR 0032).
+For a bitrate scan chunk, the chunk has failed (ADR 0054).
+After a failed keyframe packet scan or a failed bitrate scan chunk, the file still plays.
+
+This decision adds no probe version.
+A new probe version makes the server probe every file again (ADR 0032).
+This decision changes the outcome only of a file above the keyframe limit.
+A probe error that the server stored earlier for such a file stays until the file changes or the server probes the file again under a later probe version.
+
+*Why:* An encode needs no keyframe positions.
+Before this decision, the probe of a file above the keyframe limit ended in an error, and the file could not play.
+
+[[decision-flow-control]]
+=== The worker sends a probe report only as fast as the server reads the probe report
+
+The worker sends a message on the report call only when the report call is ready for the message.
+The worker waits a bounded time for the report call to become ready for each message.
+After the last message, the worker waits a bounded time for the server's answer.
+The server ends a report call when the server is ready to read and no message arrives within a bounded time.
+The first two bounds are worker settings, and the third bound is a server setting.
+No bound covers the whole probe report.
+A report call therefore times out only when the probe report stops advancing, never because the probe report is large.
+
+The server answers as soon as the server has checked the probe report against the contract and matched the probe report to the probe attempt.
+The server answers before the server stores the probe report in the database.
+The server still counts the probe until the server has stored the probe report's outcome (<<decision-report-call>>).
+When the server cannot store a probe report that the server accepted, the probe runs again (ADR 0032).
+The worker never sends a probe report a second time.
+A probe report that breaks the contract counts toward ADR 0032's limit of three consecutive contract violations for that probe.
+When a report call ends without the server's answer, the worker discards the probe report and sends `ProbeAttemptEndedWithoutReport` for the attempt (<<decision-report-call>>).
+When a report call ends without the server's answer and without a contract violation, the server treats the probe attempt as the server treats a probe attempt on a lost worker.
+The server treats the probe attempt the same way when the event arrives while the server still waits for the attempt's probe report.
+The probe then retries with backoff (ADR 0032).
+
+*Why:* A bound on the whole probe report would fail the same large probe report on a slow link at every retry.
+A decoded probe report stays in the server's memory until the server has stored the outcome.
+The count therefore bounds the decoded probe reports that the server holds at once by the probes that the server has started.
+The server already retries a probe whose worker is lost, so the worker needs no retry of its own.
+A report call can fail before the server reads the call's first message, for example when a proxy between the worker and the server resets that one call.
+The server then cannot tell which probe attempt the failed report call reported.
+Without the event after such a report call, the server would count that probe's unit as used until the probe's timeout.
+The timeout of a keyframe packet scan is 30 minutes by default.
+
+[[decision-probe-timeout]]
+=== The probe timeout stops running when the first message of the report call reaches the server
+
+The server has a timeout for a playback probe or a background probe, a timeout for a keyframe packet scan and a timeout for a bitrate scan chunk.
+Each timeout runs from the start command until the first message of the attempt's report call reaches the server.
+After the first message, only the bounds of the report call apply (<<decision-flow-control>>).
+The time that a probe report waits for a free report call still counts toward the timeout (<<decision-playback-first>>).
+A cancel command for the probe timeout applies the brake for timed-out probes only while the probe still runs on the worker (ADR 0032).
+A probe that has ended on the worker applies no brake, whether the probe report waits for a report call or travels in one.
+
+*Why:* The server learns that a probe has ended on the worker only from the first message of the report call or from the event (<<decision-report-call>>).
+The timeout therefore runs until then, and the wait for a free report call falls inside the timeout.
+The time that a link takes to carry a probe report says nothing about the probe, so that time stays outside the timeout.
+Without this rule, the server could cancel a keyframe packet scan or a bitrate scan chunk that finished just inside its timeout, while the worker was still sending the probe report.
+The same could happen at every retry.
+
+[[decision-cancel]]
+=== The cancel command stays on the worker session, and the worker answers the command with an event
+
+The server still cancels a probe with a cancel command that states the reason (ADR 0032).
+A canceled probe attempt has no probe report.
+The worker answers every cancel command with `ProbeAttemptEndedWithoutReport` for the attempt (<<decision-report-call>>).
+When the probe still runs, the worker stops the probe and sends the event once the probe has ended.
+When the attempt's probe report waits for a report call, the worker discards the probe report and sends the event.
+When the attempt's report call is open, the worker ends the report call and sends the event.
+When the worker has no probe, no probe report and no report call for the attempt, the worker sends the event at once.
+After a cancel command, the server waits a bounded time for the event.
+Before this decision, the server waited that time for the attempt's result.
+The first message of a report call that the worker opened before the cancel command arrived also ends that wait.
+When neither arrives in that time, the server ends the worker session, as the server did before this decision.
+
+*Why:* The cancel command carries the reason, and the reason decides whether the worker applies a brake (ADR 0032).
+A probe that still runs has no report call that the server could end instead.
+The server reads nothing from the probe report of a probe attempt that the server canceled.
+A report call for that attempt would carry bytes for nothing, and the report call could wait for a free call beyond the server's wait (<<decision-playback-first>>).
+The server would then end the worker session of a worker that had stopped the probe in time.
+The event is short and travels on the worker session, so the event waits for no report call.
+
+[[decision-playback-first]]
+=== Probe reports never take a call or memory from segment uploads
+
+The worker keeps at most `probe_report_limit` report calls open.
+The worker queues its other probe reports.
+The worker sends the probe reports of playback probes before the other probe reports.
+The worker keeps some of its report calls for the probe reports of playback probes.
+The number of kept report calls depends on `probe_report_limit`:
+
+* From a limit of 3, the worker keeps 2 report calls, and the other probe reports hold at most the limit − 2 report calls at once.
+The number 2 is the playback probe capacity (ADR 0032).
+At the limit of 24 that the server states (<<decision-limits>>), the other probe reports hold at most 22 report calls.
+* At a limit of 1 or 2, the other probe reports hold at most 1 report call, and the worker keeps the report calls that remain.
+* At a limit of 0, which the contract reads as no limit, the worker keeps no report call.
+
+The server accepts a fixed number of calls on one connection.
+The server sets `probe_report_limit` so that the worker session, the segment uploads within `segment_upload_limit` and the report calls within `probe_report_limit` fit that number together.
+
+The server holds the bytes that the server has read from report calls within a memory budget.
+That budget is separate from ADR 0037's budget for segment uploads.
+The size of the budget is a server setting.
+The server refuses a budget that is smaller than `probe_report_length_limit_bytes`, so every probe report within the length limit fits the budget.
+The server reads the messages of a report call only while the probe report fits the budget.
+When several probe reports wait for the budget, the server gives room to the probe reports of playback probes first.
+While a probe report waits for the budget, the worker's bound for a message keeps running (<<decision-flow-control>>).
+When that bound passes, the report call fails, and the probe runs again.
+
+*Why:* A worker's background probe capacity can grow to the number of the worker's processors (ADR 0032).
+On a worker with more processors than the connection has free calls, more probe reports can be ready at once than the connection has calls.
+A playback request waits for segment uploads and for playback probes.
+A playback request waits for nothing else that a worker sends.
+A playback probe never waits for a unit behind a background probe (ADR 0032).
+At the limit of 24 that the server states, the 2 kept report calls give the probe report of a playback probe the same protection.
+All workers share the server's budget for probe reports.
+Without the order in the budget, the probe report of a playback probe would wait behind every probe report that asked for room earlier.
+The order covers only the probe reports that still wait for room.
+A probe report that the server already reads keeps its room until the probe report's call ends.
+One memory budget for probe reports and segment uploads would let a large probe report delay a segment upload.
+
+[[rollout]]
+=== The worker changes before the server, and no capability marks the change
+
+A capability is a feature that a worker advertises when the worker registers.
+ADR 0033 lets the server send a new operation only to a worker that advertises support for the operation.
+ADR 0033 also has the server deploy support for a contract change before the workers upgrade.
+Both rules protect a deployment in which the server and the workers upgrade at different times.
+Streamarr has no such deployment yet.
+This decision therefore sets both rules aside for this one change.
+This decision adds no capability.
+No server version accepts probe reports both on the worker session and through the report call.
+
+Three changes follow one another:
+
+. The contract gains the report call, the `ProbeAttemptReport` message, the event `ProbeAttemptEndedWithoutReport`, the five limits and the new reason.
+. The worker sends every probe report through the report call.
+. The server handles the report call.
+In the same change, the server repository moves its pinned worker image to the image of the second change, the server stops reading the three session events, and the contract reserves the numbers and the names of those events.
+
+After the second change and before the third change, no server can take a probe report from the newest worker image.
+
+[[amends-0032]]
+=== This decision amends ADR 0032
+
+* For the probe timeout, a probe has finished when the first message of the probe's report call reaches the server (<<decision-probe-timeout>>).
+The same rule applies to the timeout of a keyframe packet scan and to the timeout of a bitrate scan chunk (ADR 0054).
+* When a file's chosen video stream holds more keyframes than the server's keyframe limit, the worker reports the keyframes as unavailable, and the server encodes the file's video (<<decision-beyond-a-limit>>).
+* An oversized message for a probe's result no longer ends the worker session.
+An oversized message on a report call ends only that report call.
+The server cannot tell that end from a lost connection, so the probe fails as an ordinary retryable failure.
+* A report call names its probe attempt.
+A contract violation that the server finds in a report call therefore counts toward ADR 0032's limit of three consecutive contract violations for that probe.
+A probe report that is longer than its first message stated is an example.
+* ADR 0032's limit of 16,384 bytes on a result's titles and handler names no longer protects the worker session.
+That limit stays until a later probe version removes the limit (<<explicitly-deferred>>).
+* Where ADR 0032 says that a worker's reply breaks the contract, the reply is the probe report.
+* The server counts a probe until the server has stored the outcome of the probe's report, until the probe's report call ends without an outcome to store, or until the event `ProbeAttemptEndedWithoutReport` names the probe attempt (<<decision-report-call>>).
+* After a cancel command, the server waits for that event, not for the probe's result (<<decision-cancel>>).
+
+[[explicitly-deferred]]
+=== Explicitly deferred
+
+* Removing ADR 0032's limit of 16,384 bytes on a result's titles and handler names, and the contract's limit of 32,768 bytes on a result's chapters.
+Either change alters what a probe reports, so each change needs a probe version (ADR 0032).
+* A smaller measurement, which holds less than the bytes and the packet count of every keyframe interval (ADR 0054).
+* Resuming a probe report that failed partway.
+* Probing a file again after a ServerAdmin raises a limit that the file's stored outcome exceeded.
+* A separate connection for probe reports.
+
+== Consequences
+
+* Every message on the worker session is a command or a short event, and none waits behind a probe report.
+* The size of a probe report no longer depends on the limit of 128 KiB for one message.
+`PROBE_FAILURE_RESULT_TOO_LARGE` then means that a probe report or its result exceeds the server's stated length limit, or that the measurement of a bitrate scan chunk exceeds the server's stated interval limit.
+A bitrate scan chunk still fails with that value when one keyframe interval holds more bytes or more packets than one 32-bit field of the contract can hold.
+No limit changes that last outcome.
+* A file above the keyframe limit plays through an encode once the server probes the file under this decision.
+A probe error that the server stored earlier for such a file stays (<<decision-beyond-a-limit>>).
+* The server can slow a probe report, and the server bounds the bytes of probe reports that the server has read.
+The transport can hold further bytes of each open report call, up to the flow-control window of one call.
+* The worker holds each probe report in memory until the probe report's call ends.
+The server starts a probe only on a unit that the server counts as free, and the server counts a probe at least until the probe's report call ends (ADR 0032).
+The worker therefore holds at most one probe report that the server has not answered for each probe that the server counts.
+The server never counts more probes than the largest capacities that the worker has granted in the worker session, added together (ADR 0032).
+A capacity that the worker lowers afterwards does not lower that number, because the probe reports of the probes that ran before stay.
+The worker also holds an answered probe report until the server's answer reaches the worker, for at most the worker's bound for that answer.
+The probe report of a refused probe holds no unit, and that probe report holds only a failure value.
+* A probe report that is not the probe report of a playback probe waits for a report call while such probe reports hold every report call that the worker allows them (<<decision-playback-first>>).
+When such a probe report waits beyond the probe's timeout, the server cancels the probe attempt, the worker discards the probe report, and the probe runs again.
+While probe reports of playback probes wait, every freed report call and all freed room in the server's budget go to those probe reports first.
+* The probe report of a playback probe still waits for the server's budget while the free room in the budget is smaller than that probe report.
+The probe reports that the server already reads keep their room until their report calls end.
+When that wait passes the worker's bound for a message, the report call fails, and the playback probe runs again.
+* A worker whose canceled probe does not end within the server's wait still loses the worker session, as before this decision.
+A probe that reads a stalled network share can be such a probe (ADR 0032).
+* The server decodes only a probe report whose fields keep every stated limit (<<decision-scan-before-decode>>).
+In measurements of the server's code, a probe report within every default limit decoded to about 11 MiB, and a measurement of 65,536 empty measured streams to about 14 MiB.
+The server holds at most one decoded probe report for each probe that the server counts.
+Many malformed probe reports at once could still exhaust the server's heap.
+Only a defective or compromised worker inside the trust boundary of ADR 0035 sends such probe reports, and this decision accepts that.
+* A probe report of another probe version that breaks a limit counts as a contract violation, not as a misconfigured worker (ADR 0032).
+The server ends the report call before the server decodes the probe version.
+While the server decodes a probe report, the server holds the probe report's encoded bytes and the decoded message at the same time.
+The encoded bytes add at most the length limit, 16 MiB by default, to the heap that a probe report holds.
+* A file whose chosen video stream holds between 150,000 and 1,048,576 keyframes got a copy before this decision.
+Under the default keyframe limit, the server encodes that file's video.
+A four-hour file is such a file only above 10 keyframes each second (<<decision-limits>>).
+* A limit that a ServerAdmin raises applies only to the probes that run afterwards.
+An outcome that the server stored under the lower limit stays until the file changes or the probe version rises (ADR 0032).
+* A probe report at the default limits holds about an eighth of the heap that a probe report at the earlier limits held.
+* This decision removes the two part messages from the contract.
+The worker no longer splits the keyframe positions and the measurement into part messages, and the server no longer joins part messages.
+* Every probe attempt that the server does not cancel costs one call, also when the attempt's probe report holds a few hundred bytes.
+* The worker opens no report call for a probe attempt after the attempt's cancel command arrives, because the worker answers the cancel command with one short event.
+* A probe whose report call fails runs again in full, also when the probe was a keyframe packet scan of many minutes.
+* A worker image built before this decision cannot report a probe to a server built after this decision.
+* If Streamarr later runs more than one server instance, a report call must reach the instance that holds the worker session, as a segment upload must.
+* The server can change the length limit, the keyframe limit and the interval limit without a new worker.
+
+== Rejected Alternatives
+
+* Keep probe reports on the worker session and raise the server's limit for one message.
+The result would fit, but the worker would still send a large probe report without flow control on the call that carries commands and events.
+* Send the result in parts on the worker session, as the worker sends the keyframe positions today (streamarr/streamarr-server#554).
+The worker session would carry more messages for each probe report, and every text field would still need a limit of its own.
+* Keep the keyframe positions parts and the stream measurement parts as typed messages of the report call, and send only the result as bytes.
+The report call would then have two shapes, and the part rules would stay.
+* Open the report call when the probe starts.
+The report call would hold one of the connection's calls for the whole probe.
+* End a canceled probe attempt with a report call, as every other probe attempt ends.
+The server reads nothing from that probe report, and the report call could wait for a free call until the server ended the worker session.
+* Keep some report calls for the probe reports of canceled probes.
+Several cancel commands at once could still take every kept report call.
+* Cancel a probe by ending the probe's report call.
+The reason for a cancel would move from the cancel command into a status, and a probe whose report call the worker never opened would need a timeout of its own.
+* Advertise the report call as a capability, and accept probe reports both on the worker session and through the report call for a time.
+Streamarr has no production instances to keep working.
+* Give each reason for a refusal a message in the contract.
+The worker discards the probe report after every refusal, so nothing would read the reason.
+* Send one probe report at a time.
+The probe report of a playback probe would wait behind the probe report of a keyframe packet scan.
+* Decode every probe report, and then check the decoded probe report against the limits.
+A probe report within the length limit could take more than a gigabyte of the server's heap before any check refused the probe report.
+* Require the fields of a probe report in field-number order, decode the result first, and let the budget weigh each probe report's decoded size.
+Protobuf does not order fields, and a reservation that grows while probe reports arrive can leave every waiting probe report short of room.
+* Limit the probe reports that the server decodes and stores at once across all workers.
+The limit would need room kept for playback probes' reports and would cross from the report call to the thread that stores the outcome.
+The count of each probe until its outcome is stored bounds the same probe reports with no new mechanism.
+* Check a probe report's limits once, after the last message of the report call.
+The probe report would hold its room in the budget until the probe report's last byte arrived, also when the probe report's first bytes already exceeded a limit.
+* Bound the time for a whole probe report.
+The same large probe report would fail on a slow link at every retry.
+* Have the worker send a failed probe report again.
+The server already retries the probe, and a retry by the worker would need limits of its own.
+* Keep the limits as fixed values in the contract, the worker and the server.
+The server could not change a limit without a new worker.
+* Share one memory budget between probe reports and segment uploads.
+A large probe report could then delay a segment upload, and a playback request waits for segment uploads.
+* Let the probe timeout cover the probe report.
+On a slow link, the server would then cancel a probe that had finished, such as a keyframe packet scan of many minutes, and the probe would run again at every retry.
+* Fail the probe of a file whose chosen video stream holds more keyframes than the limit.
+The file could not play, although an encode needs no keyframe positions.
+
+== Evidence
+
+[[evidence-session-delay]]
+=== A probe report at the limits delays every later session message by the time that the link needs for the probe report
+
+The measurement ran the worker at commit `df1b1d83` with the worker's real gRPC transport against a scripted server on one host.
+The scripted server used the real server's limit for one message and recorded when each session message arrived.
+A relay between the worker and the scripted server limited the traffic from the worker to the scripted server to a fixed rate.
+The relay added no latency and no loss, so a real link of the same rate is slower.
+
+The probe report was synthetic.
+The probe report held 1,048,576 keyframes of a video stream whose every frame is a keyframe, at 24 frames per second.
+The measurement in the probe report covered that stream and seven audio streams, 8,388,608 keyframe intervals in total.
+The probe report took 2,305 session messages and 30,219,205 bytes.
+A keyframe position holds two values of at most 10 bytes each, and a measured keyframe interval holds two values of at most 5 bytes each.
+With the largest values, the same entries take 1,048,576 × 20 bytes plus 8,388,608 × 10 bytes, which is 100 MiB.
+
+Two cases ran at each rate.
+Each case started a second probe beside the probe that produced the probe report.
+In the first case, the second probe finished when the first message of the probe report reached the scripted server.
+The measurement timed the second probe's short result from that moment until the result arrived.
+In the second case, the scripted server canceled the second probe at the same moment.
+The measurement timed the canceled probe's result from the cancel command until the result arrived.
+Each value is the median of three runs.
+On a limited link, the runs of one value differed by at most 17 ms.
+
+[cols="2,2,2,2",options="header"]
+|===
+|Link |Probe report, first message to last message |Wait of the short result |Cancel command to the canceled probe's result
+
+|Loopback |0.05 s |0.05 s |0.05 s
+|100 Mbit/s |2.42 s |2.42 s |2.42 s
+|50 Mbit/s |4.84 s |4.83 s |4.84 s
+|20 Mbit/s |12.09 s |12.09 s |12.09 s
+|10 Mbit/s |24.17 s |24.17 s |24.17 s
+|===
+
+On each limited link, the times equal the probe report's bytes × 8 divided by the link rate, within 0.1 %.
+At every rate, the cancel command reached the worker's probe within 1 ms, so only the result waited.
+At every rate, the worker took about 40 ms to hand the whole probe report to gRPC.
+Until the link had carried the probe report, gRPC held 32 to 36 MiB of memory in the worker, outside the Java heap.
+The scripted server did not enforce the wait of 5 s, so the measurement shows the delay and not the end of a worker session.
+
+A probe report of 16,384 keyframes and the same eight streams took 472,587 bytes in 37 session messages.
+Behind that probe report, both waits stayed at or below 0.35 s on a link of 10 Mbit/s.
+
+[[evidence-server-heap]]
+=== One probe report at the earlier limits holds 228 MiB of the server's heap
+
+The measurement ran the server at commit `11ba82911`, before this decision.
+The server ran its real worker session listener and stored each outcome in PostgreSQL on the same host.
+A scripted worker sent synthetic probe reports as session messages: keyframe positions parts, stream measurement parts and a result.
+The server joined the parts, mapped the probe report to the server's own objects and stored the outcome in one transaction.
+The measurement read the heap that live objects held at marks along that path, after a collection.
+The measurement also found the smallest heap at which a fresh server stored each probe report three times out of three, in steps of 8 MiB, under the G1 collector.
+
+[cols="2,2,2,2",options="header"]
+|===
+|Keyframes × measured streams |Measured keyframe intervals |Live heap at the highest point |Smallest heap that stored the probe report
+
+|64 × 2 |128 |0.1 MiB |134 MiB
+|16,384 × 8 |131,072 |3.7 MiB |132 MiB
+|131,072 × 8 |1,048,576 |28.7 MiB |144 MiB
+|1,048,576 × 1 |1,048,576 |68.1 MiB |171 MiB
+|1,048,576 × 8 |8,388,608 |228.2 MiB |370 MiB
+|===
+
+The smallest heap of the two smallest probe reports is the heap that the server needed to start in the measurement.
+With K keyframes and E measured keyframe intervals, the live heap at the highest point fits the larger of 52 K + 16 E bytes and 36 K + 24 E bytes, within 0.2 MiB.
+For a probe report with more than two measured streams, the highest point is the database write of the measurement.
+Three copies of the measurement are live during that write.
+While the server joined the parts of the largest probe report, the server allocated 10,935 MiB.
+Each part copied every earlier part of the same list.
+The measurement sent one probe report at a time to an idle server, in the configuration of the server's integration tests.
+Under this decision, the server also holds a probe report's encoded bytes while the server decodes the bytes.
+
+== References
+
+* https://grpc.io/docs/guides/performance/[gRPC performance best practices: streaming calls, and calls beyond a connection's limit]
+* https://github.com/googleapis/googleapis/blob/885183fcec1a9b3a812055c209fa61f391c9042c/google/bytestream/bytestream.proto[Google ByteStream API: the client-streaming `Write` call]
+* https://github.com/streamarr/streamarr-server/issues/554[streamarr/streamarr-server#554: Fail only the probe, with a typed reason, when a probe result is too large for one worker session message]

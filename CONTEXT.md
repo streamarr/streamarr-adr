@@ -318,7 +318,7 @@ The `ftyp` and `moov` boxes a player needs before any media segment of a variant
 _Avoid_: init file, header, init.mp4
 
 **Segment folder**:
-The folder, named by `STREAMING_SEGMENT_BASE_PATH`, where the server stores the initialization segments and media segments of its stream sessions, and below which the server deletes only the entries that the segment store writes (ADR 0064).
+The folder, named by `STREAMING_SEGMENT_BASE_PATH`, where the server stores the initialization segments and media segments of its stream sessions, and below which the server deletes only the entries whose name, depth and file type match an entry that the segment store writes (ADR 0064).
 _Avoid_: segment directory, segment root, base path, transcode folder, segment disk (the disk that holds the segment folder)
 
 **Media time**:

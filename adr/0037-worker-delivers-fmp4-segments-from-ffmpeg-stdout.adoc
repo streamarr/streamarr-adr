@@ -796,8 +796,11 @@ A held encode whose video ends before its first segment reads from further back,
 When the server stores the file's keyframe positions, the job also carries the stored keyframe's seek position, chosen as above.
 Before FFmpeg starts, the worker checks the read that the attempt would run, with the attempt's own seek.
 A read passes when the decoder's first picture from it presents at or before the search time.
-The check decodes with one thread up to that first picture, and reads at most 1 s past the search time.
-It writes the packets that it reads to a second output, whose bytes count as progress, stops reading once a copied video packet decodes 1 s past the search time, and then decodes the packets that it has read.
+The check decodes with one thread up to that first picture.
+It stops reading once a copied video packet decodes 1 s past the search time, or once it has read the packet that ends the chosen video, whichever comes first.
+The server sends the video's end only when a keyframe packet scan measured it, never from a container header: a header's end can lie before the last packet and stop the check before its picture.
+Without the video's end, a check whose video ends before 1 s past the search time reads to the end of the file.
+The check writes the packets that it reads to a second output, whose bytes count as progress, and decodes the packets that it has read once it stops.
 The attempt keeps the stored seek position when its read passes.
 Otherwise, and whenever no position is stored, the attempt reads from the source's start when the search's first interval, below, reaches it: a read without a seek cannot land in the later copy of a time that a source whose timestamps start again repeats.
 In every other case the worker finds the keyframe in the source.
@@ -1804,6 +1807,10 @@ A keyframe scan does not run during playback (link:0032-media-file-probe-results
 * Stepping the read-back back by its own distance in each replacement attempt spends one failed attempt per step, so a resume far past the video's end exhausts the replacement budget.
 * Reading from the last keyframe that the search finds, without the 0.5 s of history, gave a deinterlacer no frame before a last picture that is itself a keyframe, so the held picture could differ from the one that an attempt from a stored keyframe holds.
 * Letting the search run without a progress report leaves it to the startup budget, which a long tail without video on slow storage can outlast, and every replacement would repeat the same search.
+* Stopping a check on copied audio a margin past its read end rejects positions that hold a picture in a file whose video is written far behind its audio.
+FFmpeg wrote such a file from 6 s of video and 120 s of audio in MPEG-TS, with the video after 4.1 s written after the audio at 110 s.
+With a 10 s margin, the check of the keyframe at 4 s stopped before the packets that its decoder needed.
+* Keeping the end of the file as the bound of a check whose video ends first: every such check reads the whole audio tail.
 * The worker's keyframe search does not reopen the rejected worker-computed read-back above, because it reads from keyframes that the worker finds in the source.
 * Keeping a fixed read-back for a file without stored keyframes, whether the worker computes it, as it did, or the server sends it, as this decision had said: an MPEG-TS or MPEG-PS seek to a fixed time lands inside the GOP before the keyframe that fills the first segment's start once keyframes lie more than the read-back apart.
 The attempt then loses pictures and still completes, and no read-back length covers every source.

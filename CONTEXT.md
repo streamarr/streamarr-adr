@@ -728,3 +728,25 @@ _Avoid_: last played, last activity, recently watched
 The per-Profile list of movies and episodes that have a counted resume position, ordered by last watched, newest first.
 Continue Watching does not yet list a series' next episode after a Profile finishes an episode.
 _Avoid_: up next (a series' next episode, which Continue Watching does not list yet), recently watched, resume list
+
+### Notifications
+
+**Notification**:
+A stored note to one Account that something happened to a subject, such as a share offer or a library.
+Each recipient Account gets its own copy when it happens, with its own read state.
+A Notification is either a request, which waits for a decision and resolves for every recipient once anyone decides it or it expires or is withdrawn, or news, which needs no decision and stays unread until its recipient reads it.
+A Notification never holds what waits: an offer or an invitation waits on its own, and the page that lists it counts it (ADR 0063).
+A recipient has at most one unread Notification of each kind about one subject, and a later event of that kind updates it in place; news of different kinds about one subject sits side by side.
+A dismissal deletes Notifications for good, such as a request that is no longer its recipient's to decide (ADR 0063); a dismissed completion, by contrast, stays in watch history.
+_Avoid_: alert, inbox (neither the list of Notifications nor a list of work such as the numbering review is an inbox), message (no person writes one; the `message` field is the server's English line, as on a `MutationError`), activity feed, event (a subscription event updates an open screen and is stored nowhere), task (a portion of a job's work)
+
+**Request**:
+A Notification that waits for a decision on its subject, such as the request that tells a HouseholdAdmin that a share offer waits.
+A request stores its state, which its subject's events write, and it resolves for every recipient at once when anyone decides the subject, when the subject is withdrawn, or when it expires (ADR 0063).
+The word names a Notification's form only where Notifications are meant; elsewhere a request is an API request, a playback request or an artwork request.
+_Avoid_: task (a portion of a job's work), action item, to-do, invitation (a ProfileManager invitation or an Account invitation, which a request can be about)
+
+**News**:
+A Notification that needs no decision, such as an offer's answer or the end of a share.
+News stays unread until its recipient marks it read (ADR 0063).
+_Avoid_: alert, update (what a later event of the same kind does to an unread Notification), announcement

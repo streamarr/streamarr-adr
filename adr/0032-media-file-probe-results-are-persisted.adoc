@@ -72,6 +72,7 @@ Playback keeps using each file's probe version 7 outcome until the server stores
 
 Another amendment adds probe version 9 (<<probe-version-9>>).
 With probe version 9, a keyframe packet scan also reports where the chosen video stream and each audio stream ends, as it read the end from the stream's packets.
+The scan counts an audio stream's last packet at the stream's longest packet duration, plus 1 ms, so an audio stream's end time never lies before its last sample.
 The server stores each scanned end time beside the probe facts, with the end times that job attempts learn.
 The scanned end times decide where a stream session ends (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-media-end[ADR 0037]).
 Playback keeps using each file's probe version 8 outcome until the server stores the file's probe version 9 outcome.
@@ -723,18 +724,22 @@ The probe itself reports no new fact, and it starts no new pass.
 A file whose keyframe positions come from its container index gets no keyframe packet scan and therefore no scanned end time.
 
 The scan reads the packets of the chosen video stream and of every audio stream that has a sample rate.
-A stream's end time is the latest end among its packets, where a packet ends at its presentation time plus its duration.
+The chosen video stream's end time is the latest end among its packets, where a packet ends at its presentation time plus its duration.
+An audio stream's end time counts the packet that presents last at the stream's longest packet duration, plus 1 ms.
+That end time is the presentation time of the audio packet that presents last, plus the longest duration that any packet of the stream states, plus 1 ms.
 A packet without a presentation time counts at its decode time.
 FFmpeg's stream copy gives such a packet its decode time as its presentation time, and the fragmented MP4 muxer writes the packet there, so a player presents it at that time.
 In a synthetic MPEG-TS file with one such video packet, the stream copy wrote the packet at decode time 276,000, the time that the source packet had.
 The scan reports each end time on the timeline of the keyframe positions, with the container's start time subtracted.
 The scan reads end times from packets only.
-It never reads one from the container header and never estimates one.
+It never reads one from the container header.
+An audio stream's end time therefore lies after the stream's last sample ends, by at most the stream's longest packet duration plus 1 ms.
 
 The scan leaves out a stream's end time when it cannot read it:
 
 * The stream has no packet.
-* The packet that presents last has no positive duration.
+* In the chosen video stream, the packet that presents last has no positive duration.
+* In an audio stream, no packet has a positive duration.
 * A packet of the stream has neither a presentation time nor a decode time.
 * The end time is not above zero, or does not fit the contract's duration.
 
@@ -773,6 +778,18 @@ The origin of each stored end time matters, because the two origins fail differe
 A scan fails when a read fails.
 A job attempt's FFmpeg can stop at a read error and still exit with status 0.
 With the pinned FFmpeg, a job attempt on a synthetic 20 s Matroska file whose reads failed from 60 % of its bytes reported end times of 12.291 s and 12.251 s.
+
+*Why an audio stream counts its longest packet duration:* An audio packet can state less time than its samples last.
+Matroska states each packet's time and duration in whole milliseconds.
+With the pinned FFmpeg, the last packet of a FLAC track in a synthetic Matroska file starts at 9.984 s and states 28 ms.
+That packet's 1,358 samples at 48 kHz end at 10.012292 s, so the packet's stated end lies 0.29 ms before the last sample ends.
+In a synthetic Matroska file with an AC-3 track, the last packet starts at 9.979 s and states 28 ms, and the decoded samples end at 10.010667 s, 3.67 ms after the packet's stated end.
+The longest packets of the two tracks state 96 ms and 32 ms, so the scan reports 10.081 s and 10.012 s.
+Both end times lie after the last sample.
+Matroska also rounds each packet's time to a whole millisecond, and the 1 ms covers that rounding.
+The scan already reads every packet's duration, so the rule reads nothing new.
+An encode fills the time between the last sample and the end time with silence (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-media-end[ADR 0037]).
+An end time before the last sample would make an encode drop the source's last sound.
 
 [[probe-version-10]]
 === Probe version 10 reports the start time correction that a job attempt's FFmpeg makes
@@ -1879,6 +1896,11 @@ The probe's limits change which streams have a start time, so the correction cou
 The server would need its own copy of FFmpeg's demuxer list, and those files play during the re-scan as they did before.
 * Add a separate worker capability for the job's start time correction.
 Listing probe version 10 already tells the server that the worker applies the correction.
+* End an audio stream at the latest end among its packets.
+A Matroska packet can state less time than its samples last, so the end time could lie a few milliseconds before the last sample, and an encode would drop that sound.
+* Count each audio packet at the duration that its samples decode to.
+A packet scan reads no sample count.
+Each codec would need a rule of its own, such as the block size that a FLAC frame header states or the 1,536 samples of every AC-3 frame, and a codec without such a rule would need a decode of the last packets.
 * Trust every Matroska statistics tag.
 A file that FFmpeg cut or encoded again keeps tags that describe packets it no longer holds.
 * Trust statistics tags whose date is no earlier than the file's `DateUTC`.

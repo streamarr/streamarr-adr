@@ -900,7 +900,7 @@ When no such worker exists for a PQ, HLG or 10-bit SDR encode, the playback choi
 
 * In Auto, the stream changes format as it does after a format error during that encode (<<encode-range>>).
 The next format attempt counts against the playback session's format-attempt budget, and the failed range and bit depth stay out of the rest of the playback session.
-That format attempt is an ordinary one, so it can use another codec family or another worker's hardware encoder.
+That format attempt can use another codec family, or the same codec family on a software encoder (<<failed-hardware-encoder>>).
 * In a fixed quality, playback ends and the playback session reports the failure.
 A fixed quality never changes its range or its bit depth silently.
 
@@ -916,6 +916,36 @@ Draft https://github.com/streamarr/streamarr-server/pull/913[streamarr/streamarr
 A change of range that follows no format error reports no failure and counts no format attempt.
 In Auto, an SDR picture that plays is better than an error, and the change counts as any other failed HDR encode does.
 In a fixed quality, the range is the viewer's manual choice, and the server never silently replaces a manual choice.
+
+[[failed-hardware-encoder]]
+=== After a hardware encoder fails, the playback session encodes that codec family only on software encoders
+
+A hardware encoder can fail or refuse the encode of the variant that the player requests.
+After such a failure or refusal, no later format attempt of the same playback session encodes the hardware encoder's codec family on a hardware encoder.
+The rule covers that codec family on every worker, not only on the worker whose hardware encoder failed.
+The rule lasts for the rest of the playback session, also when the worker offers the hardware encoder again.
+A later format attempt can still encode that codec family on a software encoder, or encode another codec family.
+
+When no connected worker has a software encoder of that codec family, no later format attempt can encode that codec family.
+A client that also declares another codec family then plays that codec family.
+When no other encode can play, the server refuses the stream session for lack of capacity.
+The server refuses for lack of capacity only when a hardware encoder of that codec family on a connected worker could encode the request.
+The hardware encoder that failed counts as such an encoder.
+The client then receives `TranscodeCapacityUnavailableError`, and the viewer reads "The server can't start this video right now. Try again in a few minutes."
+When not even a hardware encoder of that codec family could encode the request, the server refuses the stream session because no video format is eligible, as it refuses any other request that no encoder can play.
+
+The software continuation of <<hardware-failure-range>> needs a software encoder of its codec family.
+When no connected worker has a software encoder of that codec family, the server always refuses the software continuation for lack of capacity.
+What follows that refusal is what follows when no worker can take the software continuation (<<hardware-failure-range>>).
+
+Draft https://github.com/streamarr/streamarr-server/pull/913[streamarr/streamarr-server#913] builds the rules of this section.
+
+*Why:* A worker keeps offering a hardware encoder that refused an encode at its driver's session limit.
+Without this rule, Auto's next format attempt could go straight back to the hardware encoder that refused.
+The server chooses an encoder by codec family and encoder backend, and a decision cannot name a worker to avoid.
+The rule therefore covers the codec family on every worker.
+A refusal for lack of capacity names the real cause, which is that no connected worker can encode what the client plays at that moment.
+A refusal because no video format is eligible would tell the viewer to try another device, although the client's declaration did not cause the refusal.
 
 [[lower-variant-range]]
 === In Auto, the lower variants beside a copy keep the copy's range and bit depth and use its codec family
@@ -1116,8 +1146,6 @@ As https://github.com/streamarr/streamarr-server/pull/913[streamarr/streamarr-se
 * Whether a hardware encoder that a worker withdraws without a failure report of the variant's own job attempt counts as a hardware encoder failure of the variants pinned to it (<<hardware-failure-range>>).
 Such a variant gets no software continuation today, and its range never changes silently.
 streamarr/streamarr-server#913 read this from the code and did not run it.
-* Whether Auto's next format attempt may return to a hardware encoder that refused an encode at its driver's session limit (link:0044-encoder-headroom-and-the-preset-scale.adoc#decision-gpu-limits[ADR 0044]).
-The worker keeps offering such an encoder, so Auto can plan its 8-bit SDR encode there after it gave the range up.
 * Lower variants beside a copy that the playlist describes as Dolby Vision (<<lower-variant-range>>).
 A measurement would decide them: whether the players of the web and Apple clients, on a TV in its Dolby Vision mode, move down from such a copy to lower variants in its compatible base's range and back up to the copy, and what the TV shows at each change of mode.
 * How a withdrawal reaches the players (<<lower-variant-failure>>).
@@ -1254,6 +1282,10 @@ When the upload budget left the copy out of the playlist that the web player rea
 When the Apple client reports a format error on a lower variant, it waits 30 s for another stream session and then fails.
 * The player's report names no variant, so after a switch up to the copy, a decode failure of lower variant pictures still in the player's buffer counts as the copy's and ends the copy (<<lower-variant-failure>>).
 The next format attempt then follows the copy's recovery, which keeps an HDR source's range where <<encode-range>> allows it.
+* After a hardware encoder fails, the rest of the playback session encodes that codec family only on software encoders, also on a worker whose hardware encoder of the codec family still works (<<failed-hardware-encoder>>).
+A software HEVC or AV1 encoder can fall behind the player on a large source.
+* A client that declares only a codec family whose hardware encoder failed cannot play again in the same playback session when no worker has a software encoder of that codec family (<<failed-hardware-encoder>>).
+A new playback session can use that hardware encoder again once the worker offers it.
 * Only whoever runs the server can see why a file was encoded, through the logs and the metric.
 
 == Rejected Alternatives
@@ -1415,6 +1447,10 @@ A worker whose encoder writes the copy's range and bit depth can encode one.
 * Keeping a hardware codec family's SDR encode before a PQ or HLG encode on a software encoder, as ADR 0009's order alone would: a TV would leave HDR on a server whose hardware encoder writes only 8-bit SDR, although a software encoder of another codec family or another worker could keep the range (<<encode-range>>).
 * Planning the range and the bit depth again from the software encoders after a hardware encoder fails: a PQ encode would continue as 8-bit SDR with no format error and no counted format attempt, also in a fixed quality with HDR chosen (<<hardware-failure-range>>).
 * Keeping a copy that the playlist lists alone when the copy does not fit the upload budget: the copy would take upload that every counted stream session shares, although an encode that fits can play (<<lower-variant-range>>).
+* Keeping only the failed worker's hardware encoder out of the later format attempts: the server chooses an encoder by codec family and encoder backend, so a decision cannot name a worker to avoid (<<failed-hardware-encoder>>).
+* Letting the failed hardware encoder back into the playback session once the worker offers it again: a worker keeps offering a hardware encoder that refused at its driver's session limit, so Auto could go straight back to that encoder (<<failed-hardware-encoder>>).
+* Letting Auto go back to the failed hardware encoder when no worker has a software encoder of its codec family: that encoder can refuse again at its driver's session limit (<<failed-hardware-encoder>>).
+* Refusing a client whose only codec family has no software encoder on any worker because no video format is eligible: the viewer would read advice to try another device, although the client's declaration did not cause the refusal (<<failed-hardware-encoder>>).
 * Preparing an SDR output beside an HDR encode, to keep another format ready: the variants of the selected format start on demand, and another format starts only after a format error (<<encode-range>>).
 * A PQ or HLG H.264 encode: <<encode-range>> plans PQ and HLG at 10 bits only, and almost no device decodes 10-bit H.264 (https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397]).
 Firefox refused High 10 in 21 of 21 runs (<<evidence-sdr-output>>).
@@ -1785,6 +1821,15 @@ In the switch, the test stands in for the client and sends the range that plays.
 * The worker contract's `encode_features` field lists what each encoder passed, and https://github.com/streamarr/streamarr-transcode-worker/pull/168[streamarr/streamarr-transcode-worker#168] checks the worker's output with FFmpeg.
 * No recorded check yet shows the colors of a PQ encode of a real Dolby Vision profile 5 source.
 https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397] keeps that criterion open.
+
+<<failed-hardware-encoder>> records draft https://github.com/streamarr/streamarr-server/pull/913[streamarr/streamarr-server#913] at its head `dbe000ef5`, read on 2026-11-12.
+
+* Before the rule that keeps the codec family off its hardware encoders, 6 of 626 cases failed in `HardwareEncoderFailureRangeTest`, `TranscodeDecisionServiceTest` and `HlsStreamingServiceTest`.
+In those cases, Auto's next format attempt ran on the hardware AV1 encoder that had refused, where a software encoder was expected.
+* Before the refusal for lack of capacity, 5 of 468 cases failed in `HardwareEncoderFailureRangeTest` and `HlsStreamingServiceTest`.
+Each of those cases expected `TranscodeCapacityUnavailable` and received `NoEligibleVideoFormat`.
+* `HardwareEncoderFailureRangeTest` covers Auto's next format attempt after the hardware encoder refused, a later format attempt after the worker offers the hardware encoder again, and the refusal for a client that declares AV1 alone.
+* No real hardware encoder failed or refused in those tests, and no client ran against the pull request.
 
 <<hardware-failure-range>> records draft https://github.com/streamarr/streamarr-server/pull/913[streamarr/streamarr-server#913] at its head `d59dc54be`, read on 2026-11-11.
 

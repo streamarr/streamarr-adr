@@ -122,9 +122,8 @@ The worker sends the event in two cases:
 * The server canceled the probe attempt (<<decision-cancel>>).
 * The attempt's report call ended without the server's answer (<<decision-flow-control>>).
 
-When the event names a probe attempt that has not ended on the server, and the server has not answered the attempt's report call, the server ends the attempt.
+When the event names a probe attempt that has not ended on the server, the server ends the attempt.
 The server then no longer counts the probe (ADR 0032), and the server ends a report call that is still open for the attempt.
-Once the server has answered the attempt's report call, the event changes nothing, because the attempt ends when the server has handled the outcome.
 The server ignores the event when the attempt has already ended.
 
 The worker no longer sends three events on the worker session.
@@ -135,8 +134,7 @@ Every message on the worker session is then a command or a short event.
 The server still accepts at most 128 KiB in one message of every call.
 
 *Why:* The server counts a probe's unit as used until the probe attempt ends on the server (ADR 0032).
-A probe attempt ends on the server when the server has handled the outcome of the attempt's probe report, when the attempt's report call ends without the server's answer, when the event arrives before the server answers the attempt's report call, or when the worker session ends.
-The server has handled an outcome when the server has stored the outcome, discarded the outcome under ADR 0032's rules, or failed to store the outcome.
+A probe attempt ends on the server when the server answers the attempt's report call, when the attempt's report call ends without the server's answer, when the event arrives first, or when the worker session ends.
 The server must therefore learn the end of every probe attempt.
 A probe report can be large, and a command or an event must never wait behind a probe report.
 A probe report therefore travels in a call of its own.
@@ -314,7 +312,6 @@ A report call therefore times out only when the probe report stops advancing, ne
 
 The server answers as soon as the server has checked the probe report against the contract and matched the probe report to the probe attempt.
 The server answers before the server stores the probe report in the database.
-The server still counts the probe until the server has handled the probe report's outcome (<<decision-report-call>>).
 When the server cannot store a probe report that the server accepted, the probe runs again (ADR 0032).
 The worker never sends a probe report a second time.
 A probe report that breaks the contract counts toward ADR 0032's limit of three consecutive contract violations for that probe.
@@ -324,8 +321,6 @@ The server treats the probe attempt the same way when the event arrives while th
 The probe then retries with backoff (ADR 0032).
 
 *Why:* A bound on the whole probe report would fail the same large probe report on a slow link at every retry.
-A decoded probe report stays in the server's memory until the server has handled the outcome.
-The count therefore bounds the decoded probe reports that the server holds at once by the probes that the server has started.
 The server already retries a probe whose worker is lost, so the worker needs no retry of its own.
 A report call can fail before the server reads the call's first message, for example when a proxy between the worker and the server resets that one call.
 The server then cannot tell which probe attempt the failed report call reported.
@@ -445,7 +440,7 @@ A probe report that is longer than its first message stated is an example.
 * ADR 0032's limit of 16,384 bytes on a result's titles and handler names no longer protects the worker session.
 That limit stays until a later probe version removes the limit (<<explicitly-deferred>>).
 * Where ADR 0032 says that a worker's reply breaks the contract, the reply is the probe report.
-* The server counts a probe until the probe attempt ends on the server: the server has handled the outcome of the probe's report, the probe's report call ended without the server's answer, the event `ProbeAttemptEndedWithoutReport` named the probe attempt before the server answered the attempt's report call, or the worker session ended (<<decision-report-call>>).
+* The server counts a probe until the probe attempt ends on the server: the server answered the probe's report call, the report call ended without the server's answer, the event `ProbeAttemptEndedWithoutReport` named the probe attempt first, or the worker session ended (<<decision-report-call>>).
 * After a cancel command, the server waits for that event, not for the probe's result (<<decision-cancel>>).
 
 [[explicitly-deferred]]
@@ -470,7 +465,7 @@ A probe error that the server stored earlier for such a file stays (<<decision-b
 * The server can slow a probe report, and the server bounds the bytes of probe reports that the server has read.
 The transport can hold further bytes of each open report call, up to the flow-control window of one call.
 * The worker holds each probe report in memory until the probe report's call ends.
-The server starts a probe only on a unit that the server counts as free, and the server counts a probe at least until the probe's report call ends (ADR 0032).
+The server starts a probe only on a unit that the server counts as free, and the server counts a probe until the probe's report call ends (ADR 0032).
 The worker therefore holds at most one probe report that the server has not answered for each probe that the server counts.
 The server never counts more probes than the largest capacities that the worker has granted in the worker session, added together (ADR 0032).
 A capacity that the worker lowers afterwards does not lower that number, because the probe reports of the probes that ran before stay.
@@ -486,8 +481,8 @@ When that wait passes the worker's bound for a message, the report call fails, a
 A probe that reads a stalled network share can be such a probe (ADR 0032).
 * The server decodes only a probe report whose fields keep every stated limit (<<decision-scan-before-decode>>).
 In measurements of the server's code, a probe report within every default limit decoded to about 11 MiB, and a measurement of 65,536 empty measured streams to about 14 MiB.
-The server holds at most one decoded probe report for each probe that the server counts.
-The count grows with the capacities of every worker, and the heap does not.
+The server stops counting a probe when the server answers the probe's report call, and the decoded probe report stays in memory until the server has stored the outcome.
+The decoded probe reports that the server holds at once therefore grow with the capacities of every worker and with the time that storing takes, and the heap does not.
 Many probe reports at once could still exhaust the server's heap: valid probe reports near the limits, while the database stores slowly, or malformed probe reports from a defective or compromised worker inside the trust boundary of ADR 0035.
 A valid probe report at both defaults holds about 28 MiB at the highest point (<<evidence-server-heap>>).
 This decision accepts that, and a ServerAdmin can lower the limits or the workers' capacities.
@@ -538,7 +533,9 @@ A probe report within the length limit could take more than a gigabyte of the se
 Protobuf does not order fields, and a reservation that grows while probe reports arrive can leave every waiting probe report short of room.
 * Limit the probe reports that the server decodes and stores at once across all workers.
 The limit would need room kept for playback probes' reports and would cross from the report call to the thread that stores the outcome.
-The count of each probe until its outcome is stored bounds the same probe reports with no new mechanism.
+* Count each probe until the server has stored the probe's outcome.
+The count would then bound the decoded probe reports by the probes that the server has started.
+A re-read of a stalled source or a wait for a locked row would keep the probe's unit counted, and probes of files on healthy sources would wait for that unit.
 * Check a probe report's limits once, after the last message of the report call.
 The probe report would hold its room in the budget until the probe report's last byte arrived, also when the probe report's first bytes already exceeded a limit.
 * Bound the time for a whole probe report.

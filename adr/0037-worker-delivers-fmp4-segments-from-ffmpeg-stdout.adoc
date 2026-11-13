@@ -77,7 +77,7 @@ NOTE: An amendment replaces the segment list's whole slots with exact segment st
 Each job attempt of a stream session with a copied variant carries every segment's start in ticks of the source video stream's time base.
 In every variant of that stream session, segment N then starts at the presentation time of the source keyframe that opens copied segment N.
 Each encoded variant forces its keyframe on the first output frame at or after that start, so an encoded segment starts less than one output frame after the copied segment with the same number.
-Consecutive starts lie at least 2 s apart, and the last start lies at least 2 s before the media's end, so every segment holds a frame of every encoded variant and a sample of every audio track, and a shifted audio segment still takes its audio from two stored segments.
+Consecutive starts lie at least 2 s apart, and the last start lies at least 2 s before the media's end, so every segment holds a frame of every encoded variant and a sample of every audio track, apart from a copied audio track that ends before the segment starts (<<decision-early-ends>>), and a shifted audio segment still takes its audio from two stored segments.
 A copy places each keyframe at its stored tick only when the copy's timeline matches the probe's, so the server refuses a stream copy whose timeline may differ (<<decision-segment-list>>).
 A stream session without a copied variant keeps the plain 3 s grid and sends no list, unless a slot precedes the grid's final slot and the media ends less than 2 s into that final slot.
 
@@ -418,7 +418,7 @@ A shifted audio segment therefore still takes its audio from the stored segment 
 Every interval therefore holds at least one output frame of every encoded variant, and no forced keyframe falls in the next segment.
 2 s is also longer than one audio frame of every codec that Streamarr encodes.
 2 s is longer than one frame of the copied audio that common sources carry, too: AAC, AC-3, E-AC-3, DTS, Opus, MP3, ALAC with its default frame length, and FLAC within its streamable subset.
-Every interval therefore holds at least one sample start of each such audio track.
+Every interval therefore holds at least one sample start of each such audio track, up to the track's end.
 The stream session's encoded variants force their keyframes at the segment list's starts.
 An encoded variant's forced keyframe is the first output frame that presents at or after a segment's start.
 An encoded segment therefore starts less than one output frame after the copied segment with the same number.
@@ -1306,6 +1306,18 @@ A lossy encoder can code its last frames before the real end differently, becaus
 That change to the last decoded frames is the one loss that padding can cause.
 A copied stream stays bit-identical to the source and is never padded.
 
+A copied audio stream that does not end early stays a copy and is never padded, even when the stream ends shortly before the media end.
+A segment can still start at or after that stream's end, because a copied segment starts at a source keyframe and an encoded segment starts where the segment list or the plain grid puts it.
+Such a segment carries the picture and no sample of that audio stream.
+Take 6 s segments, source keyframes at 0 s, 6 s and 12 s, a video that ends at 15.5 s, and a copied audio stream that ends at 10 s.
+The audio ends 5.5 s before the video, less than one segment, so the audio does not end early.
+The segment from 12 s to 15.5 s then carries 3.5 s of picture and no sound.
+In an HLS stream session with audio renditions, a copied rendition that ends less than one segment before the media end can leave its own last segment without a sample in the same way.
+A browser is expected to stall at such a segment, because a segment without a track's samples fails to append in Media Source Extensions (<<decision-segment-list>>).
+An Apple player may stop where the sound ends, as AVPlayer and WebKit's native player stopped where unpadded multiplexed audio ended in the runs that the reason below gives.
+No player has run this layout.
+This decision accepts that limit and keeps the rule of one segment, so such a copy keeps the source's audio bytes for the whole title.
+
 No media segment takes in audio past its own interval's end (<<decision-audio>>).
 In an encode, the held picture's keyframes keep opening segments after the video's end, so each interval's audio goes into that interval's segment.
 Each segment's audio therefore stays within one interval, well inside the segment cap, however long the tail.
@@ -1693,6 +1705,8 @@ With the previous producer, that segment lost 2 s of video, and Chromium, WebKit
 With rebuilt segments, none of them lost a frame there.
 * A source whose audio or video ends at least one segment early plays to its end in every player, because the early-ending stream is encoded and padded.
 A stream session that copies such a source's video still encodes an early-ending audio track, and it encodes early-ending video.
+* A copied audio stream that ends less than one segment before the media end is never padded.
+When a segment starts at or after that stream's end, the segment carries no sound of that stream, and a player can stall or stop there (<<decision-early-ends>>).
 * A lossy encode that carries the padding can code its last frames before the source's real end differently, so its last decoded frame can differ from the encode without padding.
 A lossless encode decodes to the same samples, and a copy is never padded.
 * No segment holds audio past its own interval, so the segment that holds the last keyframe arrives on time whatever the audio tail's length, except in the case that <<explicitly-deferred>> lists.
@@ -1873,6 +1887,11 @@ In the same file, a stop at 55 s on the commentary would read as 92 % watched, a
 The player switches to such a rendition without a new stream session, and the rendition's media playlist ends at the stream session's media end, so the rendition's last segments would never play.
 * Giving a rendition to an audio track that ends at least one segment after both the video and the default track would make every playlist run to that track's end.
 The video and the default track would then be encoded and padded for the whole title, for every viewer, although most viewers never select that track.
+* Encoding and padding a copied audio stream whenever a segment would start at or after the stream's end would give up the audio's copy for the whole title to cover at most one segment of picture.
+An E-AC-3 track with Atmos would lose its objects, and a TrueHD or DTS track would need an encode to another codec.
+* Merging the last segments so that no segment starts at or after a copied audio stream's end was never tested in a player.
+The merge would also work only where a scan has read the audio's end, and an Apple player may still stop where the sound ends.
+* Having the worker refuse a segment that lacks the copied audio, so that the server moves playback to a stream session that encodes the audio, would spend a format attempt and replace the stream session near the end of the title.
 * Padding only the streams that the probe shows ending early leaves a source that ends before its probe says, or whose header states no end time, without padded segments.
 The server would need a second attempt to pad what the first attempt found.
 * Letting the segment that holds the last video keyframe take in every later audio sample held 1,704 s of audio in one segment, which arrived after 44.7 s.

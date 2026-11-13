@@ -62,7 +62,9 @@ ADR 0036's fourth amendment records how the worker converts single-track Dolby V
 
 A further amendment lets one kind of job attempt reshape Dolby Vision into PQ on the GPU (<<gpu-stages>>).
 https://github.com/streamarr/streamarr-transcode-worker/pull/190[streamarr/streamarr-transcode-worker#190] delivers it.
-The GPU picture differs slightly from the CPU picture, and Streamarr accepts that difference for this conversion alone.
+The GPU picture does not have to match the CPU picture.
+The GPU picture must stay within 2 code values of the exact value that BT.2100 and the Dolby Vision profile 5 definition give.
+Streamarr accepts that difference for this conversion alone.
 A GPU tone map to SDR still needs a measurement that shows a match with the CPU output.
 
 == Context
@@ -381,16 +383,26 @@ The server's video decision does not change: the worker chooses where the reshap
 Every other reshape of Dolby Vision stays on the CPU with `tonemapx`, into PQ or before a tone map.
 An AV1 profile 10.0 source and a job attempt on a software encoder therefore keep the CPU reshape.
 The GPU reshape does not have to match the CPU reshape.
-On synthetic sources, its output was about 2 code values below the CPU output, by a constant offset, on the 10-bit scale of 1,024 code values.
-Between the two outputs, the luma PSNR was 39.1 dB or more.
-Streamarr accepts that measured difference for this conversion, and a larger one needs a new decision.
+Instead, the GPU reshape must stay close to the exact value.
+The exact value is the code that BT.2100 and the Dolby Vision profile 5 definition give for a pixel, computed in double precision.
+The bound applies to the frames that the GPU chain hands to `hevc_nvenc`, which are 10-bit narrow-range BT.2020 PQ.
+On every flat color inside the BT.2020 gamut, each Y, Cb and Cr code of those frames must be within 2 code values of the exact value, on the 10-bit scale of 1,024 code values.
+A flat color is an area in which every pixel has the same color, so the result does not depend on how a filter interpolates 4:2:0 chroma.
+A difference of at most 2 code values on every sample means a PSNR of at least 54.2 dB against the exact value, with a peak of 1,023 code values, in each of Y, Cb and Cr.
+Streamarr accepts a difference within that bound for this conversion, and a larger difference needs a new decision.
+The bound does not cover a chroma edge, where the color changes between neighboring pixels.
+The bound does not cover a color outside BT.2020 either, because no standard gives the code for such a color.
+The worker runs the GPU reshape only after a measurement shows that the GPU reshape of the worker's pinned FFmpeg build stays within the bound.
 This acceptance does not extend to a tone map to SDR.
 There, the match rule above still decides when a GPU tone mapper replaces `tonemapx`.
 
 *Why:* On a host with few or slow cores, the CPU reshape paces this job attempt, and the hardware encoder waits for frames.
 With FFmpeg limited to 4 CPU threads, the same encode finished 2.5 to 4.7 times faster in wall time with the decode, the scale and the reshape on the GPU than with them on the CPU.
 With all 32 threads of the same host, a 1080p source at 1080p took about the same time both ways, so the gain is for hosts with few or slow cores.
-Streamarr trades the measured difference for that speed.
+Streamarr trades a difference of up to 2 code values for that speed.
+The bound compares the GPU reshape with the exact value, not with the CPU reshape.
+A bound against the CPU reshape would hold the GPU reshape to the errors of `tonemapx`.
+On the pinned FFmpeg build, `tonemapx` was up to 68 code values away from the exact value on colors inside BT.709.
 Evidence: <<evidence-gpu-reshape>>.
 
 === Every encode forces a codec profile, level and tier that the server chooses
@@ -858,8 +870,7 @@ A ServerAdmin sees the unread count in the Shared reports list.
 * Whether the produced-output check accepts HDR10+ or Dolby Vision in a copy whose plan names them `ABSENT`, because the probe could not check them (<<copy-planned-range>>).
 * A stop-stream action in the active-streams view, and a history of ended stream sessions (<<decision-reasons>>).
 * Choosing the HEVC sample-entry tag of every copy, and copying sources whose sample-entry tag is `dvhe` or `dvav` (https://github.com/streamarr/streamarr-transcode-worker/issues/18[streamarr/streamarr-transcode-worker#18]).
-* Removing the offset of the GPU reshape into PQ (<<gpu-stages>>).
-That needs a change to Streamarr's FFmpeg fork (link:0057-the-worker-runs-ffmpeg-built-from-streamarrs-fork-of-the-pinned-build.adoc[ADR 0057]).
+* A bound for the GPU reshape into PQ at a chroma edge and on a color outside BT.2020 (<<gpu-stages>>).
 
 == Consequences
 
@@ -881,8 +892,11 @@ The initialization segment then stays identical across job attempts, as link:003
 The playlist therefore never advertises a false codec string for an encode.
 * A libx265 encode whose forced level is too low fails the job attempt, because libx265 refuses to start.
 * A full-length Dolby Vision profile 5 encode grows each FFmpeg process's memory until the job attempt ends.
-* A PQ encode that reshapes Dolby Vision on the GPU comes out slightly below the same encode with the CPU reshape, by about 2 of 1,024 10-bit code values on the measured synthetic sources (<<gpu-stages>>).
-When the hardware encoder backend fails during such a stream, the stream continues as link:0044-encoder-headroom-and-the-preset-scale.adoc#decision-hardware-failure[ADR 0044] decides, on a software backend with the CPU reshape, and the picture shifts slightly at that point.
+* The GPU reshape of the pinned FFmpeg build exceeds the bound on its difference from the exact value (<<gpu-stages>>, <<evidence-gpu-reshape>>).
+No job attempt reshapes Dolby Vision on the GPU until the worker pins a build of Streamarr's FFmpeg fork whose GPU reshape stays within the bound (link:0057-the-worker-runs-ffmpeg-built-from-streamarrs-fork-of-the-pinned-build.adoc[ADR 0057]).
+* A PQ encode that reshapes Dolby Vision on the GPU can differ from the same encode with the CPU reshape, because the bound holds only the GPU reshape to the exact value (<<gpu-stages>>).
+When the hardware encoder backend fails during such a stream, the stream continues as link:0044-encoder-headroom-and-the-preset-scale.adoc#decision-hardware-failure[ADR 0044] decides, on a software backend with the CPU reshape, and the picture can shift at that point.
+With the color fixes of Streamarr's FFmpeg fork, the two chains differ most at chroma edges (<<evidence-gpu-reshape>>).
 * The worker does not report where a job attempt decodes or reshapes.
 The headroom model therefore still charges the decode and the reshape of a job attempt with the GPU reshape to the worker's cores.
 link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] decides that a hardware decode counts against the GPU's decode engines instead.
@@ -1015,7 +1029,9 @@ The attribute stays open in case a later need appears.
 * Keeping tone mapping on the CPU while the GPU decodes, scales and encodes, or using the GPU only to encode: when a job attempt encodes on the GPU, the worker runs every stage that the GPU can run on the GPU.
 Tone mapping moves to the GPU once the GPU tone mapper matches the CPU output.
 The worker does not yet decode and scale every such job attempt on the GPU (<<gpu-stages>>).
-* Holding the GPU reshape into PQ until its output matches the CPU output, as the match rule holds a GPU tone map to SDR: the measured offset is about 2 of 1,024 10-bit code values, and the CPU reshape paces the job attempt on a host with few or slow cores.
+* Bounding the GPU reshape into PQ by its difference from the CPU reshape, as the match rule bounds a GPU tone map to SDR: a bound against `tonemapx` would mostly measure the error of `tonemapx`, which was up to 68 code values away from the exact value on the pinned FFmpeg build.
+* Accepting the difference that the pinned build's GPU reshape showed against the CPU reshape, a constant offset of about 2 code values and a luma PSNR of 39.1 dB or more: the offset and the PSNR describe two different differences, so neither figure is a limit that a later measurement can pass or fail.
+That GPU reshape also fails the bound against the exact value (<<evidence-gpu-reshape>>).
 * Extending the accepted difference to a GPU tone map to SDR: the measurements cover only the reshape into PQ.
 * Having the worker encode a stream whose copy fails the record check: the job's video decision and codec string would then no longer describe the worker's output.
 * Encoding in place in the same stream session and making the player reload its playlist: the old playlist's `CODECS` attribute would no longer match the media until the player reloads.
@@ -1403,9 +1419,22 @@ Each wall time is the second of two runs.
 The smallest gain was 2.5 times, from 4.21 s to 1.70 s for 1080p to 1080p.
 The largest gain was 4.7 times, from 8.37 s to 1.77 s for 2160p to 1080p.
 * With all 32 threads of that host, 1080p to 1080p took 1.76 s on the CPU chain and 1.78 s on the GPU chain.
-* The GPU chain wrote a constant offset of about 2 code values below the CPU chain, on the 10-bit scale.
+* With the pinned build, the GPU chain wrote a constant offset of about 2 code values below the CPU chain, on the 10-bit scale.
 Between the two chains' outputs, the luma PSNR was 41.2 dB for 2160p to 1080p, 39.8 dB for 1080p to 480p and 39.1 dB for 2160p to 480p, each over 48 frames.
 * The GPU chain's output was byte-identical across runs.
+* The figures below compare each filter with the exact value, and come from https://github.com/streamarr/streamarr-ffmpeg/pull/2[streamarr/streamarr-ffmpeg#2].
+They ran on the same GPU, with synthetic sources only.
+A color check of Streamarr's FFmpeg fork writes its own profile 5 RPU, encodes flat colors losslessly, reshapes them into 10-bit narrow-range BT.2020 PQ and compares each flat color inside BT.2020 with the exact value.
+A separate implementation of the profile 5 definition, written for verification and taken from neither filter, gave the other figures.
+* On the pinned build, `tonemap_cuda`, the GPU reshape, wrote neutral greys 2.46 code values below the exact value on average, and 3.17 below in the highlights.
+On flat colors up to 90 chroma code values from neutral, its luma was 1 to 4 code values below the exact value.
+In the color check, 220 of 353 flat colors inside BT.2020 were further from the exact value than the check allowed, which was 1 code value on grey and 2 on a color.
+* On the pinned build, `tonemapx` was within 1 code value of the exact value on 41.8 % of the colors inside BT.709, and up to 68 code values away.
+On three synthetic 1080p clips, the luma PSNR between the frames that the two filters wrote was 41.4 dB on gradients with moderate color, 14.6 dB on strongly saturated chroma and 13.4 dB on color bars.
+* With the color fixes of streamarr/streamarr-ffmpeg#2, https://github.com/streamarr/streamarr-ffmpeg/pull/3[streamarr/streamarr-ffmpeg#3], https://github.com/streamarr/streamarr-ffmpeg/pull/5[streamarr/streamarr-ffmpeg#5], https://github.com/streamarr/streamarr-ffmpeg/pull/8[streamarr/streamarr-ffmpeg#8], https://github.com/streamarr/streamarr-ffmpeg/pull/9[streamarr/streamarr-ffmpeg#9] and https://github.com/streamarr/streamarr-ffmpeg/pull/10[streamarr/streamarr-ffmpeg#10], `tonemap_cuda` was within 0.51 code values of the exact value on every color inside BT.2020, except one color at 1.4 luma and 1.7 chroma code values.
+`tonemapx` was within 0.55 code values.
+On the same three clips, the luma PSNR between the two filters rose to 51.9 dB, 37.5 dB and 35.9 dB.
+The remaining difference between the two filters sits on chroma edges, where `tonemap_cuda` interpolates 4:2:0 chroma and `tonemapx` takes the nearest chroma sample, and on colors outside BT.2020.
 
 == References
 

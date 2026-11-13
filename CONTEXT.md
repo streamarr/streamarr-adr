@@ -193,6 +193,14 @@ _Avoid_: playback (ADR 0018's token and request surface), app session, stream se
 A typed value that the stream decision records for why a stream session plays the file directly, copies a stream or encodes it, such as a codec that the client does not declare. The playback session keeps the reasons. A viewer sees them in the playback-data panel for that viewer's own playback, and a ServerAdmin sees every active stream session's reasons in the active-streams view (ADR 0013).
 _Avoid_: transcode reason (it also explains copies and direct play), log message
 
+**Format change**:
+The difference between what plays and what the viewer's playback choice asked for, which the server names in the playback session while playback continues. The server names six: `COPY_FAILED`, `DIRECT_PLAY_FAILED`, `STARTED_WITH_ENCODE`, `DOLBY_VISION_STRIPPED`, `AUDIO_TRACK_SWITCHED`, and `HDR_NOT_KEPT` for SDR that plays where HDR was chosen or played. A playback session names one format change at a time and keeps it until the playback session ends. When the viewer picked Auto, the server names only `HDR_NOT_KEPT`. The client shows a format change as the caution symbol on its quality control (ADR 0052).
+_Avoid_: fallback (unqualified), notice, warning, error (playback has not stopped)
+
+**Caution symbol**:
+The alert triangle that a client shows on the corner of a player control while playback continues but differs from what the viewer chose. The picker that the control opens carries the caution symbol in its heading, and that caution symbol shows a message that explains the difference. The caution symbol shows only with the player controls. The quality control carries it for a format change, and the audio control carries it after the server refuses an audio switch during direct play. On the quality control, the caution symbol goes when the viewer picks a different playback choice that plays as picked. A pick of the playback choice that the quality control already shows as selected clears nothing. On the audio control, the caution symbol goes when the viewer picks any audio track, the audio track that plays included. Every caution symbol also goes when the viewer leaves the media title (ADR 0052).
+_Avoid_: notice (the overlay that it replaced), warning icon, alert (the failed state of playback that stopped)
+
 **Audio delay**:
 A signed offset, from −2,000 ms to +2,000 ms in 10 ms steps, that a viewer sets to correct the lip-sync error of one device's playback chain. A positive delay plays the sound later than the picture. The client keeps it per device and per audio output and sends it with the playback session, which keeps it while it lasts (ADR 0055).
 _Avoid_: audio offset, lip-sync offset, A/V sync setting, audio latency (what the chain adds, not the correction), applied audio delay (the sum that the server shifts by)

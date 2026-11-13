@@ -162,6 +162,14 @@ The server sends a keyframe search time, the first segment's start minus 0.5 s, 
 Before the amendment, the worker read such an attempt on a file without stored keyframe positions from one period before its first segment, and the server sent no fixed, generous read-back, though this decision said that it did.
 The worker fails an encoded attempt whose first segment opened late with `JOB_ATTEMPT_FAILURE_FIRST_SEGMENT_OPENED_LATE`, and the server then ends the stream session (https://github.com/streamarr/streamarr-server/pull/915[streamarr/streamarr-server#915], https://github.com/streamarr/streamarr-transcode-worker/pull/198[streamarr/streamarr-transcode-worker#198]).
 
+NOTE: An amendment lets a seek attempt that decodes an HEVC source on NVDEC or on VideoToolbox run without the leading-picture filter (<<decision-hardware-decode>>).
+FFmpeg's HEVC decoder already withholds from the hardware decoder the leading pictures that it cannot decode correctly.
+Measurements on 2026-11-11 with the pinned FFmpeg 8.1.3 ran on an RTX 5090 and on an Apple M1 Max.
+On neither hardware decoder did a seek attempt differ from its attempt from zero, except where the software-decoded seek attempt also differed (<<evidence-hevc-nvdec-seek>>, <<evidence-hevc-videotoolbox-seek>>).
+Every other seek attempt that decodes in hardware keeps the filter, H.264 included.
+A change of the pinned FFmpeg build re-opens the question of whether the exception holds (https://github.com/streamarr/streamarr-transcode-worker/pull/190[streamarr/streamarr-transcode-worker#190]).
+The amendment also limits the statement that NVDEC decodes bit-identically to software decoding to the sources that its measurement covered.
+
 == Context
 
 This section describes the system before the changes required by this decision.
@@ -955,16 +963,64 @@ On the pinned FFmpeg 8.1.3, a read of an MP4 source from a keyframe's decode tim
 Evidence: <<evidence-early-seek>>, https://github.com/streamarr/streamarr-server/issues/502[streamarr/streamarr-server#502].
 
 [[decision-hardware-decode]]
-=== Seek attempts decode in hardware behind a leading-picture filter
+=== Seek attempts decode in hardware, behind a leading-picture filter unless NVDEC or VideoToolbox decodes HEVC
 
 A seek attempt is a job attempt whose start sequence number is above zero.
 A seek attempt that encodes video decodes the source in hardware: on VideoToolbox on macOS, and on NVDEC on Linux.
 A keyframe's leading pictures follow the keyframe in decode order but precede the keyframe in presentation order, and leading pictures can reference pictures before the keyframe.
-A leading-picture filter runs on the compressed packets before the hardware decoder.
+A leading-picture filter runs on the compressed packets before the hardware decoder, unless NVDEC or VideoToolbox decodes an HEVC source.
 The filter drops the leading pictures of the keyframe at which the seek starts reading.
 The filter treats the first keyframe that the demuxer delivers as that keyframe.
 The filter keeps every packet that carries no presentation timestamp.
 An attempt that starts at zero runs without the filter.
+
+A seek attempt that decodes an HEVC source on NVDEC or on VideoToolbox also runs without the filter.
+FFmpeg's HEVC decoder already withholds from the hardware decoder the leading pictures that it cannot decode correctly.
+The exception holds under two conditions:
+
+* FFmpeg's own HEVC decoder parses the video stream and passes the hardware decoder only the pictures that it accepts.
+* The worker passes that decoder no option that makes it output a picture that it would otherwise refuse.
+
+The exception was measured on one pinned FFmpeg build, one NVIDIA GPU and one Apple silicon Mac.
+The exception rests on two checks that FFmpeg's HEVC decoder makes before it hands a picture to the hardware decoder.
+The HEVC decoder skips the RASL pictures of a CRA picture that is the first picture that the HEVC decoder decodes.
+The HEVC decoder refuses a picture that uses a reference picture that the HEVC decoder does not hold.
+A worker test that runs real FFmpeg pins both checks (https://github.com/streamarr/streamarr-transcode-worker/pull/190[streamarr/streamarr-transcode-worker#190]).
+One case of the test seeks an MP4 source to a CRA picture, and the HEVC decoder decodes that CRA picture first.
+Another case of the test seeks an MPEG-TS source to a CRA picture's decode time, the position that the server sends for an MPEG-TS source (<<decision-seek>>).
+In the MPEG-TS case, FFmpeg's demuxer delivers pictures that are not keyframes before the CRA picture, so the HEVC decoder refuses the CRA picture's RASL pictures instead of skipping them.
+The MP4 case alone cannot catch a change to the refusal, because the HEVC decoder skips those RASL pictures before the HEVC decoder checks their reference pictures.
+The test runs each case with software decoding and with NVDEC.
+For each case, the test compares the pictures that reach the encoder, and the presentation times of those pictures, with the pictures and presentation times of the attempt from zero.
+That comparison alone cannot catch a change that removes the refusal.
+Each picture that the refusal withholds presents before the keyframe whose position the server sends.
+The worker's filters remove such a picture before the encoder.
+A wrong picture before that keyframe therefore never reaches the comparison (<<evidence-hevc-nvdec-seek>>).
+For each case, the test also compares each picture that the decoder outputs, before the worker's filters, with the picture of the attempt from zero at the same presentation time.
+The MPEG-TS case also runs once with the refusal turned off by the decoder option `showall`.
+The worker's own commands never pass that option.
+In that run, the test requires at least one picture that the decoder outputs to differ from the picture of the attempt from zero at the same presentation time.
+That run shows that the MPEG-TS case still reaches the refusal on the FFmpeg build under test.
+The worker does not yet decode a seek attempt on VideoToolbox (https://github.com/streamarr/streamarr-transcode-worker/issues/55[streamarr/streamarr-transcode-worker#55]).
+The worker change that decodes seek attempts on VideoToolbox also makes the test run each case on VideoToolbox.
+FFmpeg hands NVDEC each picture's reference list, while VideoToolbox keeps its own reference pictures.
+The software and NVDEC cases therefore cannot catch a change in how FFmpeg hands HEVC pictures to VideoToolbox.
+A change of the pinned FFmpeg build re-opens the question of whether the exception holds.
+Each upgrade therefore runs that test again under the upgrade guard of link:0029-pin-jellyfin-ffmpeg-releases.adoc#decision-upgrade-guard[ADR 0029].
+The worker's CI has no NVIDIA or VideoToolbox hardware, so CI skips the NVDEC and VideoToolbox cases of the test.
+A skipped case does not pass the upgrade guard.
+The upgrade's local run on a host with an NVIDIA GPU runs the NVDEC cases of the test.
+The upgrade's local run on an Apple silicon Mac runs the VideoToolbox cases of the test.
+An NVDEC case passes the upgrade guard only when the case shows that NVDEC decoded the case's pictures.
+A VideoToolbox case passes the upgrade guard only when the case shows that Apple's hardware decoder decoded the case's pictures.
+When a hardware decoder fails to start, FFmpeg decodes the source in software instead.
+FFmpeg then still exits with status 0.
+VideoToolbox can also decode an HEVC picture with Apple's software decoder, because FFmpeg does not ask VideoToolbox to require Apple's hardware decoder for HEVC.
+Software decoding passes every comparison of the test, including the run with `showall` (<<evidence-hevc-nvdec-seek>>, <<evidence-hevc-videotoolbox-seek>>).
+Every other seek attempt that decodes in hardware runs behind the filter.
+That covers an H.264 source on VideoToolbox and on NVDEC, and a source of any other codec family that the hardware decoder decodes.
+A hardware decoder that a later decision adds, such as QSV or VAAPI, runs every seek attempt behind the filter, HEVC included, until a measurement covers that decoder.
+
 The worker decodes AVI sources in software.
 The worker also decodes in software any codec that the hardware decoder lacks or decodes wrongly.
 MPEG-4 Part 2 is such a codec on both platforms.
@@ -978,14 +1034,61 @@ With the filter, VideoToolbox decoded 146 of 146 junctions frame-exact with no d
 A DVD VOB file, and an MPEG-TS file that stamps a presentation time only on keyframes, carry packets without a presentation timestamp.
 On those sources, a filter that dropped such packets kept 11 of 1,742 frames.
 At the start of one of FFmpeg's test samples, the filter dropped 2 leading B pictures that the decoder could decode, so an attempt that starts at zero runs without the filter.
-NVDEC's H.264 and HEVC output was bit-identical to software decoding, with 0 of 32,633 frames different, so attempts decoded either way join exactly.
+Thirteen decodes from the start compared NVDEC with software decoding, on H.264 sources from libx264 and HEVC sources from libx265.
+NVDEC's output was bit-identical there, with 0 of 32,633 frames different, so on such sources attempts decoded either way join exactly.
 PSNR, the peak signal-to-noise ratio, measures how close one picture is to another, and a higher PSNR means a closer match.
+That bit-identity does not cover every source.
+On an HEVC stream that `hevc_nvenc` wrote with gradual intra refresh, NVDEC and software decoding differed from the start in 669 of 720 pictures, though each such picture scored at least 64.6 dB PSNR against the other decoder's (<<evidence-hevc-nvdec-seek>>).
 NVDEC decoded MPEG-4 Part 2 without an error, but its B pictures averaged 31.9 dB PSNR against software decoding over 479 B pictures, and the worst B picture scored 15.4 dB.
 VideoToolbox cannot decode MPEG-4 Part 2.
 The filter never drops a packet in an AVI file, so open-GOP H.264 in AVI still failed on VideoToolbox in 5 of 8 seeks.
 On an Apple M1 Max with FFmpeg 8.1.2 for macOS, one 1080p replacement attempt that encoded with `h264_videotoolbox` used 0.84 to 0.97 s of CPU with hardware decoding and the filter, against 4.26 to 4.28 s with software decoding.
 On an RTX 5090 with the pinned worker image's FFmpeg 8.1.2, hardware decoding cut one 1080p libx264 attempt's CPU time from 19.26 s to 16.47 s, as the median of 5 runs.
 Evidence: https://github.com/streamarr/streamarr-transcode-worker/issues/55[streamarr/streamarr-transcode-worker#55].
+
+*Why HEVC on NVDEC and VideoToolbox runs without the filter:* FFmpeg's HEVC decoder checks each picture before it hands the picture to a hardware decoder, and software decoding runs the same checks.
+It skips the RASL pictures of a CRA keyframe that is the first picture it decodes.
+It refuses a picture that uses a reference picture that it does not hold.
+A measurement on 2026-11-11 ran the worker's own commands with the pinned FFmpeg 8.1.3 on an RTX 5090.
+Its sources were synthetic HEVC encodes whose keyframes were CRA pictures with RASL pictures, or IDR pictures with RADL pictures, in MP4, Matroska and MPEG-TS.
+A RADL picture is a leading picture that references nothing before its keyframe.
+The measurement compared each seek attempt with the attempt from zero that decoded the same way, in 67 seek cases, and two independent checks ran 31 cases, 11 of them repeats of the first run, and 1,054 seek runs.
+No seek attempt on NVDEC differed from its attempt from zero, except where the software-decoded seek attempt also differed.
+In 65 of the 67 cases, all 25,488 pictures that the seek attempts on NVDEC passed to the encoder equalled the pictures of the attempts from zero.
+In the other 2, the seek position on an MPEG-TS source lay after the keyframe's decode time, where the server sends that decode time itself.
+NVDEC and software decoding both started at the next keyframe there.
+The filter changed none of the 67 encoded outputs on NVDEC.
+The filter is not harmless.
+On a constructed source whose intra pictures between keyframes carried a recovery point SEI, the measured filter removed a picture that the decoder outputs.
+That filter also drops every packet that arrives before the first keyframe, and the picture arrived before it.
+A recovery point SEI tells a decoder that it may start at a picture that is not a keyframe.
+The seek attempt was wrong there with the filter and without it, in different ways.
+The measurement has limits.
+Every source was synthetic, and every source in which either decoder could seek came from libx265.
+The measurement ran on one FFmpeg build and one GPU.
+Neither decoder could seek in a video stream that refreshes its picture gradually and holds one keyframe, with or without the filter.
+The one picture that each decoder output there after the seek was wrong, and it differed between NVDEC and software decoding.
+
+A second measurement on 2026-11-11 ran the same comparison on VideoToolbox, on an Apple M1 Max with the pinned FFmpeg 8.1.3 for macOS.
+FFmpeg hands VideoToolbox an HEVC picture slice by slice after those checks, so the slices of a picture that the HEVC decoder skips or refuses never reach VideoToolbox.
+An H.264 control on synthetic open-GOP sources reproduced the failure above.
+Without the filter, 28 of 75 seek cases on VideoToolbox were exact, and with the filter 75 of 75.
+In 394 HEVC seek cases without the filter, VideoToolbox was exact in the same 367 cases as software decoding.
+Its decoded pictures equalled software decoding's in all 394.
+In the other 27, software decoding was not exact either.
+Most of them read an MPEG-TS source from a position after the keyframe's decode time, which the server never sends.
+An independent check ran 390 HEVC seek cases per decoder with its own scripts.
+It confirmed that VideoToolbox used Apple's hardware decoder for every source but a 12-bit one.
+It found no case in which VideoToolbox went wrong where software decoding did not go wrong the same way, except on gradual-refresh streams.
+VideoToolbox keeps its own reference pictures, while FFmpeg hands NVDEC each picture's reference list.
+After a recovery point SEI, FFmpeg decodes a picture with generated references that VideoToolbox does not hold, and VideoToolbox fails that picture.
+On a gradual-refresh stream that holds one keyframe, a seek that started after that keyframe gave no picture on VideoToolbox, with or without the filter.
+Software decoding gave wrong pictures there.
+That measurement also ran on one machine and synthetic sources only.
+
+H.264 keeps the filter on both hardware decoders, because FFmpeg submits H.264 leading pictures to the hardware decoder.
+The VideoToolbox failure above and the control show it, and the NVDEC measurement of 2026-11-11 held no H.264 source.
+Evidence: <<evidence-hevc-nvdec-seek>>, <<evidence-hevc-videotoolbox-seek>>, https://github.com/streamarr/streamarr-transcode-worker/pull/190[streamarr/streamarr-transcode-worker#190].
 
 [[decision-grouping]]
 === A segment's video opens at the first keyframe at or after its boundary
@@ -1938,6 +2041,11 @@ SVT-AV1 showed no difference while it stayed under its bitrate cap.
 The player checks in the Evidence measured junction audio under the seek one period early and under the seek to the boundary, not under the decode-only early-start seek.
 The merge gate of issue https://github.com/streamarr/streamarr-server/issues/502[streamarr/streamarr-server#502] requires every junction to play in real players without a stall, a hole or a repeated picture.
 * A seek attempt on a worker with VideoToolbox or NVDEC decodes in hardware, which leaves more of the worker's CPU for encoding.
+* The hardware-decode recipe of a seek attempt depends on the source's codec family and on the hardware decoder: HEVC on NVDEC and on VideoToolbox runs without the leading-picture filter, and every other hardware decode of a seek attempt runs behind it.
+The exception rests on two checks that FFmpeg's HEVC decoder makes (<<decision-hardware-decode>>).
+Each upgrade of the pinned FFmpeg build therefore re-runs the worker test that pins both checks, with the NVDEC cases on a host with an NVIDIA GPU and the VideoToolbox cases on an Apple silicon Mac.
+The test gains its VideoToolbox cases when the worker starts to decode seek attempts on VideoToolbox.
+A hardware case passes only when the case shows that the hardware decoder, not a software decoder, decoded the case's pictures.
 * A segment closes about one fragmentation target after its boundary in media time.
 With the previous worker, FFmpeg renames the segment file at the boundary itself.
 Wall-clock delivery further depends on encoder speed and on back-pressure from the server.
@@ -2128,8 +2236,14 @@ The search does not need stored positions to be correct.
 * Handling stream sessions whose attempts run on different worker versions, by adding the worker version to the affinity key or a recipe version to the worker's capabilities, handles a case that cannot occur while Streamarr has no production instances.
 * Decoding every seek in software, or only the seeks of open-GOP sources, keeps the CPU cost of software decoding.
 That cost was 4.26 to 4.28 s against 0.84 to 0.97 s for one 1080p replacement attempt on the M1 Max.
-* Keeping software decode on Linux until https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] would delay a decoder whose H.264 and HEVC output already matched software decoding bit for bit.
-* Running NVDEC without the leading-picture filter would give the two platforms different recipes, while the filter changed no NVDEC output frame in 77 pairs of runs.
+* Keeping software decode on Linux until https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] would delay a decoder whose output from libx264 and libx265 sources already matched software decoding bit for bit.
+* Running H.264 on NVDEC without the leading-picture filter would give the two platforms different recipes for H.264, while the filter changed no NVDEC output frame in 77 pairs of runs.
+The NVDEC measurement behind the HEVC exception held no H.264 source.
+* Keeping the leading-picture filter for HEVC on NVDEC and VideoToolbox, so that every hardware-decoded seek attempt runs one recipe, adds a filter where FFmpeg's HEVC decoder already withholds the leading pictures that it cannot decode correctly.
+On NVDEC the filter changed none of 67 encoded outputs, and on a constructed source it removed a picture that the decoder outputs (<<evidence-hevc-nvdec-seek>>).
+On VideoToolbox it changed the pictures that reached the encoder in 1 of 394 seek cases, on the same constructed source (<<evidence-hevc-videotoolbox-seek>>).
+* Keeping the filter for HEVC on VideoToolbox alone, because VideoToolbox keeps its own reference pictures, would not help where that matters.
+On gradual-refresh streams, a seek after the only keyframe gave no picture on VideoToolbox with or without the filter.
 * Failing the attempt before closing the open segment when a fragment skips a number discards a complete, correctly numbered segment.
 In a stream copy every replacement attempt would fail at the same fragment, so none could deliver it, and in an encode a replacement attempt would encode it again.
 * Requiring recorded fixtures to match the HLS muxer's cuts would make the tests enforce that muxer's first-packet origin, which misaligns a stream-copy replacement attempt.
@@ -2685,6 +2799,168 @@ A build that also copied that read's first packet started it after 509 to 563 ms
 * First segment times of one build varied by up to 3 s between runs, because the encode's start shared the workstation with other jobs.
 FFmpeg start times varied by less than 0.1 s.
 
+[[evidence-hevc-nvdec-seek]]
+=== HEVC seek attempts on NVDEC without the leading-picture filter
+
+* A measurement on 2026-11-11 used the pinned FFmpeg 8.1.3 and an RTX 5090 with NVIDIA driver 615.78.08.
+* It ran the commands that the worker builds for an encode of a Dolby Vision profile 5 source to PQ with `hevc_nvenc`, from zero and as a seek attempt (https://github.com/streamarr/streamarr-transcode-worker/pull/190[streamarr/streamarr-transcode-worker#190]).
+* Each case ran three ways: decoded on NVDEC, decoded on NVDEC behind the leading-picture filter, and decoded in software.
+* The worker has no leading-picture filter yet.
+These runs used the filter of the measurements behind https://github.com/streamarr/streamarr-transcode-worker/issues/55[streamarr/streamarr-transcode-worker#55].
+That filter also drops every packet that arrives before the first keyframe.
+* Each seek attempt was compared with the attempt from zero that decoded the same way, at three points: the decoded pictures, the pictures that reached the encoder, and the encoded output.
+* Every source of the first run was synthetic: FFmpeg's `testsrc2` pattern at 1080p with a frame number drawn into each picture, encoded by libx265 as 10-bit HEVC with Dolby Vision profile 5 RPUs.
+* Those sources' keyframes were IDR pictures without leading pictures, CRA pictures followed by 2 or 4 RASL pictures, and IDR pictures followed by 3 RADL pictures.
+The sources were read from MP4, Matroska and MPEG-TS.
+* The first run held 67 seek cases.
+In 65 of them, on NVDEC and in software, the decoded pictures and the pictures that reached the encoder equalled those of the attempt from zero, with none missing.
+The encoded output of each carried the packet times of the attempt from zero and all 144 pictures of its first segment.
+* Those 65 seek attempts passed 25,488 pictures to the encoder on each decoder, and none differed from the attempt from zero.
+* In those 65 cases, the encoded pictures of the NVDEC seek attempts scored at least 44.4 dB PSNR against those of the attempts from zero, and at most 27.0 dB when one side was shifted by one frame.
+* In the sources whose RPUs differed from picture to picture, every MP4 and Matroska case matched, so each RPU stayed with its picture after the decoder skipped the RASL pictures.
+* The other 2 cases read an MPEG-TS source from a position after the keyframe's decode time, where the server sends that decode time (<<decision-seek>>).
+NVDEC and software decoding both started at the next keyframe, 0.5 s into the first segment, and delivered 132 of its 144 pictures.
+* The decoded pictures from NVDEC and from software decoding were identical in 83 of 83 runs, over 43,560 frames.
+* Behind the leading-picture filter, the encoded output of the NVDEC seek attempt was byte-identical to the output without the filter in 67 of 67 cases.
+* In the 8 cases with RADL pictures, NVDEC and software decoding both output the 3 RADL pictures, and the filter dropped them.
+Those pictures present before the first segment, so the seek attempt's output did not change.
+* With a stream copy piped into the FFmpeg that decodes, as on the path that moves RPUs (link:0013-stream-decision-architecture.adoc#reshape-rpus-starting-samples[ADR 0013]), 11 cases matched on both decoders: 22 runs, 8,928 pictures, none wrong or missing.
+Those runs did not pass through the worker's own rewriting between the two processes.
+* A second, independent check took its commands from the worker's recorded command lines and ran 31 cases on NVDEC and in software.
+It added synthetic sources with 4 slices per picture, a 2160p picture, an audio track beside the video, and RASL pictures relabelled as ordinary pictures.
+All 31 cases matched on both decoders.
+* A third, independent check ran 1,054 seek runs with its own scripts and its own synthetic sources.
+It compared the pictures before the encoder as ordered lists of time and hash, so a shift, a drop or a repeat could not cancel out.
+It added sources with 11 RASL pictures after a keyframe, 3 temporal sub-layers, a 2160p picture, a last keyframe followed by 1 to 30 pictures, and splices of two encodes.
+In no run did the seek attempt on NVDEC differ from its attempt from zero while the software-decoded seek attempt did not.
+The decoded pictures from NVDEC and from software decoding differed in 0 of 439 seek cases.
+* The differences that both decoders shared had three causes.
+An MPEG-TS seek position after the keyframe's decode time started the output at the next keyframe, or wrote no picture when no keyframe followed.
+A read-back that reached no keyframe before the first segment, on a source with keyframes 20 s apart, missed every picture between the first segment's start and the next keyframe.
+A seek attempt whose whole output was 2 pictures got packet times one frame earlier than the attempt from zero.
+* In the source of the pinned FFmpeg 8.1.3, the HEVC decoder skips a RASL slice while the CRA picture before it is the first picture after the decoder starts or is flushed (`decode_slice` in `libavcodec/hevc/hevcdec.c`).
+The skip comes before the decoder starts a picture on the hardware decoder.
+* The decoder builds each picture's reference lists before it starts the picture on the hardware decoder.
+It refuses a picture that is not a keyframe when a reference picture that the picture uses is missing (`add_candidate_ref` in `libavcodec/hevc/refs.c`).
+* The MPEG-TS seeks first read packets that were not keyframes, so the CRA picture was not the decoder's first picture there, and that refusal removed its RASL pictures instead.
+NVDEC and software decoding logged the same number of refusals, and no picture from before the first keyframe came out.
+* That refusal has three exceptions.
+The decoder generates a missing picture that the current picture does not itself use.
+After a recovery point SEI on a picture that is not a keyframe, the decoder generates the missing references and decodes the picture.
+It fills a generated reference only for software decoding, so such a picture can differ between NVDEC and software decoding.
+The decoder options `output_corrupt` and `showall` turn the refusal off, and FFmpeg's command line sets neither unless asked.
+* A check on 2026-11-13 turned the refusal off with `showall`, on NVDEC and in software, with the worker's seek options.
+The check's source was a synthetic libx265 encode of FFmpeg's `testsrc2` pattern in MPEG-TS, with a CRA picture every 50 pictures, each followed by RASL pictures.
+The seek read from the decode time of the CRA picture at 50/24 s.
+With the refusal on, the decoder output no picture before the CRA picture, and none of the 142 pictures that the decoder output differed from the attempt from zero.
+With the refusal off, the decoder also output 8 pictures before the CRA picture, and all 8 differed from the attempt from zero.
+A trim at 4 s, where the seek attempt's first segment starts, removed those 8 pictures.
+The 96 pictures after the trim equalled those of the attempt from zero, with the refusal on and with the refusal off.
+A test that compares only the pictures after the worker's filters therefore passes with the refusal turned off.
+* In the source of the pinned FFmpeg 8.1.3, FFmpeg's decoder decodes in software when a hardware decoder fails to start (`ff_get_format` in `libavcodec/decode.c`).
+FFmpeg's command line then continues without an error (`get_format` in `fftools/ffmpeg_dec.c`).
+* A check on 2026-11-13 decoded a synthetic 128×128 libx265 encode with `-hwaccel cuda` on the same RTX 5090.
+NVDEC on that GPU decodes no HEVC picture narrower than 144 pixels, so NVDEC failed to start.
+FFmpeg logged the failure and decoded all 120 pictures in software.
+FFmpeg then exited with status 0.
+Each of the 120 pictures equalled the picture that a run without `-hwaccel cuda` gave.
+With the pictures kept in GPU memory and copied to system memory by a filter, the same decode failed, because software decoding put no picture in GPU memory.
+* A constructed MPEG-TS source held keyframes at 0 and 20 s and an intra picture every 2 s between them, each marked with a recovery point SEI.
+After a read-back that reached no keyframe before the first segment, NVDEC and software decoding both output the one marked picture after the landing, and then nothing until the keyframe at 20 s.
+The seek attempt repeated that picture up to 20 s: 191 of its 432 pictures were repeats in one case, and 47 of 288 in another.
+Behind the leading-picture filter, which dropped the marked picture because it arrived before the first keyframe, the seek attempt on NVDEC delivered only the 240 pictures from 20 s on.
+Neither output equalled the attempt from zero.
+* A video stream that `hevc_nvenc` wrote with gradual intra refresh held one keyframe.
+In decode-only runs after a seek, NVDEC and software decoding each output 1 picture and then refused every picture.
+That picture differed from the decode from zero on both decoders, and NVDEC's picture differed from the software decoder's.
+The decoder had generated that picture's missing references, and it fills a generated reference only for software decoding.
+Behind the filter, no picture came out.
+* Decoded from the start, that stream gave different pictures on NVDEC and in software in 669 of 720 pictures, with or without RPUs.
+Each such picture scored at least 64.6 dB PSNR against the other decoder's.
+No libx265 source showed a difference between the two decoders.
+* Every source in which either decoder could seek came from libx265.
+The measurement held no source with a second HEVC layer, tiles or long-term reference pictures.
+It ran on one GPU, one driver and one FFmpeg build.
+It did not run an attempt that holds the last picture or a variable-frame-rate source.
+
+[[evidence-hevc-videotoolbox-seek]]
+=== HEVC seek attempts on VideoToolbox without the leading-picture filter
+
+* A measurement on 2026-11-11 repeated the NVDEC measurement (<<evidence-hevc-nvdec-seek>>) on an Apple M1 Max with macOS 26.6.2.
+It used the macOS arm64 binary of the pinned FFmpeg 8.1.3 build (link:0029-pin-jellyfin-ffmpeg-releases.adoc#decision-macos-pin[ADR 0029]).
+* It ran the worker's seek-attempt commands with VideoToolbox decoding added.
+The worker has no VideoToolbox decoding yet, so the measurement chose four details.
+FFmpeg copied each decoded picture to system memory.
+The leading-picture filter was the one of the NVDEC measurement.
+The VideoToolbox encoders ran with no preset and a GOP of 144 pictures.
+The output went to files at 1080p and 5 Mbit/s.
+* Each case ran three ways: decoded on VideoToolbox, decoded on VideoToolbox behind the filter, and decoded in software.
+Every VideoToolbox run that received a packet logged that FFmpeg chose VideoToolbox's decoder.
+* Each seek attempt was compared with the attempt from zero that decoded the same way: the decoded pictures and the pictures that reached the encoder as ordered lists of time and hash, and the encoded output by its packet times and by PSNR.
+* An H.264 control ran first, on synthetic libx264 sources with open GOPs in MP4, Matroska and MPEG-TS.
+Without the filter, 28 of 75 seek cases on VideoToolbox were exact, and VideoToolbox logged 17,233 decode failures.
+On the source in which 15 of 16 keyframes had leading pictures, no picture came out in 42 of 42 seek cases.
+With the filter, VideoToolbox was exact in 75 of 75 cases, and software decoding in 75 of 75.
+* When VideoToolbox returns no picture, the pinned build drops that picture without an error, so a lost picture can leave a gap while FFmpeg exits with status 0.
+One H.264 seek in Matroska without the filter lost 96 pictures that way.
+* The HEVC sources were synthetic: FFmpeg's `testsrc2` pattern at 1080p with a frame number drawn into each picture, encoded as 8-bit and 10-bit HEVC by libx265 and by `hevc_videotoolbox`.
+Their keyframes were CRA pictures followed by 2, 3, 4 or 11 RASL pictures, IDR pictures followed by 3 RADL pictures, or IDR pictures without leading pictures.
+They were read from MP4, Matroska and MPEG-TS.
+The Dolby Vision profile 5 sources of the NVDEC measurement were read as well.
+* Without the filter, VideoToolbox was exact in 367 of 394 HEVC seek cases: 249 of 268 without Dolby Vision, and 118 of 126 with it.
+Software decoding was exact in the same cases.
+* The other 27 cases were not exact on VideoToolbox without the filter or in software.
+Most read an MPEG-TS source from a position after the keyframe's decode time, where the server sends that decode time (<<decision-seek>>), and output started at the next keyframe or not at all.
+The rest started a read-back between keyframes on the constructed source with recovery point SEIs (<<evidence-hevc-nvdec-seek>>).
+* The decoded pictures from VideoToolbox and from software decoding were identical in 394 of 394 HEVC seek cases, over 149,382 pictures.
+From the start, they differed in 0 of 36,924 HEVC pictures and 0 of 9,000 H.264 pictures.
+* In the exact cases, 115,290 pictures reached the encoder on each decoder, and none differed from the attempt from zero.
+* Every encode at the server's seek position, into `h264_videotoolbox` or `hevc_videotoolbox`, carried the packet times of the attempt from zero and all 144 pictures of its first segment.
+After VideoToolbox decoding, its pictures scored at least 39.5 dB PSNR against those of the attempt from zero, and on the 24 fps sources at most 30.3 dB when one side was shifted by one frame.
+* A smaller set of encodes into libx264 and libx265 gave equal results after VideoToolbox decoding and after software decoding.
+libx265, starting at the seek, placed its B pictures differently from the attempt from zero after either decoder.
+* Pictures kept in VideoToolbox's own memory instead of system memory gave identical hashes in 99 of 99 seek cases.
+* The filter changed the pictures that reached the encoder in 1 of 394 HEVC seek cases on VideoToolbox.
+That was the source with recovery point SEIs, where it turned 192 repeated pictures into 192 missing ones.
+Its other changes removed only decoded pictures that present before the first segment: RADL pictures that both decoders decoded correctly, and pictures before the first keyframe of that source.
+* An independent check ran 390 HEVC seek cases per decoder with its own scripts.
+It added sources at 2160p, in 4:2:2 10-bit and in 12-bit, with 4 slices per picture, and with Dolby Vision profile 8.1.
+It also added splices without Dolby Vision: at a BLA picture, at an unmarked CRA picture, and at a change from 1080p to 720p.
+It watched the system's hardware decoder sessions during each run: 438 of 456 VideoToolbox runs without the filter opened one.
+The 12-bit source opened none, because VideoToolbox decoded it with Apple's software decoder, so 12-bit HEVC on Apple's hardware decoder was not measured.
+In no case did VideoToolbox without the filter differ from its attempt from zero while software decoding did not differ the same way, except on gradual-refresh streams.
+* For HEVC, the pinned FFmpeg 8.1.3 asks VideoToolbox to enable Apple's hardware decoder, not to require it (`libavcodec/videotoolbox.c`).
+* A check on 2026-11-13 decoded 120 pictures of the independent check's 12-bit source on VideoToolbox, with the pictures kept in VideoToolbox's memory.
+FFmpeg exited with status 0, and no session opened on Apple's hardware decoder.
+Pictures in VideoToolbox's memory can therefore come from Apple's software decoder.
+* Another check on 2026-11-13 ran a seek on VideoToolbox in a sandbox that blocked FFmpeg's access to system services, so VideoToolbox could not start.
+The check's source was a synthetic 10-bit libx265 encode of FFmpeg's `testsrc2` pattern in MPEG-TS, with a CRA picture every 50 pictures, each followed by RASL pictures.
+The seek used the worker's seek options and read from the decode time of the CRA picture at 50/24 s.
+FFmpeg logged that VideoToolbox failed to start and decoded in software.
+FFmpeg then exited with status 0.
+All 150 pictures that the seek decoded equalled those of the decode from zero, which also ran in software in the sandbox.
+With `showall` in the sandbox, the decoder also output 8 pictures before the CRA picture, and all 8 differed from the decode from zero.
+With the pictures kept in VideoToolbox's memory and copied to system memory by a filter, the same seek failed in the sandbox.
+Outside the sandbox, that seek opened a session on Apple's hardware decoder, and its 150 pictures equalled those of VideoToolbox's decode from zero.
+* In the source of the pinned FFmpeg 8.1.3, FFmpeg hands VideoToolbox each HEVC picture slice by slice after the RASL skip and the refusal (`libavcodec/videotoolbox.c`).
+The slices of a picture that the HEVC decoder skips or refuses never reach VideoToolbox.
+* FFmpeg does hand VideoToolbox the parameter sets and SEI messages of such a picture, in front of the next picture that it accepts.
+The Dolby Vision sources, and a source without Dolby Vision that carries SEI messages in every picture, exercised that path, and every seek case on them that software decoding got right was exact on VideoToolbox.
+* VideoToolbox keeps its own reference pictures, while FFmpeg hands NVDEC each picture's reference list.
+After a recovery point SEI, FFmpeg decodes a picture with generated references, and VideoToolbox fails that picture.
+On the source with recovery point SEIs, VideoToolbox failed such pictures and restarted its session in 3 seeks, and its output equalled software decoding's in each.
+* On gradual-refresh MPEG-TS streams that hold one keyframe, a seek that started after that keyframe gave no picture on VideoToolbox, with or without the filter, in 11 of 11 seek cases of the independent check.
+Software decoding gave wrong pictures there.
+None of these streams was a valid gradual refresh.
+The one from libx265, whose recovery point SEIs a script inserted, never converged on the decode from zero.
+The two from `hevc_nvenc` carry a negative recovery count in their recovery point SEIs.
+Whether VideoToolbox still gives no picture where software decoding converges is inferred, not shown.
+* Every HEVC source came from libx265, `hevc_videotoolbox` or, for gradual refresh, `hevc_nvenc`.
+The measurement held no source with 4:4:4 chroma, tiles, field pictures, a second HEVC layer or Dolby Vision profile 7 with two layers.
+It ran on one Mac, one macOS version and one FFmpeg build.
+The independent check did not encode.
+Neither run covered the two FFmpeg processes of the path that moves RPUs, audio, an attempt that holds the last picture, or a variable-frame-rate source.
+
 [[evidence-svt-av1]]
 === SVT-AV1 study
 
@@ -2950,6 +3226,9 @@ The worker refuses the unsized `moov` and fails the attempt, and nothing is uplo
 The fixtures README states which behavior each recording verifies and explains every disagreement with the HLS muxer's cuts.
 The Node recorder that made them (`src/test/fmp4-recorder`) runs in CI without FFmpeg to re-derive every recording's expectations.
 * Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/55[streamarr/streamarr-transcode-worker#55], which decodes seek attempts on VideoToolbox and NVDEC.
+* Worker pull request https://github.com/streamarr/streamarr-transcode-worker/pull/190[streamarr/streamarr-transcode-worker#190], which decodes HEVC seek attempts on NVDEC without the leading-picture filter, for the job attempts that encode a Dolby Vision profile 5 source to PQ with `hevc_nvenc`.
+That pull request holds the worker test that the HEVC exception names (<<decision-hardware-decode>>).
+* The measurements of 2026-11-11 behind the HEVC exception were not committed, so the Evidence appendix gives their results: the one on NVDEC with its two independent checks, and the one on VideoToolbox with its independent check.
 * Issue https://github.com/streamarr/streamarr-server/issues/502[streamarr/streamarr-server#502], which delivers the decode-only early-start seek and records a variable-frame-rate source whose gap between frames outlasts the period.
 * Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56], which adds the NVENC encoders after the three checks.
 * Worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57], which adds the VideoToolbox encoders after the three checks, the timing check and the second Mac's parameter-set comparison.

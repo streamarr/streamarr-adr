@@ -43,7 +43,7 @@ While a Profile is shared into the Household, its HouseholdAdmins administer tha
 _Avoid_: owner, HouseholdOwner, parent (household roles that ADR 0024 removed)
 
 **ProfileManager**:
-An Account with durable authority to edit a Profile and its policy, manage its PIN, send share invitations for it to other Households and invite other managers.
+An Account with durable authority to edit a Profile and its policy, manage its PIN, send share invitations for it to Households and invite other managers.
 The authority comes from a direct grant, or it derives from the Account's own unrestricted Adult Personal Profile.
 ProfileManager authority survives the end of a share, unlike a HouseholdAdmin's authority over a shared Profile.
 _Avoid_: owner, parent
@@ -63,8 +63,9 @@ A Device registration never expires, and only revocation ends it.
 _Avoid_: pairing grant (the short-lived approval record that comes before it)
 
 **Share invitation**:
-A proposal to share one Profile with one other Household.
+A proposal to share one Profile with one Household.
 A ProfileManager of the Profile, or a ServerAdmin, sends a share invitation to that Household with a share code that the Household issued.
+For a self-managed Personal Profile, only that Profile's own Account or a ServerAdmin may send one.
 A HouseholdAdmin of that Household, or a ServerAdmin, accepts the share invitation or declines it.
 Acceptance makes the share active, and the Profile is then available in that Household.
 A declined share invitation has the status `REJECTED`.
@@ -73,7 +74,7 @@ The Account that sent a share invitation may cancel it while it waits, and so ma
 A new share invitation for the same Profile and Household replaces the waiting one.
 The server withdraws a waiting share invitation when its Profile, its Household or its sender can no longer carry it, for example when the Profile is transferred or the sender stops managing the Profile (ADR 0024).
 An Account invitation that connects a Profile may name Households that get a new share invitation when the Account invitation is accepted.
-Those share invitations need no share code, and they go only to Households that already host the Profile.
+Those share invitations need no share code, and they go only to Households where the Profile is shared when the Account invitation is issued.
 Write "share invitation" wherever "invitation" alone could mean an Account invitation or a ProfileManager invitation.
 _Avoid_: offer, share offer, Profile share offer, offering, offerer, re-offer, share request (a request is a kind of Notification), invite or invitation (unqualified, where an Account invitation or a ProfileManager invitation could be meant), share (the active share that an accepted share invitation becomes)
 

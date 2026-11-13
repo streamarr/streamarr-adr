@@ -29,6 +29,8 @@ Whether the client declares H.264 therefore no longer decides between 8-bit AV1 
 The same edit says that the server encodes HEVC, since https://github.com/streamarr/streamarr-server/pull/824[streamarr/streamarr-server#824] merged.
 It also says that in Auto the encoded lower variants beside a copy use the copy's codec family, so the codec preference decides only the stream sessions without a copy (link:0013-stream-decision-architecture.adoc#lower-variant-range[ADR 0013]).
 Another edit of 2026-11-13 keeps a PQ or HLG encode on a software encoder before the SDR encode of a codec family in the first group only while ADR 0044's headroom model predicts that the software encode keeps up with the player, once that model decides (link:0013-stream-decision-architecture.adoc#encode-range[ADR 0013]).
+A later edit of the same day lets such a software encode that falls behind give way to every SDR encode that keeps up, an H.264 encode and a software encode included.
+To keep one order, every encode that keeps up then comes before every encode that falls behind (ADR 0013).
 The same day, <<decision-dispatch>> gained a case for a software encoder: after a hardware encoder fails or refuses the encode of the variant that the player requests, the rest of the playback session encodes that codec family in software (link:0013-stream-decision-architecture.adoc#failed-hardware-encoder[ADR 0013]).
 Its other case now reads every feature that the output needs, the reshape of Dolby Vision into PQ included, together with a free playback slot.
 
@@ -117,19 +119,27 @@ Such an encode is used when no encode of the first group fits and H.264 does not
 It is also used when it keeps a PQ or HLG range that no encode of the first two groups keeps (link:0013-stream-decision-architecture.adoc#encode-range[ADR 0013]).
 H.264 does not fit the client when no H.264 capability entry of the client fits the output (link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc[ADR 0049]).
 Within this group, a 10-bit SDR encode comes before an 8-bit encode, as ADR 0013 orders them, and AV1 then comes before HEVC.
+Once the headroom model of link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] decides, such an encode is also used when it keeps up with the player and the H.264 encode falls behind (ADR 0013).
 
 The frame rate still decides first (ADR 0049).
 A client whose AV1 entry keeps a higher frame rate than its H.264 entry still receives AV1, even from a software AV1 encoder.
-The range and the bit depth decide next, as link:0013-stream-decision-architecture.adoc#encode-range[ADR 0013] decides.
-At the same frame rate, an encode that keeps a PQ or HLG range comes before every SDR encode, with one exception once the headroom model of link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] decides.
+Once the headroom model of ADR 0044 decides, the speed decides next: every encode that keeps up with the player comes before every encode that falls behind (link:0013-stream-decision-architecture.adoc#encode-range[ADR 0013]).
+An encode on a hardware encoder that can take the encode keeps up.
+An encode on a software encoder falls behind when the model predicts that no preset that the preset setting allows keeps the encode at the speed floor.
+Until the model decides, every encode counts as keeping up.
+The range and the bit depth decide next, as ADR 0013 decides.
+Among the encodes that keep up, and again among the encodes that fall behind, an encode that keeps a PQ or HLG range comes before every SDR encode.
 It comes before an SDR encode of a codec family in the first group, even when the PQ or HLG encode runs on a software encoder of another codec family or of another worker.
 ADR 0013 leaves open whether the same holds for a software encoder on the worker that lists the hardware encoder of the same codec family.
-The exception: a PQ or HLG encode on a software encoder that the model predicts falls below the speed floor comes after the SDR encodes of the first group, and before every other SDR encode (ADR 0013).
-At the same frame rate, a 10-bit SDR encode of AV1 or HEVC in software comes before an 8-bit H.264 encode and before an 8-bit encode of AV1 or HEVC in software.
+A PQ or HLG encode on a software encoder that falls behind therefore comes after every SDR encode that keeps up.
+That SDR encode can be an encode of the first group, an H.264 encode on a hardware encoder, or an SDR encode on a software encoder that keeps up.
+When no SDR encode keeps up, the PQ or HLG encode still comes before every SDR encode.
+Among the encodes that keep up, and again among the encodes that fall behind, a 10-bit SDR encode of AV1 or HEVC in software comes before an 8-bit H.264 encode and before an 8-bit encode of AV1 or HEVC in software.
+A 10-bit SDR encode in software that falls behind therefore comes after an 8-bit encode that keeps up.
 An SDR encode of a codec family in the first group keeps its place before a 10-bit SDR encode in software.
 H.264 holds neither an HDR range nor 10 bits.
 ADR 0013 ranks every encode in one order, and the codec preference decides only between the encodes of one group of that order.
-Between two PQ encodes, or between two 8-bit SDR encodes, the three groups therefore decide, and a codec family that a worker encodes in hardware comes first.
+Between two PQ encodes, or between two 8-bit SDR encodes, that both keep up or both fall behind, the three groups therefore decide, and a codec family that a worker encodes in hardware comes first.
 
 The server encodes H.264, HEVC and AV1.
 Its codec preference is therefore `[av1, hevc, h264]` when a connected worker encodes AV1 and HEVC in hardware, and `[h264, av1, hevc]` when no connected worker encodes either in hardware.
@@ -144,6 +154,7 @@ A hardware encoder keeps up and keeps its codec family's bandwidth savings over 
 A software HEVC or AV1 encode still serves a client that H.264 cannot serve.
 A PQ or HLG encode comes before a hardware codec family's SDR encode to keep a TV in its HDR mode as long as possible.
 Once the headroom model of link:0044-encoder-headroom-and-the-preset-scale.adoc[ADR 0044] decides, the software encode that keeps the range comes first only while the model predicts that the software encode keeps up with the player (link:0013-stream-decision-architecture.adoc#encode-range[ADR 0013]).
+An SDR picture that plays without pauses is better than an HDR picture that stops to buffer, whichever encoder makes the SDR picture.
 
 [[decision-dispatch]]
 === A variant goes to a worker with the hardware encoder first
@@ -280,8 +291,8 @@ The worker pays the extra CPU on each such encode.
 Evidence: <<evidence-cost>>.
 * A server whose hardware encoder writes only 8-bit SDR encodes an HDR source on a software encoder of another codec family or another worker that lists the source's range, for a client that declares that range (ADR 0013).
 That software encode may not keep up with a 4K source.
-Once ADR 0044's headroom model decides, the 8-bit SDR encode of a hardware AV1 or HEVC encoder plays when the model predicts that every software encode that keeps the range falls below the speed floor (ADR 0013).
-A hardware H.264 encode stays behind such a software encode.
+Once ADR 0044's headroom model decides, an SDR encode that keeps up plays when the model predicts that every software encode that keeps the range falls below the speed floor (ADR 0013).
+That SDR encode can come from a hardware AV1, HEVC or H.264 encoder, or from a software encoder that keeps up.
 Until then, the server checks only that a worker has a free playback slot, so the software encode can fall behind the player.
 * Beside an HEVC or AV1 copy in Auto, the lower variants run on a software encoder of that codec family when no worker encodes the family in hardware (ADR 0013).
 Such an encode can fall behind the player, as <<decision-hardware-first>> describes for every software HEVC and AV1 encode.

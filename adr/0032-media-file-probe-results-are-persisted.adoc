@@ -72,7 +72,8 @@ Playback keeps using each file's probe version 7 outcome until the server stores
 
 Another amendment adds probe version 9 (<<probe-version-9>>).
 With probe version 9, a keyframe packet scan also reports where the chosen video stream and each audio stream ends, as it read the end from the stream's packets.
-The scan counts an audio stream's last packet at the stream's longest packet duration, plus 1 ms, so an audio stream's end time never lies before its last sample while the stream's longest packet states a whole frame.
+The scan counts an audio stream's last packet at the stream's longest packet duration, plus a margin of 2 ms or two ticks of the stream's time base, whichever is longer.
+An audio stream's end time therefore never lies before its last sample while the stream's longest packet states a whole frame.
 The server stores each scanned end time beside the probe facts, with the end times that job attempts learn.
 The scanned end times decide where a stream session ends (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-media-end[ADR 0037]).
 Playback keeps using each file's probe version 8 outcome until the server stores the file's probe version 9 outcome.
@@ -725,15 +726,16 @@ A file whose keyframe positions come from its container index gets no keyframe p
 
 The scan reads the packets of the chosen video stream and of every audio stream that has a sample rate.
 The chosen video stream's end time is the latest end among its packets, where a packet ends at its presentation time plus its duration.
-An audio stream's end time counts the packet that presents last at the stream's longest packet duration, plus 1 ms.
-That end time is the presentation time of the audio packet that presents last, plus the longest duration that any packet of the stream states, plus 1 ms.
+An audio stream's end time counts the packet that presents last at the stream's longest packet duration, plus a margin.
+That end time is the presentation time of the audio packet that presents last, plus the longest duration that any packet of the stream states, plus the margin.
+The margin is 2 ms or two ticks of the stream's time base, whichever is longer.
 A packet without a presentation time counts at its decode time.
 FFmpeg's stream copy gives such a packet its decode time as its presentation time, and the fragmented MP4 muxer writes the packet there, so a player presents it at that time.
 In a synthetic MPEG-TS file with one such video packet, the stream copy wrote the packet at decode time 276,000, the time that the source packet had.
 The scan reports each end time on the timeline of the keyframe positions, with the container's start time subtracted.
 The scan reads end times from packets only.
 It never reads one from the container header.
-When the stream's longest packet states a whole frame of the codec, an audio stream's end time therefore lies after the stream's last sample ends, by at most the stream's longest packet duration plus 1 ms.
+When the stream's longest packet states a whole frame of the codec, an audio stream's end time therefore lies after the stream's last sample ends, by at most the stream's longest packet duration plus the margin.
 
 The scan leaves out a stream's end time when it cannot read it:
 
@@ -784,20 +786,33 @@ Matroska states each packet's time and duration in whole milliseconds.
 With the pinned FFmpeg, the last packet of a FLAC track in a synthetic Matroska file starts at 9.984 s and states 28 ms.
 That packet's 1,358 samples at 48 kHz end at 10.012292 s, so the packet's stated end lies 0.29 ms before the last sample ends.
 In a synthetic Matroska file with an AC-3 track, the last packet starts at 9.979 s and states 28 ms, and the decoded samples end at 10.010667 s, 3.67 ms after the packet's stated end.
-The longest packets of the two tracks state 96 ms and 32 ms, so the scan reports 10.081 s and 10.012 s.
+The longest packets of the two tracks state 96 ms and 32 ms, and the margin in these files is 2 ms, so the scan reports 10.082 s and 10.013 s.
 Both end times lie after the last sample.
 The rule needs a packet before the last one, because a stream's only packet can also state less time than its samples last.
 With the pinned FFmpeg, a synthetic Matroska file whose AC-3 track holds 15 ms of a sine tone has one audio packet, which starts at -0.005 s and states 15 ms.
-The decoded tone ends at 0.015 s, and the rule would give 0.011 s.
+The decoded tone ends at 0.015 s, and the rule would give 0.012 s.
 The rule relies on the stream's longest packet stating a whole frame, because no packet's samples last longer than one whole frame.
 An encoder writes a whole frame in every packet but the last, so a stream that one encoder wrote meets that condition once the stream has two packets.
 A stream that a copy joined from pieces shorter than one frame each can break that condition.
-With the pinned FFmpeg, a stream copy that joined two AC-3 pieces of 15 ms each gave two packets that both state 15 ms, and the rule then ends that stream 16 ms before its last decoded sound.
+With the pinned FFmpeg, a stream copy that joined two AC-3 pieces of 15 ms each gave two packets that both state 15 ms, and the rule then ends that stream 15 ms before its last decoded sound.
 Without a rule for each codec, the scan cannot tell such a stream from a stream whose frames are short, so this decision accepts that gap for such a stream.
-Matroska also rounds each packet's time to a whole millisecond, and the 1 ms covers that rounding.
 The scan already reads every packet's duration, so the rule reads nothing new.
 An encode fills the time between the last sample and the end time with silence (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-media-end[ADR 0037]).
 An end time before the last sample would make an encode drop the source's last sound.
+
+*Why the margin is 2 ms or two ticks, whichever is longer:* Two rounding errors can put an audio stream's last sample after the end that its packets state.
+Matroska rounds each packet's time to the nearest tick of the file's timestamp scale, and FFmpeg reads each Matroska packet's duration cut down to a whole tick.
+At Matroska's default scale of 1 ms per tick, the two errors together stay below 1.5 ms.
+With the pinned FFmpeg, a synthetic Matroska file holds a FLAC track of 192,512 samples at 44.1 kHz, which end at 4.365351 s.
+Each frame of that track lasts 92.88 ms, and every packet states 92 ms.
+The last packet starts at 4.272 s.
+A margin of 1 ms would end that track at 4.365 s, 0.35 ms before its last sample.
+The margin of 2 ms ends the track at 4.366 s, after its last sample.
+Two ticks cover both Matroska errors at any timestamp scale, such as 20 ms at a scale of 10 ms per tick.
+Two ticks are too short for MPEG-TS, where a tick is 1/90,000 s.
+FFmpeg gives each later audio frame of an MPEG-TS PES packet the time of the frame before it plus that frame's duration, cut down to a whole tick, so those times drift a few ticks early.
+In a synthetic MPEG-TS file with AC-3 at 44.1 kHz, the rule without a margin ended the track 31 µs before its last sample, and two ticks are 22 µs.
+The 2 ms covers that file.
 
 [[probe-version-10]]
 === Probe version 10 reports the start time correction that a job attempt's FFmpeg makes
@@ -1909,6 +1924,12 @@ A Matroska packet can state less time than its samples last, so the end time cou
 * Count each audio packet at the duration that its samples decode to.
 A packet scan reads no sample count.
 Each codec would need a rule of its own, such as the block size that a FLAC frame header states or the 1,536 samples of every AC-3 frame, and a codec without such a rule would need a decode of the last packets.
+* Add a margin of 1 ms after an audio stream's last packet.
+In a synthetic Matroska file, that end lay 0.35 ms before the last FLAC sample.
+* Add a margin of two ticks of the stream's time base alone.
+In MPEG-TS, two ticks are 22 µs, and a synthetic AC-3 track needed 31 µs.
+* Add a fixed margin of 2 ms alone.
+A Matroska file with a coarser timestamp scale can need more, up to almost 15 ms at 10 ms per tick.
 * Trust every Matroska statistics tag.
 A file that FFmpeg cut or encoded again keeps tags that describe packets it no longer holds.
 * Trust statistics tags whose date is no earlier than the file's `DateUTC`.

@@ -525,7 +525,27 @@ Otherwise the server learns the end time from the first job attempt that runs pa
 
 FFmpeg's interleave limit is how far FFmpeg lets one stream run ahead while FFmpeg waits for packets of another stream.
 The worker sets that interleave limit explicitly to 10 s.
-Once an audio track stops arriving, FFmpeg holds back the video for up to the interleave limit.
+In a job attempt that runs one FFmpeg process, a copied audio track comes from the video's input.
+Once an audio track from the video's input stops arriving, FFmpeg holds back the video for up to the interleave limit.
+FFmpeg tells an encoded track's decoder, filters and encoder that the track has ended only when the track's whole input ends.
+Until then, the last real audio and all the padding stay inside FFmpeg.
+So in every job that the server sends, the worker reads an encoded audio track from an input of its own, and reads the video from another input.
+On the path that moves a profile 5 stream's RPUs, the FFmpeg process that writes the output reads the video from the copy and reads every audio track from the source (<<decision-video-job>>).
+So on that path, a copied audio track also comes from an input other than the video's input.
+Once an audio track from an input other than the video's input stops arriving, FFmpeg stops reading the video's input as soon as the video runs 0.1 s ahead of that audio track.
+FFmpeg then holds back the video until the audio's input reaches the next audio packet or the end of the file, whether FFmpeg copies or encodes the audio.
+The interleave limit does not shorten that time, because FFmpeg stops reading the video long before the video runs 10 s ahead.
+So the video does not run on past the encoded audio.
+FFmpeg writes no output while FFmpeg holds back the video.
+FFmpeg keeps reading the audio's input while FFmpeg holds back the video.
+The worker counts the bytes that FFmpeg reads as the attempt's progress (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-waits[ADR 0037]).
+On the path that moves RPUs, the worker counts the reads of the FFmpeg process that writes the output, because that process reads the audio's input.
+The FFmpeg process that copies the video waits for the FFmpeg process that writes the output to read the copy.
+So the reads of the FFmpeg process that copies the video do not grow while FFmpeg holds back the video.
+While FFmpeg holds back the video, the worker and the server therefore treat the attempt as stalled only when the FFmpeg process that reads the audio's input also stops reading.
+On a system that keeps no count of a process's reads, the worker watches FFmpeg's output alone.
+On such a system, the attempt fails when FFmpeg holds back the video for longer than ADR 0037's stall threshold.
+The time that FFmpeg holds back the video has no limit yet (<<explicitly-deferred>>).
 After FFmpeg writes that video, the worker closes a media segment when the segment's video has run 1 s past the segment's end.
 link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] owns this closing rule.
 In this ADR, the closing rule is only a safety net behind the padding rule.
@@ -543,7 +563,23 @@ AVPlayer stopped at the end of multiplexed audio in 12 of 12 runs, so multiplexe
 A non-fragmented MP4 file states each track's duration in its track header (ISO/IEC 14496-12), and mkvmerge writes a `DURATION` statistics tag for each Matroska track.
 A Matroska file without statistics tags and an MPEG-TS file state no track duration, so the server also learns the end time from a job attempt.
 In normal output, audio trails video by at most 0.16 s, so the 1 s margin never closes a segment while the segment's audio is still on the way.
-Evidence: <<evidence-audio-cases>>.
+With the encoded audio on the video's input, the copied video ran on while the audio's last frames stayed inside FFmpeg.
+When the video ran on more than about 11 s past the segment where the audio stopped, the worker had already closed that segment.
+In a test, the attempt then lost 1.36 s of a 10 s track's real audio in 10 of 10 runs, and nothing reported the loss.
+With the encoded audio on an input of its own, no completed attempt lost, changed or repeated a sample in 413 lossless runs.
+FFmpeg 8.1.3 pauses an input while every output stream that the input feeds runs at least 0.1 s ahead of the output stream that trails.
+When the audio and the video share one input, that input also feeds the audio that trails.
+So FFmpeg keeps reading that input, and only the interleave limit holds back the video.
+In a test with the pinned FFmpeg 8.1.3, the audio track of a 60 s source ended at 10 s.
+FFmpeg copied the audio and the video, and read the source through a pipe at about 3 times real time.
+With the audio on the video's input, the output stopped for at most 3.6 s, about the 10 s interleave limit at that speed.
+With the video and the audio on separate inputs, the output stopped for 16.6 s, until the audio's input reached the end of the file.
+Each case gave the same times in 3 of 3 runs.
+In a test on the path that moves RPUs, a profile 5 source's audio ended 41 s before its video, and both FFmpeg processes read the source at about 3 times real time.
+The FFmpeg process that writes the output then wrote nothing for 13.7 s.
+When the worker watched the output alone with a 5 s stall threshold, the attempt failed.
+When the worker counted the reads of the FFmpeg process that writes the output, the attempt completed in 4 of 4 runs.
+Evidence: <<evidence-audio-cases>>, https://github.com/streamarr/streamarr-transcode-worker/pull/196[streamarr/streamarr-transcode-worker#196], https://github.com/streamarr/streamarr-transcode-worker/pull/214[streamarr/streamarr-transcode-worker#214] for the path that moves RPUs.
 
 [[decision-languages]]
 === The Profile's language preferences and overrides choose the audio language and the subtitles that start on
@@ -1013,6 +1049,8 @@ Apple clients get that exception only if a check shows that their switches betwe
 * Test audio and subtitle renditions on cast receivers.
 * Test audio and subtitle renditions with the VAAPI, QSV, AMF and RKMPP encoders, which https://github.com/streamarr/streamarr-transcode-worker/issues/14[streamarr/streamarr-transcode-worker#14] adds.
 Issue https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56] adds NVENC, and issue https://github.com/streamarr/streamarr-transcode-worker/issues/57[streamarr/streamarr-transcode-worker#57] adds VideoToolbox, so neither encoder is deferred.
+* Limit the time that FFmpeg holds back the video while an audio track's input, separate from the video's input, reads through a stretch of the source without audio (<<decision-audio-end>>).
+Telling FFmpeg where the audio ends does not shorten that time, because the audio's input still reads to the next audio packet or the end of the file.
 
 [[consequences]]
 == Consequences
@@ -1103,6 +1141,15 @@ The Apple TV check stays an epic-end check and does not gate this decision.
 * The worker encodes FLAC, Opus and ALAC as well as AAC, AC-3 and E-AC-3.
 Each new audio encode only adds to the worker contract, as link:0033-transcode-worker-is-a-separate-service.adoc[ADR 0033] requires.
 * An audio track that ends at least one media segment before the video is always encoded, even when the client could play a copy of the track.
+* A job attempt that reads an audio track from an input other than the video's input writes nothing while that audio track's input reads through a stretch of the source without audio, such as the video after the audio's end.
+Every job attempt that encodes its audio reads the encoded audio from an input other than the video's input.
+On the path that moves RPUs, every job attempt with audio reads the audio from an input other than the video's input, whether the attempt copies or encodes the audio.
+The time without output is about the length of the stretch divided by the read speed as a multiple of real time.
+On a 300 s file whose audio ended at 10 s, the segment that held the end of the audio was stored after 0.3 s from a warm page cache, and after 1.4 to 1.6 s from an NVMe disk with a cold cache.
+In a test, a source's audio ended 179 s before its video, and the source was read at about 3 times real time.
+The output then stopped for 56.4 s.
+The web client stops a stream once the client's buffer has stayed empty for 45 s, so a long stretch without audio on slow storage can end web playback.
+An attempt that starts after the audio's end encodes silence from a generated source, so that attempt does not wait.
 * Once the server delivers audio renditions, video-only variants replace link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]'s multiplexed variants.
 An init per rendition then replaces ADR 0037's single init per variant.
 * The worker contract gains a rendition label on uploads, audio and WebVTT content types, the extraction job and burn-in.
@@ -1242,7 +1289,8 @@ AVPlayer stopped the whole stream where a rendition's playlist ended early.
 * Accepting the stall leaves an attempt that starts after a track's end without output until the input ends.
 * Padding audio renditions only leaves multiplexed audio unpadded, and AVPlayer stopped at the end of multiplexed audio in 12 of 12 runs.
 * A 10 s worker closing margin adds a second 10 s wait after FFmpeg's interleave limit and saves no audio.
-The audio that arrives late comes only at the very end of the output, where no margin reaches.
+With the encoded audio on the video's input, the audio that arrived late came only at the very end of the output, where no margin reaches.
+* Reading an encoded audio track from the video's input loses the end of the real audio without a report when a copied video runs on more than about 11 s past the segment where the audio stops.
 * Subtitle extraction for each stream session reads a whole Matroska file every time a viewer starts playback.
 At 8 MB/s, a 20 GB file would take about 40 minutes, a figure derived from the read rate.
 An extraction of only a time window misses a line that is already on screen when the window starts.

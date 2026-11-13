@@ -85,6 +85,10 @@ The server sends a job that carries the correction only to a worker that lists p
 Playback keeps using each file's probe version 9 outcome until the server stores the file's probe version 10 outcome.
 The start time correction was first probe version 7, then probe version 8, then probe version 9, and the facts that shipped first took each number, as <<later-probe-versions>> describes.
 
+Another amendment keeps the keyframe positions that a keyframe packet scan read across a new probe of the same file (<<kept-keyframe-positions>>).
+While the source snapshot stays the same and both probe versions share one media time zero, the new outcome keeps those positions until its own keyframe packet scan replaces them.
+A file whose keyframe positions a keyframe packet scan read therefore keeps its stream copy and its stored seek positions across a probe version raise.
+
 A further amendment removes the statistics that came from a sample of a private media library.
 Synthetic files, FATE samples and FFmpeg's own source now support the decisions that those statistics supported (<<evidence>>).
 
@@ -775,7 +779,7 @@ link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-media-e
 The upgrade to probe version 9 keeps every probe version 8 outcome.
 On the upgrade, the server queues a re-scan itself, as <<upgrade-rescan,the section on source changes and probe versions>> describes.
 A file that already had a keyframe packet scan holds keyframe positions but no end time.
-Its probe version 9 outcome asks for a keyframe packet scan again, and that scan stores the end times.
+Its probe version 9 outcome keeps those positions and still asks for a keyframe packet scan, and that scan stores the end times (<<kept-keyframe-positions>>).
 Playback keeps using each file's probe version 8 outcome until the server stores the file's probe version 9 outcome.
 Probe version 9 adds no condition on which worker gets a job, because no job carries a scanned end time that the worker must understand.
 The conditions of probe version 7 and probe version 10 still apply (<<probe-version-7>>, <<probe-version-10>>).
@@ -866,6 +870,7 @@ On the upgrade, the server queues a re-scan itself, as <<upgrade-rescan,the sect
 Playback keeps using each file's probe version 9 outcome until the server stores the file's probe version 10 outcome.
 An outcome of probe version 9 or earlier carries no correction, so its job attempts read the source as before.
 An earlier outcome and a probe version 10 outcome of the same file share one media time zero.
+So a probe version 10 outcome keeps the keyframe positions that an earlier version's keyframe packet scan read, and its own keyframe packet scan still runs (<<kept-keyframe-positions>>).
 
 *Why:* Without the correction, a job attempt on an MPEG-TS source measured media time zero from the streams that the attempt mapped.
 With `-discard none` alone, a data stream that started 12 s early moved media time zero by 11.977 s.
@@ -992,7 +997,7 @@ The keyframes alone do not say where the last segment ends, so the scan also rep
 link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] decides what happens when a copied variant still runs short.
 Like the probe step, the keyframe step survives a server restart.
 Stored keyframe positions are probe facts.
-The <<probe-version-rules,probe version rules>> therefore apply to stored keyframe positions.
+The <<probe-version-rules,probe version rules>> therefore apply to stored keyframe positions, with one exception: a new probe of an unchanged file keeps the positions that a keyframe packet scan read until its own scan replaces them (<<kept-keyframe-positions>>).
 The server offers a stream copy only after it knows the source's keyframe positions.
 Until the server knows those keyframe positions, the server encodes the video.
 A chosen video stream can hold more keyframes than the server's keyframe limit.
@@ -1016,6 +1021,74 @@ Cues read differently from FFmpeg would list keyframe times that FFmpeg's seek d
 Reading a zero TimestampScale as zero gave the index a time base of 0/1, and the keyframe report failed on a division by zero.
 A nine-byte CueTrack ahead of a repeated CueTime, or a three-byte Duration ahead of a repeated TimestampScale, let a probe that read the last copy use a value that FFmpeg never reaches.
 An unusable index costs only the packet scan, and the packet scan reads the keyframes that FFmpeg demuxes.
+
+[[kept-keyframe-positions]]
+=== A new probe of an unchanged file keeps the keyframe positions that a keyframe packet scan read
+
+https://github.com/streamarr/streamarr-server/pull/920[streamarr/streamarr-server#920] adds this rule.
+A new probe outcome that asks for a keyframe packet scan keeps the file's stored keyframe positions when two conditions hold:
+
+* The new probe read the same source snapshot as the stored outcome.
+* The stored outcome's probe version and the new probe version share one media time zero.
+
+Even then, the new outcome drops the positions at once in three cases:
+
+* The new probe chose another video stream, or none.
+The positions belong to the stream that the earlier probe chose.
+* The earlier probe read the positions from the container's index.
+A new probe that asks for a keyframe packet scan refused that index under its own rules.
+* The server cannot read the stored positions.
+
+A changed source snapshot drops the stored outcome with its positions, as before (<<probe-version-rules>>).
+
+The new outcome stays an outcome that asks for a keyframe packet scan, and it keeps the positions that the earlier scan read beside that request.
+Playback uses the kept positions as the file's keyframe positions, so it goes on copying the source and seeks to them (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037]).
+The outcome still owes its own keyframe packet scan.
+The server schedules and runs that scan as it does for any outcome that asks for one, and the library scan requests it again while it stays owed.
+One transaction stores the scan's result and, as the list below says, replaces the kept positions or leaves them in place.
+That transaction locks the media file row first, as probe publication does (<<decision-probe-task-protocol>>).
+It stores nothing unless the stored outcome still owes a keyframe packet scan for the source snapshot and probe version that the scan read.
+A scan for an earlier probe version that waits behind a new probe's publication therefore stores nothing.
+
+The scan's result decides what happens to the kept positions:
+
+* A scan that reads keyframe positions replaces the kept positions with its own.
+* A scan that reads the stream but finds no keyframe, or a keyframe without a timestamp, replaces them with unavailable keyframes, so playback encodes the file.
+* A scan that ends in a media error drops the kept positions and stores the media error, so playback encodes the file, as it encodes any file without keyframe positions.
+* Three failed scans of the same inputs leave the kept positions in place.
+A scan fails when it times out, or when the worker's reply breaks the worker contract or carries no keyframe result.
+The outcome then holds the kept positions as its known keyframe positions and owes no further scan.
+The positions stay until the source snapshot changes, or a later probe drops them or its own scan replaces them.
+
+An outcome without kept positions stores unavailable keyframes after three failed scans or a media error, as before.
+Three failed scans also store no end time.
+The end times that an earlier scan of the same source snapshot stored stay, and without them the media end stays the container's duration (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-media-end[ADR 0037]).
+
+A keyframe position is a time on the timeline of media time zero, the container start time that the probe reads (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-media-time-zero[ADR 0037]).
+Positions that a scan read under one probe version are right under another only when both versions place media time zero at the same instant.
+Every probe version that a stored outcome can carry does.
+The migration to probe version 4 deleted every earlier outcome with its positions (<<probe-version-4-migration>>), and every version from 4 reads the container start time under the same limits (<<probe-limits>>).
+The start time correction of probe version 10 keeps media time zero there: a job attempt cancels the correction (<<probe-version-10>>).
+A probe version 10 outcome therefore keeps the positions that an earlier version's scan read.
+A later probe version that moves media time zero must say so in this ADR, and its outcomes then drop the positions that a scan read under an earlier version.
+That change must also decide what happens to the learned and scanned end times, which lie on the same timeline and outlive every probe of the same source snapshot (<<probe-version-4>>).
+The server holds the first probe version on the current media time zero in one place.
+A server test fails when the server's probe version rises past the last version for which the server has recorded that decision.
+Probe version 10 keeps media time zero, so when the server raises its probe version to 10, that test only makes the change ask the question again.
+The change records the answer in the test, and the first probe version on the current media time zero stays where it is.
+
+*Why:* Every probe version raise probes every file again (<<upgrade-rescan>>).
+Before this rule, each new outcome of a file without a usable container index dropped the positions that its keyframe packet scan had read, and asked for a new scan.
+Until that scan ran, the file lost its stream copy, and each encode's seek used a fixed read-back instead of a stored keyframe (ADR 0037).
+A keyframe packet scan reads the whole file and goes after every probe, and a worker grants no keyframe packet scan capacity while it runs any job attempt (<<probe-capacity>>).
+So the loss lasted while the workers played, and then until the workers had read each such file whole again.
+The earlier scan read the kept positions from the same bytes, on the same media time zero, so dropping them gains nothing.
+The owed scan still runs, because a later probe version can read more in the same pass, as the probe version 9 end times do.
+A fix to the keyframe packet scan also reaches a file only through a new scan.
+A failed scan reads no positions to put in place of the kept ones.
+A timeout, a reply that breaks the worker contract or a reply without a keyframe result shows only that the scan gave nothing usable.
+A media error shows more.
+The earlier scan read the same source snapshot to its end, so bytes that no longer decode have changed under an unchanged size and modification time, and the kept positions may no longer match them.
 
 === File events and quiet periods
 
@@ -1843,6 +1916,17 @@ A file whose declared rates do not settle its rate also needs the frame-rate rul
 * A source whose container has no usable keyframe index plays through an encode until its keyframe step finishes.
 A source whose index lists a last keyframe that the probe cannot read also plays through an encode until its keyframe step finishes.
 That step reads the whole file once.
+A later probe of the unchanged source keeps the positions that the step read (<<kept-keyframe-positions>>).
+* A file whose keyframe positions a keyframe packet scan read keeps its stream copy across a probe version raise.
+Each such file still pays one more whole-file read for the keyframe packet scan that its new outcome owes.
+Until that scan stores its result, playback seeks to the positions that an earlier version's scan read.
+* A file whose bytes change while its size and modification time stay the same keeps its old keyframe positions after a new probe.
+When the owed keyframe packet scan then fails three times, the file keeps them until a later probe version's scan reads the file again.
+When that scan ends in a media error instead, the server drops them, and playback encodes the file.
+Before <<kept-keyframe-positions>>, the new probe dropped them, and its scan read the new bytes.
+The source snapshot cannot see such a change for any stored fact, and hashing file contents stays deferred (<<playback>>).
+* A bitrate measurement that follows the kept positions stays with them (link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc#measurement-lifetime[ADR 0054]).
+When the owed keyframe packet scan stores other positions or unavailable keyframes, the measurement goes, as it goes for any other change of keyframe positions.
 * The upgrade to probe version 4 deletes the keyframe positions that version 3 stored.
 Each source without a usable container index then needs its keyframe step again.
 * Probe version 4 leaves four known gaps.
@@ -1897,6 +1981,22 @@ The next scan then retries that file.
 
 == Rejected Alternatives
 
+* Drop the keyframe positions that a keyframe packet scan read with the outcome on every new probe, as the server did before <<kept-keyframe-positions>>.
+Every probe version raise would take the stream copy and the stored seek positions from each such file until one more whole-file read, and that read waits while a worker plays.
+* Hold the new outcome back, and keep playing the earlier one, until the new outcome's keyframe packet scan finishes.
+A library scan waits for each probe outcome that it requested, so it would also wait for keyframe packet scans, which wait while a worker plays.
+* Count the kept positions as the new probe version's keyframe packet scan, and skip that scan.
+The probe version 9 scan reads end times that earlier scans did not read, and a fix to the scan reaches a file only through a new scan.
+* Keep the positions that the probe read from a container index when the new probe asks for a keyframe packet scan.
+The new probe refused that index under its own rules, so the server would keep positions that the new probe refused.
+* Keep the positions across a probe version that moves media time zero.
+Every kept position, and with it every segment start and seek of a copy, would lie off by the distance between the two zeros.
+* Drop the kept positions when the owed keyframe packet scan fails three times.
+The file would encode again, although an earlier scan read its positions from the same source snapshot and a timed-out scan says nothing about its keyframes.
+* Keep the kept positions when the owed keyframe packet scan ends in a media error.
+An earlier scan read the same source snapshot to its end, so the error shows that the bytes changed under an unchanged size and modification time, and the kept positions may not match the new bytes.
+* Mark an outcome that keeps positions as one whose keyframes are known, and let a stored packet scan reason say that its scan is still owed.
+One stored fact would then carry two meanings, and the database could no longer refuse a packet scan reason beside keyframes that need no scan.
 * Infer an audio stream's layout from its channel count.
 FFmpeg names three 3-channel layouts and four 4-channel layouts, so the count cannot tell quad from 4.0.
 * Let the worker choose each encode's output layout from the source without telling the server.

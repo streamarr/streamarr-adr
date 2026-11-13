@@ -328,6 +328,34 @@ The server then cannot tell which probe attempt the failed report call reported.
 Without the event after such a report call, the server would count that probe's unit as used until the probe's timeout.
 The timeout of a keyframe packet scan is 30 minutes by default.
 
+[[decision-claim]]
+=== The dispatcher claims a probe job only for a unit that no probe job in progress needs
+
+Each probe runs in a probe job that the dispatcher claims (ADR 0032).
+The same probe job waits for the probe's report, reads the source's attributes again and stores the outcome.
+A probe job therefore holds at most one decoded probe report, from the server's answer until the server has stored, discarded or failed to store the outcome.
+
+The dispatcher claims a new probe job only for a free unit that no probe job in progress needs.
+A probe job in progress needs a unit while no worker runs the job's probe attempt.
+That covers a probe job that waits for a worker, and a probe job that stores an outcome after the server answered the job's report call.
+A playback probe job needs a unit of the playback probe capacity, or a unit of the background probe capacity when no playback unit is free.
+Any other probe job needs a unit of the background probe capacity.
+A keyframe packet scan or a bitrate scan chunk needs a unit of the keyframe packet scan capacity.
+A probe job that stores an outcome therefore keeps the unit that the server's answer freed, until the job ends.
+The decoded probe reports that wait for storage therefore never outnumber the largest probe capacities that the connected workers have granted, added up, however long storing takes.
+
+For example, a worker has 4 background units and runs 4 background probes.
+The server answers one probe's report call, and that probe's job then waits on a stalled read of the source.
+The server counts 1 free unit on the worker, and the dispatcher claims no background probe job.
+The dispatcher claims 1 background probe job once the stalled job ends.
+
+*Why:* The server stops counting a probe at the server's answer (<<decision-report-call>>), but the decoded probe report stays in memory until the probe job ends.
+The dispatcher's rule keeps a bound on those decoded probe reports: the capacities that the workers grant.
+The bound needs no new mechanism, because the dispatcher already counts the probe jobs in progress that no worker runs.
+The cost is that each probe job that stalls while the job stores an outcome holds back one probe, also a probe of a file on a healthy source.
+Counting each probe until the server had stored the outcome held back the same probe.
+When the server's reads of a share stall, each new probe job also stalls at the job's first read of the source, and that job keeps a unit before any worker runs the probe, whatever rule the dispatcher follows.
+
 [[decision-probe-timeout]]
 === The probe timeout stops running when the first message of the report call reaches the server
 
@@ -483,10 +511,12 @@ A probe that reads a stalled network share can be such a probe (ADR 0032).
 * The server decodes only a probe report whose fields keep every stated limit (<<decision-scan-before-decode>>).
 In measurements of the server's code, a probe report within every default limit decoded to about 11 MiB, and a measurement of 65,536 empty measured streams to about 14 MiB.
 The server stops counting a probe when the server answers the probe's report call, and the decoded probe report stays in memory until the server has stored, discarded or failed to store the outcome.
-The decoded probe reports that the server holds at once therefore grow with the capacities of every worker and with the time that storing takes, and the heap does not.
-Many probe reports at once could still exhaust the server's heap: valid probe reports near the limits, while the database stores slowly, or malformed probe reports from a defective or compromised worker inside the trust boundary of ADR 0035.
+The dispatcher's rule bounds those decoded probe reports by the probe capacities that the connected workers grant, added up, however long storing takes (<<decision-claim>>).
 A valid probe report at both defaults holds about 28 MiB at the highest point (<<evidence-server-heap>>).
+On a server whose workers grant many units, many large probe reports at once could still exhaust the server's heap.
+Such probe reports are valid probe reports near the limits, or malformed probe reports from a defective or compromised worker inside the trust boundary of ADR 0035.
 This decision accepts that, and a ServerAdmin can lower the limits or the workers' capacities.
+* A probe job that stalls while the job stores an outcome holds back one probe until the job ends, also a probe of a file on a healthy source (<<decision-claim>>).
 * A probe report of another probe version that breaks a limit counts as a contract violation, not as a misconfigured worker (ADR 0032).
 The server ends the report call before the server decodes the probe version.
 While the server decodes a probe report, the server holds the probe report's encoded bytes and the decoded message at the same time.
@@ -535,8 +565,13 @@ Protobuf does not order fields, and a reservation that grows while probe reports
 * Limit the probe reports that the server decodes and stores at once across all workers.
 The limit would need room kept for playback probes' reports and would cross from the report call to the thread that stores the outcome.
 * Count each probe until the server has stored the probe's outcome.
-The count would then bound the decoded probe reports by the probes that the server has started.
-A re-read of a stalled source or a wait for a locked row would keep the probe's unit counted, and probes of files on healthy sources would wait for that unit.
+That rule names no end for an outcome that the server discards or fails to store, and none for a probe whose worker session ends while the server stores the outcome.
+The dispatcher's rule already bounds the decoded probe reports by the workers' capacities (<<decision-claim>>).
+* Keep each probe report's room in the budget until the server has stored, discarded or failed to store the outcome.
+The budget keeps no room for the probe reports of playback probes, so a few stalled probe jobs with large probe reports could make a playback probe's report wait for room.
+* Name the dispatcher's limits on probe jobs as the bound on the decoded probe reports.
+By default the dispatcher runs at most 128 probe jobs and 16 scan jobs at once.
+At about 28 MiB for a valid probe report at both defaults, those 144 jobs could hold about 3.9 GiB of heap, and the thread settings that set those limits were sized for other reasons.
 * Check a probe report's limits once, after the last message of the report call.
 The probe report would hold its room in the budget until the probe report's last byte arrived, also when the probe report's first bytes already exceeded a limit.
 * Bound only a probe report that stops advancing: a wait for each message to become ready, and a wait for the server's answer after the last message.

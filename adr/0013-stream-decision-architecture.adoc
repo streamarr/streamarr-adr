@@ -95,11 +95,11 @@ When the upload budget finds that a copy in Auto does not fit and the copy lists
 An edit of 2026-11-13 extends that rule from a copy of an HDR, 10-bit or Dolby Vision source to every such copy.
 Draft https://github.com/streamarr/streamarr-server/pull/759[streamarr/streamarr-server#759] builds every decision but the upload budget's, and draft https://github.com/streamarr/streamarr-server/pull/934[streamarr/streamarr-server#934] builds the upload budget's.
 
-An amendment of 2026-11-13 chooses the matrix with which an SDR encode reads a source that names none (<<assumed-source-matrix>>).
+An amendment of 2026-11-13 chooses the matrix with which an encode that does not tone-map reads a source that names none (<<assumed-source-matrix>>).
 Before this amendment, FFmpeg's scaler read such a source as BT.601 at every picture size, so an encode shifted the colors of a high-definition source.
 The server chooses BT.709 or BT.601 from the size of the source's picture and sends the choice in the transcode job.
 Draft https://github.com/streamarr/streamarr-server/pull/985[streamarr/streamarr-server#985] builds the server's part, and draft https://github.com/streamarr/streamarr-transcode-worker/pull/219[streamarr/streamarr-transcode-worker#219] builds the worker's part.
-No pull request yet gives the matrix to the encoded lower variants beside a copy, which draft https://github.com/streamarr/streamarr-server/pull/759[streamarr/streamarr-server#759] adds.
+streamarr/streamarr-server#985 keeps the matrix on a decision that copies the video, for the encoded lower variants that draft https://github.com/streamarr/streamarr-server/pull/759[streamarr/streamarr-server#759] adds beside a copy.
 
 == Context
 
@@ -166,7 +166,7 @@ The dynamic range of an SDR planned output has an SDR compatible base.
 A compatible base is the standard picture format that a player could use without the advanced HDR information.
 HDR10+ and Dolby Vision are absent from the planned output.
 The server chooses how the worker converts the source to the planned output.
-The worker builds its filters from the two dynamic ranges in the transcode job.
+The worker builds its filters from the two dynamic ranges in the transcode job, and from the assumed source matrix when the job carries one (<<assumed-source-matrix>>).
 The worker never chooses a conversion on its own.
 The worker tone-maps when the planned output is SDR and the source's compatible base is PQ, HLG or none.
 The worker converts a source whose compatible base is SDR or unspecified to the planned output's bit depth without tone mapping.
@@ -196,40 +196,55 @@ The filter therefore darkened an untagged SDR source to a mean luma of 41 instea
 Evidence: <<evidence-sdr-output>>, <<evidence-tone-mapping>>.
 
 [[assumed-source-matrix]]
-=== An SDR encode reads a source that names no matrix as BT.709 or BT.601, by the size of the source's picture
+=== An encode that does not tone-map reads a source that names no matrix as BT.709 or BT.601, by the size of the source's picture
 
 A video stream's matrix says how the stream's luma and chroma samples become red, green and blue.
-Many files name no matrix.
-When the worker converts such a source to an SDR planned output without tone mapping, the server chooses the matrix with which the worker reads the source.
-The server chooses BT.709 when the coded picture of the chosen video stream is at least 1280 pixels wide or more than 576 lines high.
+A stream can name no matrix.
+An encode that converts such a source without tone mapping writes BT.709, so it first has to read the source's samples with some matrix.
+The server chooses that matrix, the assumed source matrix.
+The server aims at the source's true colors, not at the reading of one player.
+The server chooses BT.709 when the picture of the chosen video stream is at least 1280 pixels wide or more than 576 lines high.
 The server chooses BT.601 for every other picture.
-The server sends the chosen matrix in the transcode job, and the worker reads every frame of the source with that matrix.
+The picture's size is the width and the height that the probe result stores for the stream.
+The server sends the assumed source matrix in the transcode job, and the worker reads every frame of the source with it.
 The rule reads the source's picture, so every variant of one source takes the same matrix, whatever the variant's own height.
 An encoded lower variant beside a copy takes the matrix as every other encode does.
+A filter that later replaces the CPU scaler reads the source with the job's matrix too.
+
 When the stream names a matrix, the job carries none, and the worker reads each frame with the matrix that the frame names.
+The probe stores a matrix that the worker contract does not list as unspecified, so such a stream takes the size rule too.
 The job of a stream copy carries none, because a copy changes no sample.
-The server chooses no matrix for a source whose compatible base is PQ, HLG or none.
-This amendment leaves the matrix of such a source undecided.
-The server also chooses no matrix from a probe result older than probe version 5, because such a result stores no matrix for any stream.
+A copy and direct play leave the reading to the player.
+This amendment does not write the assumed source matrix into a copy's color description.
+The server chooses no matrix for a source whose compatible base is PQ, HLG or none, and this amendment leaves the matrix of such a source undecided.
+The server chooses no matrix from a probe result older than probe version 5, because such a result stores no matrix for any stream.
+The rule does not read the primaries or the transfer that a stream names.
 The worker never chooses the matrix and never reads the picture's size to choose one.
-A worker refuses a job whose matrix breaks these rules.
+A worker refuses a job that carries any matrix but BT.709 or BT.601, a stream copy that carries one, and a job that carries one for a source whose compatible base is PQ, HLG or none.
+No worker capability tells the server that a worker reads the matrix.
 A worker that predates this amendment ignores the job's matrix and reads the source as before.
 
 *Why:* FFmpeg's `scale` filter reads a frame that names no matrix as BT.601, whatever the size of the picture.
 Before this amendment, the worker therefore converted every such source from BT.601 to BT.709.
 That conversion suits a standard-definition source.
-The samples of a high-definition source already follow BT.709, so the conversion shifted every color of such a source.
+The samples of a high-definition source follow BT.709, so the conversion shifted every color of such a source.
 In a 1280x720 source that names no matrix, a flat red with a luma of 63, a Cb of 102 and a Cr of 240 came out as 58, 105 and 230.
 With BT.709 as the job's matrix, the same red came out as 63, 102 and 240.
-Players show a high-definition stream that names no matrix as BT.709, so a copy of such a file showed the source's colors and an encode of the same file did not.
+An encode names BT.709 in its output, so every player shows an encode alike, and the matrix that the encode assumes decides its colors in every player.
+Players do not agree on a stream that names no matrix.
+Chrome 157 and Safari 26.6 on macOS showed such a stream as BT.709 at every size from 720x480 to 1280x720.
+Firefox's source reads such a stream as BT.601 when the picture is under 720 lines high.
+libplacebo, the renderer of the mpv player, reads it as BT.601 unless the picture is at least 1280 wide or more than 576 high.
+No rule can therefore make an encode match a copy of the same file in every player, so the rule aims at the true colors.
 BT.709 is the standard of high-definition video, and BT.601 is the standard of standard-definition video.
 A standard-definition picture is at most 576 lines high, and the smallest high-definition picture is 1280 pixels wide.
 The width also finds a high-definition film whose picture is wide and low, such as 1280x536.
-libplacebo, the renderer of the mpv player, guesses the matrix of such a stream by the same rule.
-An encode therefore shows what such a player shows from a copy of the same file.
+libplacebo applies the same two bounds.
+For a high-definition source, the encode now also matches the copy in Chrome and in Safari.
+For a standard-definition source, the rule changes nothing: the encode read such a source as BT.601 before this amendment too.
 The server already stores each stream's matrix and size, and the server already chooses how the worker converts the source.
-The scale filter's option replaces the matrix that a frame names.
-The job therefore carries a matrix only for a stream that names none.
+The scale filter's option replaces the matrix that a frame names, so the job carries a matrix only for a stream that names none.
+Other job fields that change a conversion, such as the deinterlace instruction, have no worker capability either, and Streamarr has no production deployment yet.
 Evidence: <<evidence-assumed-source-matrix>>.
 
 [[reshape-rpus-starting-samples]]
@@ -648,7 +663,7 @@ Until https://github.com/streamarr/streamarr-server/issues/396[streamarr/streama
 Until then, the playlist entry of a Dolby Vision copy with an SDR compatible base takes its `VIDEO-RANGE=SDR` from the source's compatible base.
 
 *Why:* link:0049-capability-declarations-list-entries-and-an-output-fits-one-entry.adoc#decision-unknown-values[ADR 0049] already lets an `UNSPECIFIED` compatible base fit a capability entry that accepts `SDR`.
-Players show an untagged stream as BT.709.
+Chrome and Safari show an untagged stream as BT.709 (<<evidence-assumed-source-matrix>>).
 Untagged files therefore keep playing as copies, as they do under the interim copy rule.
 The playlist announces neither HDR10+ nor Dolby Vision for a copy whose probe could not check them, so a plan of `ABSENT` changes nothing that a client or worker sees.
 A plan that refused the `UNSPECIFIED` RPU observations of a kept Dolby Vision stream would refuse every profile 8.2 copy of a probe version 4 result, and the server copies those today.
@@ -1441,11 +1456,16 @@ A software HEVC or AV1 encoder can fall behind the player on a large source.
 * A client that declares only a codec family whose hardware encoder failed cannot play again in the same playback session when no worker has a software encoder of that codec family (<<failed-hardware-encoder>>).
 A new playback session can use that hardware encoder again once the worker offers it.
 * Only whoever runs the server can see why a file was encoded, through the logs and the metric.
-* An encode of a high-definition SDR source that names no matrix shows the colors that a copy of the same file shows (<<assumed-source-matrix>>).
+* An encode of a high-definition SDR source that names no matrix keeps the source's samples, and shows the colors that Chrome and Safari show from a copy of the same file (<<assumed-source-matrix>>).
+* An encode of a standard-definition source that names no matrix still reads the source as BT.601, while Chrome and Safari show a copy of that file as BT.709.
+The colors of such a file therefore differ between a copy and an encode in those players, as they did before this amendment.
+* By Firefox's source, a copy of a picture at least 1280 wide and under 720 high reads as BT.601 in Firefox, so that copy and an encode of the same file now differ there.
+Before this amendment, the two agreed, and both shifted the colors of a BT.709 source.
 * The size rule is a guess.
-An encode of a high-definition source that names no matrix and whose samples follow BT.601 shows shifted colors, as a copy of that file does in a player that guesses by the same rule.
+It misjudges a high-definition file whose samples follow BT.601, such as a screen recording that FFmpeg's defaults converted from RGB.
+It also misjudges a small file that was scaled down from a high-definition master without a matrix conversion.
 * A file whose stored probe result is older than probe version 5 keeps the BT.601 reading until a new probe stores the stream's matrix (<<assumed-source-matrix>>).
-* An encode on a worker that predates this amendment keeps the BT.601 reading (<<assumed-source-matrix>>).
+* An encode on a worker that predates this amendment keeps the BT.601 reading, so two workers of different versions can show one source in different colors (<<assumed-source-matrix>>).
 
 == Rejected Alternatives
 
@@ -1624,11 +1644,13 @@ Without the client changes, the web client's player froze for 143 s on a link sl
 Firefox refused High 10 in 21 of 21 runs (<<evidence-sdr-output>>).
 * Refusing a planned copy whose kept Dolby Vision holds an `UNSPECIFIED` RPU observation: every profile 8.2 copy of a probe version 4 result would then fail, although the server copies those today.
 * Showing the list of refused properties on the stream session in GraphQL now: no client has a media information screen yet, and a pre-production contract can add the field later without a new version.
-* Reading every source that names no matrix as BT.709: a standard-definition source follows BT.601, and the encode would then shift that source's colors instead (<<assumed-source-matrix>>).
-* Choosing the matrix from the picture's height alone: a film picture of 1280x536 is high definition, and a rule on the height alone would read that picture as BT.601 (<<assumed-source-matrix>>).
+* Reading every source that names no matrix as BT.709, as Chrome and Safari show a copy: an encode would then match a copy in those two players at every size, but a standard-definition source follows BT.601, and the encode would give up that source's true colors (<<assumed-source-matrix>>).
+* Choosing the matrix from the picture's height alone, as Firefox does under 720 lines: a film picture of 1280x536 is high definition, and that rule reads it as BT.601 (<<assumed-source-matrix>>).
 * Letting the worker choose the matrix from the frames that it decodes: the worker never chooses a conversion on its own, and the server already stores the matrix and the size of every stream (<<assumed-source-matrix>>).
-* Changing the scaler's default matrix in the pinned FFmpeg build: the transcode job would no longer say how the worker reads the source, and the server could not tell which workers read the source the new way (<<assumed-source-matrix>>).
+* Changing the scaler's default matrix in Streamarr's FFmpeg fork: the rule would live in a patch to FFmpeg instead of the stream decision, and the transcode job would no longer say how the worker reads the source (<<assumed-source-matrix>>).
 * Sending a matrix for every source, also for a stream that names one: the scale filter's option replaces the matrix that each frame names, so a stored matrix that differs from the frames' would shift the colors (<<assumed-source-matrix>>).
+* Writing the assumed source matrix into a copy's color description in this amendment, so that a copy and an encode agree in every player: every such copy would need a bitstream rewrite, and direct play would still leave the reading to the player (<<assumed-source-matrix>>).
+* A worker capability for the assumed source matrix: an older worker's encode fails no job, and no other job field that changes a conversion has one (<<assumed-source-matrix>>).
 
 == Evidence
 
@@ -2077,9 +2099,9 @@ A change that kept it out of every later format attempt failed that test, and al
 [[evidence-assumed-source-matrix]]
 === The matrix of a source that names none
 
-* The scaler of the pinned FFmpeg 8.1.3 source takes the BT.601 coefficients for a frame whose matrix is unspecified (`libswscale/format.c`).
+* The scaler of the pinned FFmpeg 8.1.3 source reads the coefficients of the source's matrix from a table whose row for an unspecified matrix equals its BT.601 rows (`ff_yuv2rgb_coeffs` in `libswscale/yuv2rgb.c`).
 The `scale` filter's `in_color_matrix` option replaces the matrix of every input frame (`libavfilter/vf_scale.c`).
-* The measurements below ran in the pinned worker image.
+* The FFmpeg measurements below ran in the pinned worker image.
 Each source is lossless H.264 and holds one flat color: a luma of 63, a Cb of 102 and a Cr of 240, which is red under BT.709.
 The `h264_metadata` bitstream filter wrote the matrix that a source names, so every source holds the same samples.
 Every run used the filters of an SDR encode, with and without `in_color_matrix`.
@@ -2096,6 +2118,15 @@ The option therefore replaces the matrix that a stream names.
 * In the worker's smoke test, a 10-bit HEVC source that names no matrix holds a flat magenta with a luma of 365.
 The worker's HEVC encode delivered a luma of 308 before the worker read the job's matrix, 57 code values lower out of 1023.
 With BT.709 as the job's matrix, every delivered sample was within 4 code values of the source's.
+* The player measurement ran in Chrome 157 and in Safari 26.6.2 on macOS, on 8-bit H.264 files with the same flat color at 1280x720, 1280x536, 1024x600 and 720x480.
+Each file played once as a plain MP4 file and once as fragmented MP4 through Media Source Extensions.
+A page drew a video frame onto a canvas and read the center pixel as red, green and blue.
+In both browsers, at every size and on both paths, the file that names no matrix gave 255, 1 and 0, the pixel of the file that names BT.709.
+The file that names SMPTE 170M gave 233, 0 and 2 in Chrome and 229, 33 and 0 in Safari.
+* Firefox's `DefaultColorSpace` returns BT.601 for a picture under 720 lines high and BT.709 for every other picture.
+Firefox was not measured.
+* Chromium's source holds the same height rule for the H.264 and HEVC streams of its FFmpeg demuxer, and Chrome on macOS did not show that rule in the measurement.
+Chrome on other systems, AVPlayer on Apple TV and iPhone, and Android players were not measured.
 * libplacebo's `pl_color_system_guess_ycbcr` returns BT.709 for a picture at least 1280 wide or more than 576 high, and BT.601 for every other picture.
 
 == References
@@ -2121,9 +2152,11 @@ With BT.709 as the job's matrix, every delivered sample was within 4 code values
 * https://datatracker.ietf.org/doc/html/rfc8216[RFC 8216: HTTP Live Streaming]
 * https://developer.apple.com/documentation/http-live-streaming/hls-authoring-specification-for-apple-devices/[Apple HLS authoring specification: `CODECS` and `VIDEO-RANGE`]
 * https://github.com/streamarr/streamarr-server/pull/985[streamarr/streamarr-server#985] and https://github.com/streamarr/streamarr-transcode-worker/pull/219[streamarr/streamarr-transcode-worker#219], which build the matrix of a source that names none (<<assumed-source-matrix>>).
-* https://github.com/streamarr/streamarr-ffmpeg/blob/8a984ad1cba1968dc8f1ad3e2e200041dc6bcf7a/libswscale/format.c#L1356-L1357[`libswscale/format.c` of the pinned FFmpeg source: the coefficients of an unspecified matrix]
+* https://github.com/streamarr/streamarr-ffmpeg/blob/8a984ad1cba1968dc8f1ad3e2e200041dc6bcf7a/libswscale/yuv2rgb.c#L47-L66[`libswscale/yuv2rgb.c` of the pinned FFmpeg source: the coefficients of an unspecified matrix]
 * https://github.com/streamarr/streamarr-ffmpeg/blob/8a984ad1cba1968dc8f1ad3e2e200041dc6bcf7a/libavfilter/vf_scale.c#L826-L827[`libavfilter/vf_scale.c` of the pinned FFmpeg source: the `in_color_matrix` option]
 * https://github.com/haasn/libplacebo/blob/58dfee73db8139d825306b638c844f6908517164/src/colorspace.c#L100-L109[libplacebo: `pl_color_system_guess_ycbcr`]
+* https://github.com/mozilla-firefox/firefox/blob/2085f14beb9061e39cf5a41b592148f6da8cbfe7/dom/media/VideoUtils.h#L558-L561[Firefox: `DefaultColorSpace`]
+* https://github.com/chromium/chromium/blob/ff8a32c6994d521bc3ffcb5b4edc0bdc69b852e2/media/ffmpeg/ffmpeg_common.cc#L742-L748[Chromium: the color space of a stream that names none, in the FFmpeg demuxer]
 * https://www.itu.int/rec/R-REC-BT.709[ITU-R BT.709: Parameter values for the HDTV standards for production and international programme exchange]
 * https://www.itu.int/rec/R-REC-BT.601[ITU-R BT.601: Studio encoding parameters of digital television for standard 4:3 and wide-screen 16:9 aspect ratios]
 * The measurements behind this amendment were not committed, so the Evidence section gives their results.

@@ -118,8 +118,8 @@ It is SDR, PQ, HLG, none, or unspecified, and it does not promise that a device 
 _Avoid_: base layer (a Dolby Vision layer, not a picture format), HDR10 (PQ with static metadata, a narrower fact), fallback, SDR fallback
 
 **Assumed source matrix**:
-The matrix, BT.709 or BT.601, with which an SDR encode reads a video stream that names no matrix.
-The server chooses it from the size of the stream's coded picture and sends it in the transcode job, and the job of a stream copy carries none (ADR 0013).
+The matrix, BT.709 or BT.601, with which an encode that does not tone-map reads a video stream that names no matrix.
+The server chooses it from the width and height that the probe result stores for the stream, and sends it in the transcode job; the job of a stream copy carries none (ADR 0013).
 _Avoid_: guessed color space, default matrix, untagged matrix
 
 **Codec family**:

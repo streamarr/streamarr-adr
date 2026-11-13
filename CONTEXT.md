@@ -117,6 +117,11 @@ The standard picture format that a player could use without the advanced HDR inf
 It is SDR, PQ, HLG, none, or unspecified, and it does not promise that a device can play the source bytes unchanged.
 _Avoid_: base layer (a Dolby Vision layer, not a picture format), HDR10 (PQ with static metadata, a narrower fact), fallback, SDR fallback
 
+**Assumed source matrix**:
+The matrix, BT.709 or BT.601, with which an SDR encode reads a video stream that names no matrix.
+The server chooses it from the size of the stream's coded picture and sends it in the transcode job, and the job of a stream copy carries none (ADR 0013).
+_Avoid_: guessed color space, default matrix, untagged matrix
+
 **Codec family**:
 The video coding standard of a video stream, such as H.264, HEVC or AV1, without the stream's codec profile, level or codec string.
 The probe reads a video stream's codec family from the codec name that ffprobe reports for the stream.

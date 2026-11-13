@@ -524,6 +524,7 @@ Each chunk of a media segment upload that the server receives from the attempt r
 While a large segment uploads, the producer's budget can hold back FFmpeg, so the output doesn't advance, but the upload's bytes do, and the worker's acknowledgment deadline still bounds the upload (<<decision-waits>>).
 So an encode that runs below real time keeps its producer through a merged segment of any length while FFmpeg's output advances.
 When no report, publication or upload chunk restarts the server's stall clock within the stall threshold, the server replaces the producer, whatever the segment's length.
+So while the worker's reports show that FFmpeg still reads, the server keeps the producer, however long the output stays still.
 The progress report is a field of the worker contract (https://github.com/streamarr/streamarr-server/pull/723[streamarr/streamarr-server#723]).
 A client scales its wait for a segment, and its stall limit, by the advertised duration of that segment and of every earlier segment of the same playlist that it has requested and not yet received.
 So a client neither abandons a long merged segment that a healthy producer is still encoding nor abandons the short segment after it, which waits for the same producer to finish both (see prefetch below).
@@ -1314,6 +1315,7 @@ A count shows only that FFmpeg read some bytes since the previous count, not whe
 The watchdog dates the bytes that a count finds to that count.
 So the watchdog never fails an FFmpeg process that a count found reading within the stall threshold.
 An FFmpeg process that stops reading fails within the stall threshold plus the time between two counts.
+While the FFmpeg process that writes the output keeps reading, nothing limits yet how long the attempt may write no output (<<explicitly-deferred>>).
 Where the system keeps no count of a process's reads, the watchdog watches the output alone.
 The watchdog never measures liveness by standard error or by the process being alive.
 When the watchdog fires, the worker sends FFmpeg SIGTERM and waits for the process to exit.
@@ -1562,6 +1564,11 @@ Reading the list from a file stays rejected under Rejected Alternatives.
 The proofs of concept measured pacing and one retention budget, but did not measure whether each producer and the worker as a whole stay within the budgets this decision requires.
 * Use a fragmentation target shorter than 250 ms.
 A later experiment may still adopt a shorter target, and this decision does not rule one out.
+* Limit how long a job attempt may write no output while the worker counts FFmpeg's reads as the attempt's progress (<<decision-waits>>).
+FFmpeg writes nothing while an audio track's own input reads through a stretch of the source without audio, such as the video after the audio's end (link:0043-audio-tracks-and-text-subtitles-are-hls-renditions.adoc#decision-audio-end[ADR 0043]).
+A source that serves bytes slowly, such as a failing disk or a degraded network mount, can also keep FFmpeg reading without output.
+A replacement attempt that starts before the audio's end reads the same stretch again, unless a cache still holds that stretch.
+So replacing the attempt alone does not shorten the time without output.
 
 == Consequences
 
@@ -1666,6 +1673,13 @@ The server still handles requests for advertised segments that the worker did no
 The pinned runtime's SVT-AV1 4.3.0 contains the fix, and a soak under CPU contention found no failure (<<evidence-svt-av1-soak>>).
 The stall watchdog and the short-sample rule turn a hung FFmpeg or undecodable segments into a failed attempt that ADR 0019 replaces.
 Both rules stay after the runtime update of worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/42[#42], because they cover every encoder.
+* While the worker counts FFmpeg's reads as progress, a job attempt keeps its producer as long as FFmpeg reads, however long FFmpeg writes no output (<<decision-waits>>).
+In a test, a source's audio ended 179 s before its video, and the source was read at about 3 times real time.
+The output then stopped for 56.4 s, and the attempt completed.
+The worker's reports came at most 1.0 s apart, far less than the server's stall threshold.
+In another test with a 5 s stall threshold, FFmpeg read past the audio's end for 2 s, and then the audio's input served 1 byte a second.
+That attempt still ran 44 s later without output, and the worker reported progress once a second.
+The web client stops a stream once the client's buffer has stayed empty for 45 s, so such a pause can end web playback.
 * A variant whose list from its first segment cannot reach its last segment takes the floored GOP in every attempt, so most of its segments hold two keyframes.
 On a plain grid, only a media file longer than 18.7 hours at 3 s segments, or 35.6 hours at 6 s segments, has such a variant.
 * Switching H.264 to fMP4 removes the parameter sets that MPEG-TS carried in each media segment.

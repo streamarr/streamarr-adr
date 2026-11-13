@@ -23,6 +23,9 @@ In an MP4 or MOV track, it is also false when the sample entry is not `avc1`, `d
 A Matroska track has no sample entry, so only its record counts.
 Every other copy of length-prefixed H.264 or HEVC keeps the source's samples.
 
+NOTE: An amendment replaces the upload's readiness wait and acknowledgment deadline with one gRPC deadline on each upload call (<<decision-waits>>, link:0062-a-worker-sends-each-probe-report-in-a-call-of-its-own.adoc#decision-flow-control[ADR 0062]).
+The worker's upload deadline, a worker setting, also bounds a segment's wait for a call and a producer's wait for unreserved bytes.
+
 NOTE: An amendment cancels FFmpeg's start time correction on every FFmpeg that places media time zero (<<decision-media-time-zero>>).
 The probe reports the correction.
 A job attempt passes `-discard none`, plus `-itsoffset` with the correction when the correction is not zero.
@@ -108,7 +111,7 @@ The stall watchdog and the short-sample rule stay, because both rules cover ever
 
 NOTE: An amendment makes the worker queue its segment uploads at the server's per-worker upload limit (<<decision-upload-queue>>).
 The server states that limit, 8 calls, in `WorkerSessionAccepted.segment_upload_limit`, and a limit of 0 or an absent field means no limit.
-A queued segment still counts against the producer's and the worker's memory budgets, and its wait ends at the upload acknowledgment timeout or on a stop or a lost worker session.
+A queued segment still counts against the producer's and the worker's memory budgets, and its wait ends at the upload deadline or on a stop or a lost worker session.
 The server marks a refusal at the per-worker limit with `SegmentUploadLimitReached`, and the worker queues that segment again.
 A refusal at the server's fleet-wide limits carries no marker and still fails the job attempt.
 
@@ -120,7 +123,7 @@ Before FFmpeg starts, the worker reserves the job attempt's expected output from
 An encode expects two segments at the job's own segment durations and bitrates, and a copy expects two segment caps.
 The worker refuses an encode whose expected output the budget cannot hold with `JOB_ATTEMPT_FAILURE_WORKER_MEMORY_FULL`.
 A copy's refusal stays `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED`.
-A producer that outgrows its reservation waits for unreserved bytes only while one of the worker's segments is queued or uploading, and at most until the upload acknowledgment timeout.
+A producer that outgrows its reservation waits for unreserved bytes only while one of the worker's segments is queued or uploading, and at most until the upload deadline.
 
 == Context
 
@@ -520,7 +523,7 @@ That time is the end of the latest video sample that the producer has read from 
 While a held encode searches for the video's last keyframe (<<decision-early-ends>>), the report carries the bytes of source that the search has read instead.
 Each report that advances the output or the search restarts the server's stall clock, as a publication does (link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]).
 Each chunk of a media segment upload that the server receives from the attempt restarts it too.
-While a large segment uploads, the producer's budget can hold back FFmpeg, so the output doesn't advance, but the upload's bytes do, and the worker's acknowledgment deadline still bounds the upload (<<decision-waits>>).
+While a large segment uploads, the producer's budget can hold back FFmpeg, so the output doesn't advance, but the upload's bytes do, and the upload call's gRPC deadline still bounds the upload (<<decision-waits>>).
 So an encode that runs below real time keeps its producer through a merged segment of any length while FFmpeg's output advances.
 A producer whose output stops advancing is replaced after the stall threshold, whatever the segment's length.
 The progress report is a field of the worker contract (https://github.com/streamarr/streamarr-server/pull/723[streamarr/streamarr-server#723]).
@@ -659,7 +662,7 @@ With B-frames on, neither encoder is keyframe-verified.
 The worker always passes both settings to them, and its startup test encode passes them too.
 Upstream SVT-AV1 bug https://gitlab.com/AOMediaCodec/SVT-AV1/-/work_items/2385[#2385] stalled or reordered SVT-AV1's output, but the bug never dropped a forced keyframe (worker issue https://github.com/streamarr/streamarr-transcode-worker/issues/42[#42]).
 The pinned runtime's SVT-AV1, release 4.3.0, contains the fix for that bug.
-The stall watchdog of the <<decision-waits,four waits>> and the short-sample rule for <<decision-untrusted-output,untrusted output>> still fail any attempt whose encoder stalls or reorders its output, so that the server can replace the attempt under ADR 0019.
+The stall watchdog of the <<decision-waits,three waits>> and the short-sample rule for <<decision-untrusted-output,untrusted output>> still fail any attempt whose encoder stalls or reorders its output, so that the server can replace the attempt under ADR 0019.
 libx265 is keyframe-verified only with closed GOPs.
 Under libx265's default open GOP, libx265's forced keyframes are CRA pictures.
 When a recording suppressed a forced keyframe, libx265's GOP placed a CRA picture that was followed by a RASL picture.
@@ -1069,7 +1072,7 @@ A producer hands over a closed segment only once the server has acknowledged the
 A queued segment is still the producer's upload in flight.
 Its bytes stay counted against the producer's budget and against the worker-wide budget, of the encodes or of the copies, that the producer counts against (<<decision-memory>>).
 While the segment waits, the reader may wait for room, as it does while an upload is in flight.
-The wait ends at the upload acknowledgment timeout, counted from when the segment first waits for a call.
+The wait ends at the upload deadline, counted from when the segment first waits for a call.
 When that timeout expires before the segment's call opens, the worker fails the job attempt with `JOB_ATTEMPT_FAILURE_TRANSCODE_FAILED`, as it does for a failed upload, and ADR 0019's recovery handles that failure.
 A stop of the job attempt ends the wait at once without opening a call, and the attempt then stops as a stop decides.
 The end of the worker session ends the wait in the same way.
@@ -1089,7 +1092,7 @@ That segment then opens its call as soon as its place in the queue and the worke
 Each such end ends the back-off of a different refused segment, even when several calls end before a refused segment opens its call again.
 A call that the server refused at the per-worker limit is not such an end.
 Otherwise a refused segment opens its call again after a bounded back-off that the worker sets, so it still takes a place that the server frees while none of the worker's calls ends.
-The upload acknowledgment timeout, still counted from when the segment first waited, bounds the whole wait, so repeated refusals never extend it.
+The upload deadline, still counted from when the segment first waited, bounds the whole wait, so repeated refusals never extend it.
 A refusal at the fleet-wide limits carries no marker, and the worker fails the job attempt, as https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499] decides.
 Every other failure of an upload call also fails the job attempt, and ADR 0019's recovery handles each of these failures.
 A worker that reads neither the field nor the marker sees `RESOURCE_EXHAUSTED` on every refusal, as before this amendment, and fails the job attempt.
@@ -1295,19 +1298,18 @@ A replacement attempt's `JobAttemptStarted` can reach the server before the `Job
 *Why:* Draining the pipe lets FFmpeg finish its flush inside the grace period, where a pipe nobody reads would hold FFmpeg until the forced kill.
 
 [[decision-waits]]
-=== Four waits bound an attempt's progress
+=== Three waits bound an attempt's progress
 
-Four waits bound an attempt's progress, and a stop takes precedence over each.
-Three have their own configured bounds, and the exit wait reuses the stop's grace period.
+Three waits bound an attempt's progress, and a stop takes precedence over each.
+Two have their own configured bounds, and the exit wait reuses the stop's grace period.
 
 * An encoder-stall watchdog fails the attempt when no byte has arrived from the pipe within the stall threshold while the reader was reading.
 It measures liveness only by bytes on standard output, never by standard error or by the process being alive.
 When the watchdog fires, the worker sends FFmpeg SIGTERM and waits for the process to exit.
 If FFmpeg has not exited when the stop's grace period expires, the worker sends SIGKILL and waits until the process exits.
-* A readiness wait fails the upload when the gRPC stream has not reported `isReady` within its bound.
-* For each upload, the worker starts the acknowledgment deadline when it sends the first byte.
-The upload fails if the server has not acknowledged the segment when that deadline expires.
-A segment that waits for a call under the server's per-worker upload limit waits at most the same timeout before its call opens (<<decision-upload-queue>>).
+* Each upload call carries a gRPC deadline, the worker's upload deadline, from the call's opening to the server's acknowledgment.
+The worker sends a chunk only when the call is ready for it, and the upload fails when the deadline expires first.
+A segment that waits for a call under the server's per-worker upload limit waits at most the same length of time before its call opens (<<decision-upload-queue>>).
 * An exit wait starts once the pipe has ended and the server has acknowledged the last segment.
 FFmpeg must then exit within the stop's grace period.
 This wait watches the process, not the pipe.
@@ -1344,7 +1346,7 @@ A job attempt that copies the video expects two segment caps.
 A producer's allocations use the producer's reservation first, without counting the bytes twice.
 Allocations beyond the reservation use the worker-wide budget's unreserved bytes, up to the producer's own budget of two segment caps.
 When the unreserved bytes run out, the producer waits only while one of the worker's segments is queued or uploading, because only a delivered segment frees memory.
-That wait ends at the upload acknowledgment timeout.
+That wait ends at the upload deadline.
 When no segment is queued or uploading, or the wait ends, the producer fails the job attempt with `JOB_ATTEMPT_FAILURE_WORKER_MEMORY_FULL`.
 A job attempt that encodes video fails with `JOB_ATTEMPT_FAILURE_WORKER_MEMORY_FULL` before FFmpeg starts when the worker-wide budget cannot hold the job attempt's expected output.
 `JOB_ATTEMPT_FAILURE_WORKER_MEMORY_FULL` says that this worker's output budget is full, and another worker may start the job.
@@ -1649,7 +1651,7 @@ Both rules stay after the runtime update of worker issue https://github.com/stre
 On a plain grid, only a media file longer than 18.7 hours at 3 s segments, or 35.6 hours at 6 s segments, has such a variant.
 * Switching H.264 to fMP4 removes the parameter sets that MPEG-TS carried in each media segment.
 The server instead serves the stored init with later segments and, once workers advertise their encoders, requires replacement attempts to use the backend that produced that init.
-* The upload loop gains `isReady` flow control, a readiness bound and an acknowledgment deadline.
+* The upload loop gains `isReady` flow control and a gRPC deadline on each upload call.
 No count of job attempts bounds the worker, and the worker-wide memory budget guards the worker (<<decision-memory>>).
 * AAC stream copies gain an explicit `aac_adtstoasc` filter that the HLS muxer inserted on its own.
 Without this filter, every MPEG-TS source with AAC fails to copy under the new muxer flags.
@@ -1666,7 +1668,7 @@ The producer must both drain the pipe and cancel the upload.
 * A worker can run more job attempts than the server accepts upload calls from it, and none of them fails only because more segments are ready than the per-worker limit (<<decision-upload-queue>>).
 The worker contract gains `WorkerSessionAccepted.segment_upload_limit` and the `SegmentUploadLimitReached` marker, and a worker that reads neither fails a job attempt on every refusal, as before.
 * While its segment waits for a call, a job attempt uploads no chunk, and its output stops advancing once the producer's budget is full.
-ADR 0019's stall threshold can therefore end a long wait before the upload acknowledgment timeout does, and the server then replaces the job attempt as stalled.
+ADR 0019's stall threshold can therefore end a long wait before the upload deadline does, and the server then replaces the job attempt as stalled.
 * A segment refused in the window after a canceled upload opens its call again when another of the worker's calls ends or when its back-off expires.
 While none of the worker's calls ends, it can wait up to one back-off longer than it would if the server freed its place at the cancel.
 * A MoQ proof of concept needs `separate_moof`, a smaller fragmentation target and a publisher adapter, not a second producer.

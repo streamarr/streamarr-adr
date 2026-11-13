@@ -303,12 +303,10 @@ Before this decision, the probe of a file above the keyframe limit ended in an e
 === The worker sends a probe report only as fast as the server reads the probe report
 
 The worker sends a message on the report call only when the report call is ready for the message.
-The worker waits a bounded time for the report call to become ready for each message.
-After the last message, the worker waits a bounded time for the server's answer.
-The server ends a report call when the server is ready to read and no message arrives within a bounded time.
-The first two bounds are worker settings, and the third bound is a server setting.
-No bound covers the whole probe report.
-A report call therefore times out only when the probe report stops advancing, never because the probe report is large.
+Each report call carries a gRPC deadline, which bounds the whole call from its opening to the server's answer.
+The deadline is a worker setting, and the worker sets the same deadline on every segment upload (ADR 0037).
+The time that a probe report waits on the server for room in the budget counts toward the deadline.
+The server also ends a report call when the server is ready to read and no message arrives within a bounded time, which is a server setting.
 
 The server answers as soon as the server has checked the probe report against the contract and matched the probe report to the probe attempt.
 The server answers before the server stores the probe report in the database.
@@ -320,7 +318,9 @@ When a report call ends without the server's answer and without a contract viola
 The server treats the probe attempt the same way when the event arrives while the server still waits for the attempt's probe report.
 The probe then retries with backoff (ADR 0032).
 
-*Why:* A bound on the whole probe report would fail the same large probe report on a slow link at every retry.
+*Why:* Workers run on the server's local network.
+At 100 Mbit/s, a probe report at the length limit takes about 1.3 s, so a deadline of a minute fails no probe report because the probe report is large.
+gRPC's deadline needs no timer of the worker's own, and the server learns the deadline with the call.
 The server already retries a probe whose worker is lost, so the worker needs no retry of its own.
 A report call can fail before the server reads the call's first message, for example when a proxy between the worker and the server resets that one call.
 The server then cannot tell which probe attempt the failed report call reported.
@@ -389,8 +389,8 @@ The size of the budget is a server setting.
 The server refuses a budget that is smaller than `probe_report_length_limit_bytes`, so every probe report within the length limit fits the budget.
 The server reads the messages of a report call only while the probe report fits the budget.
 When several probe reports wait for the budget, the server gives room to the probe reports of playback probes first.
-While a probe report waits for the budget, the worker's bound for a message keeps running (<<decision-flow-control>>).
-When that bound passes, the report call fails, and the probe runs again.
+While a probe report waits for the budget, the report call's deadline keeps running (<<decision-flow-control>>).
+When the deadline passes, the report call fails, and the probe runs again.
 
 *Why:* A worker's background probe capacity can grow to the number of the worker's processors (ADR 0032).
 On a worker with more processors than the connection has free calls, more probe reports can be ready at once than the connection has calls.
@@ -469,14 +469,14 @@ The server starts a probe only on a unit that the server counts as free, and the
 The worker therefore holds at most one probe report that the server has not answered for each probe that the server counts.
 The server never counts more probes than the largest capacities that the worker has granted in the worker session, added together (ADR 0032).
 A capacity that the worker lowers afterwards does not lower that number, because the probe reports of the probes that ran before stay.
-The worker also holds an answered probe report until the server's answer reaches the worker, for at most the worker's bound for that answer.
+The worker also holds an answered probe report until the server's answer reaches the worker, for at most the report call's deadline.
 The probe report of a refused probe holds no unit, and that probe report holds only a failure value.
 * A probe report that is not the probe report of a playback probe waits for a report call while such probe reports hold every report call that the worker allows them (<<decision-playback-first>>).
 When such a probe report waits beyond the probe's timeout, the server cancels the probe attempt, the worker discards the probe report, and the probe runs again.
 While probe reports of playback probes wait, every freed report call and all freed room in the server's budget go to those probe reports first.
 * The probe report of a playback probe still waits for the server's budget while the free room in the budget is smaller than that probe report.
 The probe reports that the server already reads keep their room until their report calls end.
-When that wait passes the worker's bound for a message, the report call fails, and the playback probe runs again.
+When that wait passes the report call's deadline, the report call fails, and the playback probe runs again.
 * A worker whose canceled probe does not end within the server's wait still loses the worker session, as before this decision.
 A probe that reads a stalled network share can be such a probe (ADR 0032).
 * The server decodes only a probe report whose fields keep every stated limit (<<decision-scan-before-decode>>).
@@ -538,8 +538,8 @@ The count would then bound the decoded probe reports by the probes that the serv
 A re-read of a stalled source or a wait for a locked row would keep the probe's unit counted, and probes of files on healthy sources would wait for that unit.
 * Check a probe report's limits once, after the last message of the report call.
 The probe report would hold its room in the budget until the probe report's last byte arrived, also when the probe report's first bytes already exceeded a limit.
-* Bound the time for a whole probe report.
-The same large probe report would fail on a slow link at every retry.
+* Bound only a probe report that stops advancing: a wait for each message to become ready, and a wait for the server's answer after the last message.
+gRPC has no such bounds, so the worker would keep timers of its own, and a probe report on a slow link would hold its room in the budget for as long as the probe report kept advancing.
 * Have the worker send a failed probe report again.
 The server already retries the probe, and a retry by the worker would need limits of its own.
 * Keep the limits as fixed values in the contract, the worker and the server.

@@ -782,8 +782,12 @@ The second stage reads the first stage's output through the four Annex 2 phases 
 Its output is the summed channels themselves, so no resampler touches the audio that the viewer hears.
 The worker checks the eleven coefficient vectors in as a fixed resource and never computes them at run time.
 
-Every `alimiter` uses attack and release settings of 5 ms and 50 ms, adds no make-up gain (`level=0`) and removes its own delay (`latency=1`).
-The worker trims the copies' delay, so the audio keeps its timing and its sample count.
+Every `alimiter` uses attack and release settings of 5 ms and 50 ms and adds no make-up gain (`level=0`).
+Every `alimiter` runs with `latency=0`, so its output keeps the timestamps of its input.
+The worker pads the input of each `alimiter` with silence as long as the lookahead of that `alimiter`.
+After each `alimiter`, the worker trims the lookahead and the copies' delay from the start of the output.
+The audio therefore keeps its timing and its sample count.
+Where the timestamps of the audio step forward or back, the samples just before the step move by the size of the step, and every later sample keeps its own timestamp.
 While no sample and no copy passes the internal limit, and no earlier peak's attack or release is still in progress, the summed channels come out as the matrix wrote them, sample for sample.
 When one passes, `alimiter` lowers the gain before that instant and raises it again after the last one, so neighbouring samples change too, including samples below the ceiling.
 A weaker peak during a release does not restart the release, and the last step of a release can leave one sample with a gain slightly above 1.
@@ -833,6 +837,18 @@ One −3 dBTP ceiling replaces the earlier −3 dBFS for a lossy stereo or mono 
 A sample-peak ceiling misses the peaks between samples, and at −1 dBFS the folded surround pair of a 7.1 to 5.1 downmix decoded over full scale in AAC 5.1 at 320 kb/s.
 The limiter does not touch the channels that the matrix does not sum, so they keep the source's peaks; on film audio that peaks at 0 dBFS, AAC, AC-3, E-AC-3 and Opus each decoded those channels over full scale on at least one window measured.
 The release stays at 50 ms, so the mix recovers within 50 ms of a peak instead of about half a second; its cost on a loud bass line is in the consequences.
+
+`alimiter` with `latency=1` removes its lookahead from its output timestamps only while the timestamps of its input run on without a step.
+At a step, `alimiter` stamps its next output frame with the timestamp of the input frame.
+That output frame starts with the samples from before the step that the lookahead still holds.
+The output timestamps then jump by the step and the lookahead together, and every later sample plays up to 5 ms after its own timestamp.
+Audio whose timestamps drift steps by about 1 ms at a time.
+On a synthetic 5.1 tone whose timestamps run 0.02 % fast, the two stages with `latency=1` turned a step of 48 samples (1 ms) into a jump of 375 samples.
+After the jump, the downmix played 6.8 ms after its timestamps, in AAC and in FLAC.
+A filter after the limiter that reads such a jump as a gap writes digital silence into continuous sound.
+With `latency=0`, `alimiter` keeps the timestamps of its input, and the two stages pass the same step as 48 samples.
+`latency=1` feeds `alimiter` silence as long as the lookahead after the last sample and drops the same number of samples from the start of the output.
+The worker's padding and trim do the same, so audio without a step comes out sample for sample as before.
 
 A/52 lets a mixer signal the centre and surround levels of a stereo downmix, and Dolby's hardware decoders apply them.
 FATE's Monsters, Inc. AC-3 sample signals its surrounds at 0.5 (−6 dB), and The Great Wall's E-AC-3 sample signals its centre at 0.595 (−4.5 dB) and its surrounds at 0.5.
@@ -990,6 +1006,9 @@ A whole stereo audio job of Tears of Steel to FLAC took 1.97 % of one core per r
 These figures come from one FFmpeg process's CPU time; the capacity for concurrent streams is not measured.
 * Each stage holds back its 5 ms lookahead and its copies' delay before it passes audio on.
 The output's timestamps do not move, but the delay before the first output through HLS is not yet measured.
+* At a step in the timestamps, the samples just before the step move by the size of the step.
+On a 48 kHz source whose timestamps step 1 ms forward, the 501 samples (10.4 ms) before the step played 1 ms after their own timestamps.
+Every sample after the step played at its own timestamp.
 * The ceiling names the Annex 2 filter, and other true-peak meters can read the limited channels higher.
 On full-band noise, a −1 dBTP downmix read up to −0.70 dBTP on libebur128 and up to −0.12 dBTP on a 1025-tap 32-phase reconstruction.
 On film audio, both read it within 0.1 dB of the ceiling.
@@ -1139,6 +1158,10 @@ It costs 1.5 to 2 times the bitrate of the stereo AAC and Opus steps at 96 and 1
 A bounded 16-sample burst read −0.90 dBTP after one stage at 22.05 kHz, and bursts that a targeted search found read −0.77 dBTP at 22.05 kHz and −0.90 dBTP at 48 kHz.
 * A lower internal limit for one stage, in place of a second stage, buys a margin that a bounded input can spend.
 At 0.888 (−1.03 dBFS), the same 16-sample burst still read −0.93 dBTP at 22.05 kHz.
+* `alimiter` with `latency=1` turns every step in the timestamps of its input into a forward jump by the step and its 5 ms lookahead together.
+After the jump, the downmix plays up to 5 ms after its timestamps.
+* A Streamarr patch to `alimiter` that keeps the lookahead out of the output timestamps after a step needs a new release of the FFmpeg fork and a patch to carry.
+The worker's own padding and trim need neither.
 * A resampler chain, which oversamples the summed channels four times around `alimiter` and resamples them back, puts two resamplers in the audio that the viewer hears.
 On the pinned FFmpeg, it failed 168 of the 215 cases of the worker's limiter test, and it returned no samples for inputs of 1 and 100 samples.
 * Centring the Annex 2 phases on the sample that the gain belongs to lowers the filter's weight on distant taps by 13 %, but under the same search one stage read −0.63 dBTP at 22.05 kHz, against −0.77 dBTP for the published alignment.
@@ -1281,6 +1304,13 @@ Two stages read −0.9999 dBTP or lower on 20 synthetic signals, on files of eve
 The 14 searched bursts at four rates read −0.9987 dBTP or lower, 330 bounded 5.1 to mono jobs at 11 rates read −0.9993 dBTP or lower, and 160 bounded 22.2 to mono jobs read −0.9995 dBTP or lower.
 * The worker's `DownmixLimiterSmokeTest` runs 227 cases on the pinned image: the bursts at the start, middle and end of a file, inputs of 1 to 10,000 samples, the end of a file, an input that never reaches the ceiling, and the first frame's timestamp.
 Before the change, the resampler chain failed 168 of 215 of those cases.
+* On 2026-11-13, the worker ran each `alimiter` with `latency=0` and its own padding and trim, on a build of Streamarr's FFmpeg fork of FFmpeg 8.1.3, for https://github.com/streamarr/streamarr-transcode-worker/pull/203[streamarr/streamarr-transcode-worker#203].
+The limiter smoke test's 229 cases passed.
+Among them, two cases require every sample of the summed pair to come out unchanged, at 44.1 kHz and at 48 kHz.
+A new case steps its input timestamps 48 samples forward half a second in.
+The two stages passed that step as 48 samples, where `latency=1` turned the step into a jump of 375 samples.
+* On a 1 s 2.1 source at 48 kHz whose front pair counts its samples, a step of 48 samples at sample 24,576 moved only the 501 samples before the step, each by 48 samples.
+With `latency=1`, every sample after the step moved: the first 3,554 played 48 samples early, and the remaining 19,870 played 327 samples (6.8 ms) late.
 * On Tears of Steel's 734 s stereo downmix, the two stages read −1.0000 dBTP on the Annex 2 filter, −0.92 dBTP on libebur128 and −0.93 dBTP on a 1025-tap 32-phase reconstruction.
 They turned the mix down by more than 1 dB for 35.0 s and by up to 7.3 dB, and changed 8.56 % of the samples.
 The second stage never turned the mix down by more than 0.01 dB.

@@ -50,6 +50,11 @@ NOTE: link:0055-a-viewers-audio-delay-is-a-playback-session-parameter-and-the-se
 The server shifts every audio rendition of a stream session by its applied audio delay: the playback session's audio delay plus the media file's audio sync correction.
 It moves each sample's decode time and never changes a sample, so a copy stays bit-identical.
 
+NOTE: An amendment gives no rendition to an audio track that ends at least one segment after both the chosen video stream and the default track (<<decision-restart-tracks>>).
+The client offers such a track by replacing the stream session, and the track never moves the media end of link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-media-end[ADR 0037].
+An audio track that ends at least one segment before the video, or before another track that has a rendition, is encoded and padded with silence (<<decision-audio-end>>).
+The Audio menu dims an audio track whose stream session would end at or before the viewer's position, and the server refuses a switch to that track (<<decision-restart-tracks>>).
+
 == Context
 
 This section describes the system before this decision.
@@ -100,7 +105,7 @@ Issue https://github.com/streamarr/streamarr-apple/issues/4[streamarr/streamarr-
 === Every audio track is its own audio rendition
 
 The stream decision selects every audio track in the media file, except a track whose `dependent` disposition is set.
-Each selected audio track becomes its own HLS audio rendition.
+Each selected audio track becomes its own HLS audio rendition, except a track that <<decision-restart-tracks>> offers by replacing the stream session.
 A rendition is an alternate track that the multivariant playlist lists in an `EXT-X-MEDIA` tag.
 Each rendition has its own media playlist.
 A rendition is never a variant, and a variant is never a rendition.
@@ -174,7 +179,8 @@ One exception keeps Atmos objects: when the best candidate is a FLAC encode of a
 The copy keeps the objects, which a FLAC encode of the TrueHD track loses.
 
 [[decision-restart-tracks]]
-The server has no TrueHD or DTS encoder, so in a session whose audio codec is TrueHD or DTS, only a track already in that codec that a capability entry accepts gets a rendition, as a copy.
+The server has no TrueHD or DTS encoder, so in a session whose audio codec is TrueHD or DTS, only a track already in that codec that a capability entry accepts gets a rendition, as a copy, and only when <<decision-audio-end>> would not pad the track.
+The server cannot pad a track in TrueHD or DTS.
 Every other track cannot reach the session's codec.
 The stream decision still lists such a track, and the client offers it beside the renditions.
 Choosing it replaces the stream session inside the playback session at the viewer's position, and the chosen track plays as the default of the new stream session, without the ranking, and decides its audio codec.
@@ -182,6 +188,33 @@ In that stream session, a TrueHD or DTS track whose copy a capability entry acce
 It also gets a rendition encoded to the session's codec when the server encodes that codec, and none when the session's codec is TrueHD or DTS too.
 Such a replacement uses none of the format-attempt budget, as for an image subtitle (<<decision-image-subtitles>>).
 Every switch between renditions still starts no job attempt.
+
+An audio track that ends at least one segment after both the chosen video stream and the default track gets no rendition either, whatever the session's audio codec (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-media-end[ADR 0037]).
+The stream decision still lists such a track, and the client offers it beside the renditions.
+Choosing it replaces the stream session at the viewer's position, as for a track that cannot reach the session's codec.
+The chosen track plays as the default of the new stream session, and the new stream session reads a media end of its own.
+In that new stream session, the earlier default track can end a segment or more before the media end.
+When the new session's codec is TrueHD or DTS, the earlier default track then gets no rendition, and the client offers that track by replacing the stream session too, as for every track that such a session cannot pad.
+A replacement starts at the viewer's position, and a start position must lie before the new stream session's media end (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-media-end[ADR 0037]).
+Take a video and a DTS default track that end at 60 s, and a second DTS track that ends at 90 s.
+A viewer who plays the second track at 75 s and chooses the earlier default track would need a stream session that ends at 60 s.
+
+The server therefore sends, with each audio track that it lists for the client, the media end of a stream session that plays that track as its default track.
+The field is `AudioTrack.playableUntilSeconds`.
+The field is null when the server does not know that media end, and the client then dims no track.
+The client's Audio menu dims each audio track whose `playableUntilSeconds` lies at or before the viewer's position.
+The dimmed track shows the reason "This audio track ends before this point."
+Every switch that would start a stream session carries the viewer's position, including a switch away from direct play (<<decision-languages>>).
+When that position lies at or after the media end of the stream session that the switch would start, the server refuses the switch and starts no stream session.
+The refusal carries a message that the server writes for a refused switch.
+The current track keeps playing.
+
+*Why:* A copy cannot pad.
+A rendition for such a track would make every playlist of the stream session run to that track's end, so the video and the default track would lose their copies for every viewer.
+
+*Why the Audio menu dims a track that has ended:* The viewer sees in the menu that the track has nothing left to play, before choosing the track.
+The server computes each track's end, so every client follows ADR 0037's rule for the container's duration without a copy of that rule.
+The server's refusal covers a client that cannot dim a track, and a switch whose position passed the end after the menu opened.
 
 A FLAC encode of a lossless default track keeps every channel of the track, up to eight, except where the layout rules below downmix.
 A FLAC encode of a lossy default track is not lossless, but it adds no second lossy generation to the track.
@@ -514,7 +547,7 @@ Evidence: <<evidence-priming>>, <<evidence-audio-cases>>.
 [[decision-audio-end]]
 === An audio track that ends early is padded with silence
 
-An audio track that ends at least one media segment before the video is encoded and padded with silence.
+An audio track that ends at least one media segment before the video, or before another audio track that has a rendition, is encoded and padded with silence up to the stream session's media end (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-media-end[ADR 0037]).
 A job attempt that starts after the track's end encodes silence for that track from a generated source.
 So every job attempt carries the same tracks, and no playlist uses `EXT-X-GAP`.
 `EXT-X-GAP` is the HLS tag that marks a media segment as missing.
@@ -522,6 +555,8 @@ Audio in a multiplexed variant follows the same rule, even when the variant is a
 A stream copy passes the source video through unchanged.
 The probe gives each track's end time where the container header states that end time.
 Otherwise the server learns the end time from the first job attempt that runs past the end.
+A copied track that ends less than one segment before the media end stays a copy and is never padded.
+link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-early-ends[ADR 0037] accepts that such a track can leave the last segment without a sample of the track.
 
 FFmpeg's interleave limit is how far FFmpeg lets one stream run ahead while FFmpeg waits for packets of another stream.
 The worker sets that interleave limit explicitly to 10 s.
@@ -619,9 +654,12 @@ For such a player, the stream decision chooses direct play only when the chosen 
 When the chosen audio track is another track, the file plays over HLS from the start.
 When the viewer switches a direct-played file to another audio track on such a player, the client replaces the direct-play stream session inside the playback session with an HLS stream session at the viewer's position.
 It is the same move that a format error during direct play makes (link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc#decision-format-error[ADR 0045]), but the replacement sends the viewer's choice of track and uses none of the format-attempt budget.
+The server refuses that switch when the viewer's position lies at or after the media end of the HLS stream session, as <<decision-restart-tracks>> describes for every switch to a track that has ended.
 Once the file plays over HLS, an audio switch follows the rules of every HLS stream session.
 A switch between audio renditions (<<decision-audio-renditions>>) keeps the video playing.
-A switch to a track that needs another audio codec (<<decision-restart-tracks>>), such as TrueHD or DTS, or that changes which forced image track is burned in (<<decision-image-subtitles>>), replaces the stream session at the viewer's position and uses none of the format-attempt budget.
+A switch to a track that has no rendition (<<decision-restart-tracks>>) replaces the stream session at the viewer's position and uses none of the format-attempt budget.
+Such a track needs another audio codec, such as TrueHD or DTS, would need padding in a TrueHD or DTS session, or ends at least one segment after both the video and the default track.
+A switch that changes which forced image track is burned in (<<decision-image-subtitles>>) replaces the stream session in the same way.
 
 When the viewer switches the audio language or the subtitles in the player, the server stores the change as the Profile's override for that episode, or for that movie.
 The switch never changes the override of the season or the series, so the next episode starts from the wider levels again.
@@ -1080,6 +1118,8 @@ Such a track then becomes the step track (ADR 0050).
 A step below the session's audio caps every rendition.
 * A client that declares DTS or TrueHD keeps the copy of such a default track, and with it the Atmos or DTS:X objects.
 A track in another codec then reaches that client only through a replacement of the stream session, which restarts the video at the viewer's position.
+* An audio track that ends at least one segment after both the video and the default track, such as a commentary that runs past the credits, reaches the viewer only through a replacement of the stream session.
+The video and the default track keep their copies for every viewer who does not choose that track.
 * No tested client declares TrueHD today: AVPlayer has no decoder, and Media3's HLS player does not regroup TrueHD for passthrough.
 Until a client declares it, a TrueHD track reaches every client as FLAC or as ADR 0050's lossy encode, and its Atmos objects reach a client only through an E-AC-3 track with Atmos.
 * A job that copies TrueHD runs FFmpeg's MP4 muxer under `-strict experimental`.
@@ -1221,6 +1261,9 @@ The client's declaration can make that choice for its own audio path.
 * Never copying TrueHD loses the Atmos objects for a client that decodes TrueHD or passes it to a receiver, although FFmpeg's experimental muxing kept every packet byte-identical.
 * Encoding a TrueHD or DTS default track whenever another track needs its codec keeps every switch free of restarts, but a commentary track then costs the viewer the Atmos copy.
 * Leaving the tracks that cannot reach a TrueHD or DTS session's codec out of the menu hides a commentary or another language from the viewer.
+* Ending playback when the viewer chooses an audio track whose stream session would end before the viewer's position would end the title because of an audio choice.
+* Offering a track that has ended and refusing the switch only after the viewer chooses it tells the viewer too late.
+* Having each client compute where a track's stream session ends from the stored end times would copy ADR 0037's rule for the container's duration, with its allowance of 1 s, into every client.
 * Encoding a lossy default track that cannot be copied to E-AC-3, AC-3 or AAC when the client declares FLAC adds a second lossy generation.
 * Choosing among same-language tracks by file order can pick a stereo track over a surround one, and ignores whether a track is lossless.
 * Copying a disc's lossy track before a FLAC encode of its lossless track gives up lossless audio for the client that declares FLAC.

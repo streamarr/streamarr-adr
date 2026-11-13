@@ -76,7 +76,9 @@ The maintainer decided each of those points on 2026-11-11, and <<encode-range>> 
 One point was a defect: after a hardware encoder failed, a PQ encode could continue as 8-bit SDR with no format error.
 The software continuation now keeps the range and the bit depth of the failed encode (<<hardware-failure-range>>).
 Draft https://github.com/streamarr/streamarr-server/pull/913[streamarr/streamarr-server#913] builds that rule.
-The other points stand as the server on `main` builds them.
+The other points stand as the server on `main` builds them, except the order of a 10-bit SDR encode.
+An edit of 2026-11-13 ranks every encode in one order (<<encode-range>>).
+That order changes what `main` plans in one case of a 10-bit SDR source, and no pull request builds the change yet.
 Draft https://github.com/streamarr/streamarr-server/pull/911[streamarr/streamarr-server#911] adds the tests that pin a PQ or HLG encode before an SDR encode of a codec family that a worker encodes in hardware.
 The same amendment records the decisions of 2026-11-11 about the lower variants beside a copy.
 In Auto, the lower variants beside a copy keep the copy's range and bit depth and use the copy's codec family, or the copy is listed alone (<<lower-variant-range>>).
@@ -834,22 +836,38 @@ When no such output meets every condition, the encode is 8-bit SDR.
 A client that declares neither PQ nor the source's Dolby Vision profile therefore receives an SDR encode of a profile 5 or profile 10.0 source.
 An SDR encode of a source whose compatible base is PQ, HLG or none is always 8-bit, even in a codec profile that holds 10 bits.
 
-Three rules order the encodes that meet these conditions, ahead of the codec preference of link:0009-h264-plus-av1-codec-strategy.adoc[ADR 0009]:
+The server ranks the encodes that meet these conditions in one order and plans the first encode in that order.
+The order comes ahead of the codec preference of link:0009-h264-plus-av1-codec-strategy.adoc[ADR 0009].
+Every comparison between two encodes follows the same order, so the encode that wins never depends on a third encode that loses.
 
-. The frame rate comes before the range and the bit depth, as it comes before the codec preference (ADR 0049).
+. An encode at a higher frame rate comes before an encode at a lower frame rate, as the frame rate comes before the codec preference (ADR 0049).
 A client that plays a 60 fps source's range or bit depth only at 30 fps receives an 8-bit SDR encode at 60 fps.
-. At the same frame rate, a PQ or HLG encode comes before every SDR encode.
-It comes before an H.264 encode, although the codec preference ranks H.264 before HEVC and AV1 in software.
-It also comes before an SDR encode of a codec family that a worker encodes in hardware, even when the PQ or HLG encode runs on a software encoder.
-A software encoder that lists PQ therefore comes before a hardware encoder that does not, when that hardware encoder writes another codec family or runs on another worker.
-The rule reads the one encoder that each worker lists for a codec family.
-It does not reach a software encoder on a worker that lists a hardware encoder for the same codec family, and <<explicitly-deferred>> leaves that case open.
-. At the same frame rate, a 10-bit SDR encode comes before an 8-bit H.264 encode, and before no other 8-bit encode.
-An 8-bit encode in a codec family that a worker encodes in hardware keeps its place before a 10-bit SDR encode in a codec family that the codec preference ranks later.
+. At the same frame rate, the encodes come in five groups, in this order:
+.. PQ and HLG encodes.
+.. SDR encodes of AV1 or HEVC when a connected worker encodes that codec family in hardware.
+These codec families form the first group of ADR 0009's codec preference.
+.. 10-bit SDR encodes of AV1 and HEVC in software.
+.. 8-bit H.264 encodes, on a hardware encoder or a software encoder.
+.. 8-bit SDR encodes of AV1 and HEVC in software.
+. Within a group, the codec preference decides.
+Within one codec family, a 10-bit SDR encode comes before an 8-bit SDR encode.
 
-Where these rules do not order two encodes, the codec preference decides.
-Between two PQ encodes, a codec family that a worker encodes in hardware therefore still comes first.
-The second rule changes no capacity rule.
+A PQ or HLG encode therefore comes before an H.264 encode, although the codec preference ranks H.264 before HEVC and AV1 in software.
+A PQ or HLG encode also comes before an SDR encode of a codec family that a worker encodes in hardware, even when the PQ or HLG encode runs on a software encoder.
+A software encoder that lists PQ therefore comes before a hardware encoder that does not, when that hardware encoder writes another codec family or runs on another worker.
+The order reads the one encoder that each worker lists for a codec family.
+The order does not reach a software encoder on a worker that lists a hardware encoder for the same codec family, and <<explicitly-deferred>> leaves that case open.
+An 8-bit SDR encode of a codec family that a worker encodes in hardware keeps its place before a 10-bit SDR encode in software.
+Between two PQ encodes, a codec family that a worker encodes in hardware still comes first.
+
+The order changes what the server on `main` plans in one case.
+In that case, the source is 10-bit SDR, and no connected worker encodes HEVC or AV1 in hardware.
+At the highest frame rate, no 8-bit H.264 encode meets the conditions, the AV1 encode keeps only 8 bits, and an HEVC Main 10 encode keeps 10 bits.
+The server on `main` at commit `6833215c` then plans AV1 Main at 8 bits, and the order plans HEVC Main 10 at 10 bits.
+When an 8-bit H.264 encode meets the conditions at that frame rate, the server on `main` already plans HEVC Main 10 at 10 bits.
+No pull request builds the order yet.
+
+The order changes no capacity rule.
 A PQ or HLG encode on a software encoder runs only on a worker that can take it, and ADR 0044's headroom rules apply to it as to every other encode.
 While no worker whose encoder lists the range can take the encode, the 8-bit SDR encode of the hardware codec family plays.
 
@@ -878,6 +896,9 @@ A format error during a fixed quality's encode ends playback with the typed term
 Before this rule, HDR reached a client only as a copy, so a client with an HDR display saw SDR whenever the server encoded.
 Almost no device decodes 10-bit H.264, so H.264 stays 8-bit SDR.
 Without the order before H.264, the server would encode 8-bit SDR H.264 for every client that plays H.264, whenever no worker encodes HEVC or AV1 in hardware.
+One order for every comparison makes the winner independent of the encodes that lose.
+Under rules that compare two encodes at a time, whether the client declares H.264 decides between 8-bit AV1 and 10-bit HEVC, although the H.264 encode plays in neither case.
+A 10-bit SDR encode in software comes before an 8-bit encode in software, because both run on software encoders and only the 10-bit encode keeps the source's bit depth.
 A PQ or HLG encode comes before a hardware codec family's SDR encode to keep a TV in its HDR mode as long as possible.
 Without that order, a hardware encoder that writes only 8-bit SDR would give every HDR source an SDR encode, although a software encoder of another codec family or another worker could keep the range.
 An older worker, and an encoder that did not pass its test encode, list no such output, so neither receives an encode that it cannot write.
@@ -1448,6 +1469,7 @@ A worker whose encoder writes the copy's range and bit depth can encode one.
 * Lower variants in the compatible base's range beside a Dolby Vision copy, now: players that move only within one codec family read them as a second ladder, and no TV was measured (<<lower-variant-range>>).
 * Ending the copy, or changing format, when a lower variant fails (<<lower-variant-failure>>): the copy still plays, and Auto could give the source's range up for a variant that the player may not play again.
 * Continuing a lower variant on a software encoder after its hardware encoder fails, as ADR 0044 continues other variants: that continuation replaces the stream session, which ends the copy (<<lower-variant-failure>>).
+* Writing down the order that the server on `main` follows, in which a 10-bit SDR encode comes before an 8-bit H.264 encode and before no other 8-bit encode (<<encode-range>>): whether the client declares H.264 would then decide between 8-bit AV1 and 10-bit HEVC, although the H.264 encode plays in neither case.
 * Keeping a hardware codec family's SDR encode before a PQ or HLG encode on a software encoder, as ADR 0009's order alone would: a TV would leave HDR on a server whose hardware encoder writes only 8-bit SDR, although a software encoder of another codec family or another worker could keep the range (<<encode-range>>).
 * Planning the range and the bit depth again from the software encoders after a hardware encoder fails: a PQ encode would continue as 8-bit SDR with no format error and no counted format attempt, also in a fixed quality with HDR chosen (<<hardware-failure-range>>).
 * Keeping a copy that the playlist lists alone when the copy does not fit the upload budget: the copy would take upload that every counted stream session shares, although an encode that fits can play (<<lower-variant-range>>).
@@ -1819,6 +1841,12 @@ It also covers the busy worker whose PQ encoder does not count.
 * On `main`, no test names a PQ or HLG encode that comes before an SDR encode of a hardware codec family, although the code orders them so.
 Draft https://github.com/streamarr/streamarr-server/pull/911[streamarr/streamarr-server#911] adds 13 cases to `TenBitAndHdrEncodeTest` that pin the order and its limits, and it changes no production code.
 In a scratch copy, a ranking in which an HDR encode wins only over H.264 failed 2 of those cases and none of the 49 cases that the class had before.
+* On `main` at commit `6833215c`, a scratch case of `TenBitAndHdrEncodeTest` encoded a 10-bit SDR source with software encoders only: libx265 listed 10 bits, and the AV1 encoder listed only 8 bits.
+With H.264 in the client's declaration, the server planned HEVC Main 10 at 10 bits.
+Without H.264, the server planned AV1 Main at 8 bits.
+Each case failed when its expected result was swapped, and all 51 cases of the class passed.
+The scratch case was not committed.
+The order of <<encode-range>> plans HEVC Main 10 at 10 bits in both cases.
 * `HdrFormatRecoveryTest` covers Auto's change to SDR after a failed PQ or HLG encode, a fixed quality that keeps its range until playback ends, and the switch from Auto to a fixed quality.
 In the switch, the test stands in for the client and sends the range that plays.
 * `PlannedVideoOutputTest` refuses a planned H.264 encode that is not 8-bit SDR.

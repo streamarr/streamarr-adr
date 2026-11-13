@@ -29,6 +29,7 @@ An amendment keeps an idle stream session's segments for one hour by default, as
 The same amendment has a left variant that copies the video give up its place under a worker's copy cap when the worker refuses a copy because that cap is full (<<decision-requested-variant>>).
 An amendment lets a new viewer's first request stop another stream session's left variant that copies the video on a full worker, and gives the new viewer the capacity error when no such left variant is left to stop (<<decision-requested-variant>>).
 An amendment of link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc#decision-upload-budget[ADR 0050] starts the top variant that stays in the playlist when the upload budget leaves the first-listed variant out (<<decision-requested-variant>>).
+An amendment for https://github.com/streamarr/streamarr-server/pull/929[streamarr/streamarr-server#929] answers every held segment request with `503 Service Unavailable` when the server shuts down (<<decision-held-at-shutdown>>).
 
 === Implementation status
 
@@ -89,11 +90,12 @@ When no padded segment is stored yet, the server starts a job attempt at the las
 That job attempt pads the segments up to the advertised end.
 A source that ends early adds no exception to the rule that a listed segment is an obligation.
 `503 Service Unavailable` stays the only way that the server refuses an advertised segment.
-The server answers `503 Service Unavailable` after exhausted recovery, or when no worker starts a variant's job attempt within the wait for worker memory (<<decision-requested-variant>>).
+The server answers `503 Service Unavailable` after exhausted recovery, when no worker starts a variant's job attempt within the wait for worker memory (<<decision-requested-variant>>), and when the server shuts down (<<decision-held-at-shutdown>>).
 A copied variant cannot be padded.
 link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] makes a copied variant that runs short a format error when some source stream still has media after the copy's last segment and before the advertised end.
 When the whole source has ended, link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052] ends playback normally at the real end, and the client stops the player there.
-The server then holds a segment request past the real end until the client ends playback or the stream session ends, without a producer and without answering `503 Service Unavailable`.
+The server then holds a segment request past the real end, without a producer, until the client ends playback, the stream session ends or the server shuts down.
+Only the server's shutdown answers such a request with `503 Service Unavailable`.
 
 === Segment waits are bounded by producer liveness, not a wall clock
 
@@ -108,7 +110,7 @@ After the first publication, media segment upload chunk or progress report, the 
 A long merged segment (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-segment-list[ADR 0037]) therefore needs no allowance of its own.
 Its producer reports progress while it encodes the segment, however far below real time it runs, and a producer whose output stops advancing is replaced after the stall threshold, whatever the segment's length.
 The local store writes every segment completely to a temporary file in the segment folder before moving it into its final name. A segment is stored once: the first publication under a name moves the file into place atomically, and a later publication of that name leaves the stored file untouched. The segment folder must be one filesystem that renames a file atomically; on a filesystem that does not, a publication fails and stores nothing. A later publication of a media segment still succeeds, so a job attempt that reproduces stored media continues and is credited for it. The bytes under a final name therefore never change. On a connection that the web server can send a file on, the server hands a stored segment's file to the web server, which opens the file by its name after the request has ended; because the bytes never change, the file that it opens holds the bytes whose length the response headers announced. Unchanging bytes do not keep the file. When the stream session ends between the request and the moment the web server opens the file, the response carries its headers and no body, and the connection closes. That player's stream session has ended, so the player starts again at the viewer's position (<<decision-idle-retention>>). Under the segment-store contract, only the final name is observable as ready; supported deployments must therefore provide rename visibility consistent with that contract. No successor-segment inference is needed or permitted.
-The wait ends when the segment is ready, when no producer can be made to produce it, or on request cancellation — never on a fixed wall-clock timeout.
+The wait ends when the segment is ready, when no producer can be made to produce it, on request cancellation, or when the server shuts down — never on a fixed wall-clock timeout.
 A slow or resource-starved transcode must not surface to the client as a missing segment.
 
 A held segment request is a request for an advertised media segment that the server holds open while a producer prepares that segment.
@@ -124,6 +126,21 @@ The player therefore underestimates the connection's bandwidth.
 In a browser simulation, hls.js with a fetch-based loader in Chromium received early headers and counted the held time as transfer time.
 A reading of the Media3 1.11.1 source shows that Media3's bandwidth meter also starts timing at the response headers.
 Because the server sends no early headers, no tested player counts the held time as transfer time.
+
+[[decision-held-at-shutdown]]
+=== A server shutdown answers every held segment request at once
+
+When the server shuts down, the server answers every held segment request with `503 Service Unavailable` at once.
+The server answers those requests before the web server waits for its open requests.
+After the shutdown begins, a segment request that would wait for its segment also gets `503 Service Unavailable` at once.
+link:0027-library-operations-are-durable-jobs.adoc#server-shutdown[ADR 0027] decides the rest of the server's shutdown and its budget of about 10 s.
+
+*Why:* A held segment request waits for a producer, and nothing else ends that wait when the worker stops answering.
+Before this rule, such a request held the web server's graceful shutdown for 30 s, and the web server then dropped the connection.
+A reading of the web player's source shows that the web player asks the server for the playback status after a `503 Service Unavailable`.
+A dropped connection is a network error that ends the web player's playback.
+In the measurements of https://github.com/streamarr/streamarr-server/pull/929[streamarr/streamarr-server#929], a server whose held segment request waited on a worker that stopped answering exited 30.5 s after SIGTERM before this rule.
+With this rule, the same server exited 0.4 to 0.5 s after SIGTERM.
 
 [[decision-segment-state]]
 === The server publishes whether a held segment request is preparing or ready
@@ -600,6 +617,7 @@ It adds a rule for a player that plays a long merged segment from its buffer, a 
 * Growing or event-type media playlist advertising only produced segments — satisfies §6.2.1 but forfeits instant whole-timeline seek, makes segment production stateful, and complicates recovery for no viewer-visible gain.
 * Low-latency HLS blocking playlist reload as the segment-wait mechanism — presumes a growing live playlist, does not apply to a static on-demand playlist, and specifies no error path for a segment that cannot be produced.
 * A fixed wall-clock segment-wait timeout returning `404` before liveness-driven recovery — converts slow production into spurious failures and papers over the missing recovery instead of providing it.
+* Leaving held segment requests open at shutdown until the web server drops their connections — a request whose worker stops answering holds the shutdown for the web server's whole graceful wait, and a dropped connection ends the web player's playback.
 * Signaling a dead variant immediately through a distinct HTTP status or an advertised playlist gap — the standard forbids withdrawing a listed segment and the client cannot reconstruct or skip an advertised segment URL. A terminal `503 Service Unavailable` is reserved for finite recovery exhaustion; the playlist remains immutable.
 * Per-segment isolated transcoding on demand — independent single-segment encodes glitch at audio and video boundaries; a contiguous run per producer is required.
 * A per-window snapshot of eligible execution targets — the snapshot is a retained copy of live fleet state that must be defended against every concurrent mutation (supersession fences, exhausted-window retention, new-target set-difference); review found two high-severity staleness-of-the-copy defects in exactly that machinery, while live consultation admits newly eligible targets without retaining a second copy of fleet membership.

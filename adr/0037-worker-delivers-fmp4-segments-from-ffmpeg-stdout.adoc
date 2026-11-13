@@ -518,7 +518,8 @@ A producer of a long merged segment is not taken for stalled while its output ad
 Once a second, the worker reports the media time that a job attempt's output has reached, whenever that time has advanced since its previous report for the attempt.
 That time is the end of the latest video sample that the producer has read from FFmpeg's output, whether or not the segment that holds it has closed.
 While a held encode searches for the video's last keyframe (<<decision-early-ends>>), the report carries the bytes of source that the search has read instead.
-Each report that advances the output or the search restarts the server's stall clock, as a publication does (link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]).
+When a job attempt's FFmpeg process reads the encoded audio from an input of its own, the report also carries the bytes that the process has read, whenever the worker's count of those bytes has grown (<<decision-waits>>).
+Each report that advances the output, the search or the bytes that FFmpeg has read restarts the server's stall clock, as a publication does (link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]).
 Each chunk of a media segment upload that the server receives from the attempt restarts it too.
 While a large segment uploads, the producer's budget can hold back FFmpeg, so the output doesn't advance, but the upload's bytes do, and the worker's acknowledgment deadline still bounds the upload (<<decision-waits>>).
 So an encode that runs below real time keeps its producer through a merged segment of any length while FFmpeg's output advances.
@@ -1301,7 +1302,16 @@ Four waits bound an attempt's progress, and a stop takes precedence over each.
 Three have their own configured bounds, and the exit wait reuses the stop's grace period.
 
 * An encoder-stall watchdog fails the attempt when no byte has arrived from the pipe within the stall threshold while the reader was reading.
-It measures liveness only by bytes on standard output, never by standard error or by the process being alive.
+When the attempt's FFmpeg process reads the encoded audio from an input of its own, the bytes that the process reads count as progress too.
+The watchdog then fails the attempt only when FFmpeg has also read no byte within the stall threshold.
+The watchdog counts the bytes that FFmpeg has read ten times within the stall threshold, and at least once a second.
+A paused watchdog takes no count.
+A count shows only that FFmpeg read some bytes since the previous count, not when FFmpeg read them.
+The watchdog dates the bytes that a count finds to that count.
+So the watchdog never fails an FFmpeg process that a count found reading within the stall threshold.
+An FFmpeg process that stops reading fails within the stall threshold plus the time between two counts.
+Where the system keeps no count of a process's reads, the watchdog watches the output alone.
+The watchdog never measures liveness by standard error or by the process being alive.
 When the watchdog fires, the worker sends FFmpeg SIGTERM and waits for the process to exit.
 If FFmpeg has not exited when the stop's grace period expires, the worker sends SIGKILL and waits until the process exits.
 * A readiness wait fails the upload when the gRPC stream has not reported `isReady` within its bound.
@@ -1320,7 +1330,12 @@ Back-pressure from the server therefore pauses the encoder-stall watchdog but ne
 *Why:* A blocking pipe read cannot time out on its own.
 A hung FFmpeg keeps printing its progress line and exits on neither `q` nor SIGTERM.
 The watchdog stops when the reader finishes reading the output, so only the exit wait catches an FFmpeg process that hangs after its last byte.
-Evidence: <<evidence-svt-av1>>.
+An attempt that reads the encoded audio from an input of its own can write nothing for a long time while FFmpeg reads that input ahead to the next audio packet or to the end of the file.
+The output alone cannot tell such an FFmpeg process from a hung one, so the bytes that the process reads count too.
+Dating the bytes to the count that finds them gives reads the guarantee that output already has.
+The watchdog never fails an FFmpeg process that wrote or read within the stall threshold.
+In exchange, the watchdog can catch a process that stopped reading late by up to the time between two counts, which is at most 1 s.
+Evidence: <<evidence-svt-av1>>, and https://github.com/streamarr/streamarr-transcode-worker/pull/196[streamarr/streamarr-transcode-worker#196] for the reads.
 
 [[decision-memory]]
 === A producer and a worker each admit memory within a budget

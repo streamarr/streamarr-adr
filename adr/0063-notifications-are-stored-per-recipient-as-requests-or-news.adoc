@@ -4,105 +4,136 @@
 
 Proposed
 
-This decision amends link:0042-graphql-subscriptions-run-over-websocket-until-token-expiry.adoc[ADR 0042]: `notificationsChanged` needs an Account session that is not device-bound, with or without a selected Profile.
+This decision amends link:0042-graphql-subscriptions-run-over-websocket-until-token-expiry.adoc[ADR 0042] in one way.
+`notificationsChanged` needs an Account session that is not device-bound, with or without a selected Profile.
 https://github.com/streamarr/streamarr-server/issues/873[streamarr/streamarr-server#873] implements the first build.
 
 == Context
 
 Some things in Streamarr wait for a person.
-A share invitation, which proposes to share one Profile with one Household, waits for a HouseholdAdmin of its target Household, and a ProfileManager invitation waits for the Account that it invites (link:0024-identity-authority-by-relationship.adoc[ADR 0024]).
-Other things only need telling: a share invitation was accepted, a share ended, a scan finished.
-Today a person learns about either only by opening the page that lists it.
+A share invitation proposes to share one Profile with one Household, its target Household.
+The share invitation waits until a HouseholdAdmin of the target Household answers.
+A ProfileManager invitation waits until the Account that it invites answers (link:0024-identity-authority-by-relationship.adoc[ADR 0024]).
+Other things need no decision, such as an accepted share invitation, a share that ended, or a finished scan.
+People only need to hear about those things.
+Today a person finds out about any of these things only by opening the page that lists that kind of thing.
 
-Three decisions left this open.
+Three earlier decisions left notifications for later.
 ADR 0024 deferred notifications together with its screens and GraphQL contracts.
-link:0013-stream-decision-architecture.adoc[ADR 0013] deferred a notification when a viewer shares a playback report.
-link:0010-spring-application-events.adoc[ADR 0010] expected its application events to feed pushes to the interface.
+link:0013-stream-decision-architecture.adoc[ADR 0013] deferred the notification that a viewer has shared a playback report.
+link:0010-spring-application-events.adoc[ADR 0010] expected its application events to drive the updates that the server pushes to the interface.
 
 GraphQL subscriptions (ADR 0042) do not fill the gap.
 A subscription keeps an open screen current.
-It stores nothing, so a person who is not looking misses the change.
-https://github.com/streamarr/streamarr-server/issues/871[streamarr/streamarr-server#871] adds live updates of shares to the sharing pages, and those updates too reach only open screens.
+A subscription stores nothing, so a person who is not looking at the screen misses the change.
+https://github.com/streamarr/streamarr-server/issues/871[streamarr/streamarr-server#871] adds live updates of shares to the sharing pages.
+Those updates also reach only the screens that are open.
 
-The people around a subject change over time.
-A HouseholdAdmin can be demoted or move to another Household, a ProfileManager can be removed or relinquish management, and a ServerAdmin can lose that authority (ADR 0024).
-What a person was told stays what they were told, but a person who can no longer decide something must not be left with a request to decide it.
+The thing that a notification is about is its subject, such as a share invitation, a share or a library.
+The people connected to a subject change over time.
+A HouseholdAdmin can be demoted or can move to another Household.
+A ProfileManager can be removed or can relinquish management.
+A ServerAdmin can lose ServerAdmin authority (ADR 0024).
+A person keeps what they were told.
+But a person who can no longer make a decision must not keep a request for that decision.
 
-Each subject already has an owner that decides who may read it.
-For a share, that is the sharing rule of ADR 0024, which Cedar decides (link:0025-cedar-decides-authorization.adoc[ADR 0025]).
-A record of what someone was told should not decide that a second time.
+Each subject already has an owner, the domain that decides who may read the subject.
+For a share, Cedar decides who may read the share by the sharing rule of ADR 0024 (link:0025-cedar-decides-authorization.adoc[ADR 0025]).
+A record of what someone was told should not make that decision a second time.
 
 Some events repeat.
-A scheduled scan can run every day (link:0027-library-operations-are-durable-jobs.adoc[ADR 0027]), and a library can keep unmatched items from one scan to the next.
+A scheduled scan can run every day (link:0027-library-operations-are-durable-jobs.adoc[ADR 0027]).
+A library can keep the same unmatched items from one scan to the next.
 
 The web client will list Notifications in the Profile menu, with an unread count and a dot on the avatar.
-That design is recorded elsewhere.
-Email and the TV apps come later and must fit without a new model.
+The design of that menu is recorded elsewhere.
+Email and the TV apps come later.
+Both must fit without a new model.
 Streamarr has no production instances.
 
 == Decision
 
 A Notification is a stored record of what one recipient was told when something happened to a subject.
-Each recipient gets its own copy when the event happens, with its own read state.
+Each recipient gets its own copy when the event happens.
+Each copy has its own read state.
 A Notification is either a request, which waits for a decision on its subject, or news, which needs no decision.
-The domain that publishes an event decides once who is told and what they are told.
-The notification module stores, coalesces, lists, counts, marks, pushes, dismisses and retains, and it decides nothing about a subject.
+The domain that publishes an event decides once who gets a Notification and what the Notification says.
+The notification module stores Notifications and merges repeated news.
+The module also lists and counts Notifications, marks them read, pushes changes, dismisses Notifications and deletes old ones.
+The module decides nothing about a subject.
 
 === What a Notification is, and is not
 
 A Notification has one recipient, one kind and one subject.
 The kind says what happened.
-It fixes the Notification's form, request or news, and the facts that its snapshot holds.
+The kind fixes the Notification's form, which is either request or news.
+The kind also fixes which facts the Notification's snapshot holds.
 The subject is the record that the Notification is about, such as one share invitation or one library.
-The Notification keeps a reference to its subject, and that reference is its link target.
+The Notification keeps a reference to its subject.
+That reference is also the Notification's link target.
 The snapshot holds what the recipient was told, such as the Profile's name and the answer to a share invitation.
 
 * A Notification is a record of what its recipient was told, not a view of its subject.
-  The server never works its content out again from the subject, and no later change to its recipient's relationships changes it.
+  The server never works out a Notification's content again from the subject.
+  No later change to the recipient's relationships changes the Notification.
 * A Notification is not the source of truth for anything that waits.
-  The pending share invitations into a Household, the pending ProfileManager invitations of an Account and the unmatched items of a library are counted from the share invitations, the ProfileManager invitations and the items.
-  A Notification can point to such a list, and it never changes what the list shows.
+  The server counts waiting things from their own records.
+  Examples are the pending share invitations into a Household, the pending ProfileManager invitations of an Account, and the unmatched items of a library.
+  A Notification can point to such a list.
+  A Notification never changes what the list shows.
 * A Notification is not a subscription event.
-  A subscription event updates an open screen and is stored nowhere; a Notification stays stored until retention or a dismissal deletes it.
+  A subscription event updates an open screen and is not stored.
+  A Notification stays stored until retention or a dismissal removes the Notification.
 * No person writes a Notification.
-  Its text comes from its kind and its snapshot.
+  The Notification's text comes from its kind and its snapshot.
 * A Notification is not an audit record.
-  Retention deletes Notifications, and the security audit (ADR 0024) keeps the record of each action.
+  Retention deletes Notifications.
+  The security audit (ADR 0024) keeps the record of each action.
 
 Every recipient today is an Account.
-A Profile may become a recipient later, for example for the TV apps, and a decision of its own will say how.
-This decision stores the recipient as a reference, as it stores the subject, so nothing here stands in that decision's way.
+A Profile may become a recipient later, for example for the TV apps.
+A separate decision will say how.
+This decision stores the recipient as a reference, in the same way as the subject.
+So nothing in this decision blocks that later decision.
 
 In this ADR, "request" names a Notification's form.
 An API request keeps its usual meaning.
 
-=== Who is told is decided once, when the event happens
+=== The publishing domain decides who gets a Notification, once, when the event happens
 
-The domain that publishes an event decides who is told and what they are told.
-It works out the kind's recipients from the relationships as they stand at that moment, inside the transaction that changes the subject.
-It holds the relationship rows that it reads, as ADR 0024 requires of every operation that decides from relationships.
-A relationship that changes at the same moment therefore either waits until the event commits or has already changed when the event reads it.
+The domain that publishes an event decides who gets a Notification and what the Notification says.
+That domain works out the recipients from the relationships as they are at that moment, inside the transaction that changes the subject.
+The domain locks the relationship rows that it reads, as ADR 0024 requires of every operation that decides from relationships.
+A relationship that changes at the same moment therefore either waits until the event commits or has already changed when the event reads the relationship.
 The Notification commits or rolls back with the change that made it.
 
-A recipient is told only what it may know at that moment: what it may read of the subject then, or, when the event ends its access, what it could read until that event.
-Each kind's recipients below follow this rule.
+A Notification tells its recipient only what the recipient may know at the moment of the event.
+That is what the recipient may read of the subject at that moment.
+When the event ends the recipient's access to the subject, the Notification tells only what the recipient could read until the event.
+Every kind below picks its recipients by this rule.
 
 * The Account that acts never receives a Notification about its own action.
   A HouseholdAdmin who accepts a share invitation gets no news of the acceptance, even when that HouseholdAdmin also manages the Profile.
 * A disabled Account still receives its copies.
-  Disabling an Account changes no role or grant (ADR 0024), and the Account reads its Notifications after it is enabled again.
-* An Account that stands in two relationships to one subject receives one copy.
+  Disabling an Account changes no role or grant (ADR 0024).
+  The Account reads its Notifications after it is enabled again.
+* An Account that has two relationships to one subject gets one copy.
 
-Nothing decides again later.
-Listing, counting, marking and pushing a Notification look at the Notification and its recipient alone, and never at anyone's relationships.
-A person who later loses the relationship through which it was told keeps the news it was told.
-A waiting request is the one thing that a lost relationship takes away, through a dismissal by the domain that owns the relationship (see <<dismissal>>).
+Nothing decides the recipients again later.
+When the module lists, counts, marks or pushes a Notification, the module looks only at the Notification and its recipient.
+The module never looks at anyone's relationships.
+A person keeps their news after losing the relationship that brought them the news.
+A waiting request is the one thing that a lost relationship takes away.
+The domain that owns the relationship dismisses that request (see <<dismissal>>).
 
 *Why a copy for each recipient:* each recipient has a read state of its own, so each needs a record of its own.
-A copy also fixes who was told: an Account that joins a group later does not inherit what was said to the group before.
+A copy also fixes who got the Notification.
+An Account that joins a group later does not inherit the Notifications that the group's members got before.
 
-*Why decide once:* the domain that owns a subject already decides who may read it, at the moment that it publishes the event.
-Deciding again at each read would state that rule a second time in the notification module and read the subject through a second path, only to take back what the reader was already told.
+*Why decide once:* the domain that owns a subject already decides who may read the subject, at the moment that it publishes the event.
+Deciding again at each read would state that rule a second time, in the notification module.
+The module would also have to read the subject through a second path.
+All of that work would only take back what the reader was already told.
 
 ==== The accepted gap
 
@@ -116,104 +147,144 @@ A HouseholdAdmin who is demoted and then promoted again likewise gets no dismiss
 Each kind has one form, and the form never changes.
 
 A request waits for a decision on its subject.
-Its state is stored on the request, and only events write it:
+The request stores its own state, and only events write that state:
 
 * The request waits from when it is made until an event resolves it or its subject's expiry passes.
 * The request resolves when its subject stops waiting, for every recipient at once:
 ** _decided_, when anyone with the authority accepts, rejects or declines the subject, and the request stores which;
-** _withdrawn_, when its proposer cancels the subject, a newer proposal replaces it, or the server invalidates it (ADR 0024), and the request does not store which;
+** _withdrawn_, when the subject's proposer cancels the subject, a newer proposal replaces the subject, or the server invalidates the subject (ADR 0024).
+   The request does not store which of these happened;
 ** _expired_, when the subject's expiry passes with no decision.
 * The domain that owns the subject publishes each resolution in the transaction that changes the subject.
-  The resolution carries the instant of that change: the one instant that the subject's domain takes for the change, checks the subject's expiry against and records on the subject.
+  The resolution carries the instant of that change.
+  The subject's domain takes one instant for the change, checks the subject's expiry against that instant, and records that instant on the subject.
   The module writes the state and that instant to every request about that subject that no event has resolved yet.
-* A request stores its subject's expiry, which the event that makes it carries, so it reads as expired from its own data once that time passes, before any event says so.
-  A subject's expiry never changes: a change of the lifetime setting applies only to share invitations and ProfileManager invitations made after it (ADR 0024).
-* The module compares the resolution's instant with the stored expiry, never the time at which it handles the resolution.
-  A resolution whose instant is before the expiry is written as it is, even when it reaches the module after the expiry, for example because its transaction waited for locks.
-  A share invitation or a ProfileManager invitation waits only for its lifetime (ADR 0024), so its domain accepts, rejects or declines it only at an instant before its expiry, and an acceptance never leaves an active share beside an expired request.
-  A request that read as expired while such a resolution was on its way then reads as decided or withdrawn, and the change is pushed like any other resolution.
-  A resolution whose instant is at or after the expiry is written as expired, at the expiry, so a request that already read as expired goes on reading so.
+* A request stores its subject's expiry, which the event that makes the request carries.
+  Once that time passes, the request reads as expired from its own data, before any event says so.
+  A subject's expiry never changes.
+  A change to the lifetime setting applies only to share invitations and ProfileManager invitations made after the change (ADR 0024).
+* The module compares the resolution's instant with the stored expiry, never with the time at which the module handles the resolution.
+  The module writes a resolution whose instant is before the expiry unchanged, even when the resolution reaches the module after the expiry.
+  That can happen when the resolution's transaction waited for locks.
+  A share invitation or a ProfileManager invitation waits only for its lifetime (ADR 0024).
+  So its domain accepts, rejects or declines the invitation only at an instant before the invitation's expiry.
+  An acceptance therefore never leaves an active share beside an expired request.
+  A request may read as expired while such a resolution is still on its way.
+  When the resolution arrives, the request reads as decided or withdrawn.
+  The module pushes that change like any other resolution.
+  The module writes a resolution whose instant is at or after the expiry as expired, at the expiry.
+  So a request that already reads as expired goes on reading as expired.
 * A resolved request counts as read.
-  It stays in the list as history, with how it resolved, and it never becomes unread again.
+  A resolved request stays in the list as history and shows how it resolved.
+  A resolved request never becomes unread again.
 * A recipient may mark a waiting request read.
-  Reading decides nothing: the request shows that it waits until it resolves.
+  Marking a request read decides nothing.
+  The request still shows that it waits, until it resolves.
 * A request's subject waits only once.
   A newer proposal is a new subject, with requests of its own.
 
 News needs no decision.
-It stays unread until its recipient marks it read, and nothing else marks it read.
+News stays unread until its recipient marks it read.
+Nothing else marks news read.
 
-*Why a request stores its state:* the module reads no other module's tables, so it cannot read the subject.
-The subject's domain already publishes an event for every change of the subject (see <<live-changes>>), and that event writes the state.
-An event that a bug left out would leave a request waiting for something already settled, but only until its stored expiry, from which it reads as expired.
+*Why a request stores its state:* the module reads no other module's tables, so the module cannot read the subject.
+The subject's domain already publishes an event for every change of the subject (see <<live-changes>>).
+That event writes the request's state.
+If a bug left an event out, a request would wait for something already settled.
+The request would wait only until its stored expiry, and from then on the request reads as expired.
 
 === One unread news per kind, subject and recipient
 
-A recipient has at most one unread news of each kind about one subject.
-A later event of that kind about that subject replaces the unread news' snapshot and its time.
-Apart from a request's resolution, that is the only way that a Notification's content changes.
-The Notification keeps its identity, stays unread and moves to the top of the list.
-The new snapshot is the later event's own, except for the one kind whose row in the table below says that it adds the later event's figures to the stored ones.
+A recipient has at most one unread news Notification of each kind about one subject.
+This ADR calls that limit the noise rule.
+A later event of that kind about that subject replaces the snapshot and the time of that unread Notification.
+Apart from a request's resolution, this replacement is the only way that a Notification's content changes.
+The Notification keeps its id, stays unread and moves to the top of the list.
+The new snapshot is the later event's own snapshot.
+The one exception is _Scan or refresh finished_, which adds the later event's figures to the stored figures (see the table below).
 When the recipient has no unread news of that kind about that subject, the event makes a new Notification.
-A read Notification is history, and no later event changes it.
+A read Notification is history.
+No later event changes a read Notification.
 
-For example, a scan of a library named Movies leaves 14 unmatched items, and each ServerAdmin gets "Movies: 14 titles need matching".
-A later scan that adds more unmatched items replaces the snapshot of the same unread Notification, and its line shows the number that the library held after that scan, such as 20.
-The ServerAdmin still has one Notification about it.
-After a ServerAdmin reads it, the next such scan makes a new Notification for that ServerAdmin.
+For example, a scan of a library named Movies leaves 14 unmatched items.
+Each ServerAdmin gets a Notification that reads "Movies: 14 titles need matching".
+A later scan adds more unmatched items and replaces the snapshot of the same unread Notification.
+The Notification's line now shows how many unmatched items the library held after the later scan, such as 20.
+The ServerAdmin still has one Notification about the Movies library.
+After a ServerAdmin reads that Notification, the next such scan makes a new Notification for that ServerAdmin.
 
 Different kinds of news about one subject sit side by side.
 An Account sends a share invitation for a Profile to a Household.
-Before the Account next looks, the Household accepts the share invitation, and a week later it ends the share.
-The Account then has two unread Notifications about the share, "Share invitation answered" and "Share ended", and the second does not replace the first.
-Only an event of a Notification's own kind updates it, so a Notification never changes its kind or its GraphQL type.
+Before that Account next looks at its Notifications, a HouseholdAdmin of the Household accepts the share invitation.
+A week later, a HouseholdAdmin of the Household ends the share.
+The Account then has two unread Notifications about the share, "Share invitation answered" and "Share ended".
+The second Notification does not replace the first.
+Only an event of a Notification's own kind updates that Notification.
+So a Notification never changes its kind or its GraphQL type.
 
 Requests never update in place.
-A request's subject waits only once, and a newer proposal is a new subject, so no later event of a request's kind is about the same subject.
+A request's subject waits only once, and a newer proposal is a new subject.
+So no later event of a request's kind is about the same subject.
 
-PostgreSQL holds the rule with a unique index over the unread news of each recipient, kind and subject, so two events at the same moment update one Notification.
-A second unique index allows one request of each kind about one subject for each recipient, so an event that is published twice makes no second request.
+PostgreSQL enforces the noise rule with a unique index over the unread news of each recipient, kind and subject.
+So two events at the same moment update one Notification.
+A second unique index allows each recipient one request of each kind about one subject.
+So an event that is published twice makes no second request.
 
 [[order-and-paging]]
 === The list's order and paging
 
 The list holds the reader's Notifications, newest first.
-A Notification's time is the time of its latest event, `latestEventAt`, so a Notification that is updated in place moves to the top.
+A Notification's time is the time of its latest event, `latestEventAt`.
+So a Notification that is updated in place moves to the top.
 A request keeps its time when it resolves, because a resolution is not an event of the request's kind.
 Notifications with the same time are ordered by their id, in the same direction.
 
-The list uses the server's shared pagination (link:0014-protocol-agnostic-pagination.adoc[ADR 0014]) and all of its rules, and it adds no paging of its own.
-It is a `PagedList` under the shared `Pager`, ordered by `latestEventAt` descending, and it reads its rows in SQL through the shared jOOQ `Keyset` query.
-Its cursors are the shared position cursors of `PositionCursorCodec`: each holds a position, which is a time and an id, with the list's name and the Account as its scope, so it continues only that Account's list.
+The list uses the server's shared pagination (link:0014-protocol-agnostic-pagination.adoc[ADR 0014]) with all of its rules.
+The list adds no paging of its own.
+The list is a `PagedList` under the shared `Pager`, ordered by `latestEventAt` descending.
+The list reads its rows in SQL through the shared jOOQ `Keyset` query.
+The list's cursors are the shared position cursors of `PositionCursorCodec`.
+Each cursor holds a position, which is a time and an id.
+A cursor's scope is the list's name and the Account, so the cursor continues only that Account's list.
 A cursor that cannot continue the list fails with `INVALID_CURSOR`, as on every list.
-Its edges implement `OrderedEdge`, because the list publishes live changes, and its integration test extends the shared `PagedListContract`.
+The list's edges implement `OrderedEdge`, because the list publishes live changes.
+The list's integration test extends the shared `PagedListContract`.
 
 A cursor holds a position, never a Notification.
-When the Notification that a cursor names has since moved to the top or been dismissed, no row is left at the cursor's position.
+Suppose that the Notification at a cursor's position has since moved to the top or been dismissed.
+Then no row is left at the cursor's position.
 The next page then starts where that Notification was, as ADR 0014 says for an item that has left a list.
-A moved Notification now sits above the cursor, so a later page does not show it again.
-A client places it at the top from its live change, by its edge's `orderKey`, and a list read again from the start shows it there.
+A moved Notification now sits above the cursor, so a later page does not show the moved Notification again.
+A client puts the moved Notification at the top when its live change arrives, by its edge's `orderKey`.
+A list read again from the start shows the moved Notification at the top.
 
 === Read and unread
 
-Read state belongs to each recipient's own copy, and marking a Notification read changes no other recipient's copy.
-A playback report works differently: it is one shared record, so it is read for every ServerAdmin once any ServerAdmin marks it read (ADR 0013).
+Each recipient's copy has its own read state.
+Marking a Notification read changes no other recipient's copy.
+A playback report works differently.
+A playback report is one shared record, so once any ServerAdmin marks it read, it is read for every ServerAdmin (ADR 0013).
 
 Read state changes in two ways only:
 
 * `markNotificationsRead` marks Notifications read by their ids.
-  The client sends the ids of the rows that its page showed, from 1 to 100 of them.
+  The client sends the ids of the rows that its page showed, from 1 to 100 ids.
   The server marks only the caller's own unread Notifications among them.
-  It skips an id that does not exist, a dismissed one included, that is another Account's or that is already read, with no error, and its answer does not say which ids it skipped.
+  The server skips, with no error, an id that does not exist, including the id of a dismissed Notification.
+  The server also skips the id of another Account's Notification and the id of a Notification that is already read.
+  The server's answer does not say which ids it skipped.
   Sending the same ids again therefore changes nothing and reports nothing, as link:0026-mutation-payloads-and-error-channels.adoc[ADR 0026] requires of a naturally idempotent mutation.
-  A Notification that the page did not show is never marked by that call, so a Notification that commits after the page was read stays unread, whatever its time.
+  That call never marks a Notification that the page did not show.
+  So a Notification that commits after the page was read stays unread, whatever its time.
 * A request becomes read when it resolves, or when its stored expiry passes.
 
-Opening the list marks nothing.
-A client marks a Notification read when the reader opens it, by sending that one id.
-When the reader marks them all, the client sends the ids of every row that it shows, in more than one call when it shows more than 100.
+Opening the list marks nothing read.
+A client marks a Notification read when the reader opens that Notification, by sending that one id.
+When the reader marks all Notifications read, the client sends the ids of every row that it shows.
+When the client shows more than 100 rows, it sends the ids in more than one call.
 
-The unread count counts the caller's unread news and the caller's requests that still wait and that the caller has not marked read.
+The unread count counts two things: the caller's unread news, and the caller's waiting requests that the caller has not marked read.
 
 [[what-it-stores]]
 === What a Notification stores
@@ -221,26 +292,37 @@ The unread count counts the caller's unread news and the caller's requests that 
 A Notification stores its recipient, its kind, its form and the reference to its subject.
 It stores when it was made, when its latest event happened, and when its recipient marked it read.
 A request also stores its state, when it resolved, and when its subject expires.
-The snapshot holds the rest: the facts of the event that the line needs, such as the Profile's name, the answer to a share invitation, which side ended a share, or a scan's figures.
-The kind's row in the table below lists them.
+The snapshot holds the other facts of the event that the Notification's line needs.
+Examples are the Profile's name, the answer to a share invitation, who ended a share, and a scan's figures.
+Each kind's row in the table below lists the facts that its snapshot holds.
 
-The snapshot is what the recipient was told, and nothing reads the subject to change it.
+The snapshot is what the recipient was told.
+Nothing reads the subject to change the snapshot.
 Every name in a line comes from the snapshot.
-The sharing kinds and the Profile management kinds keep one name, the Profile's, as it was at the Notification's latest event, and the library kinds keep the library's name.
-A Profile's name is kept alone, with no picture and no kind.
+The sharing kinds and the Profile management kinds keep one name, the Profile's name as it was at the Notification's latest event.
+The library kinds keep the library's name.
+A Notification keeps the Profile's name alone, with no picture and no Kid or Adult kind.
 A Profile renamed later keeps its old name in older Notifications, for every recipient.
 
 A recipient keeps the name that it was told, whatever becomes of its relationships, until retention or a dismissal deletes the Notification.
-For the Household's side of a share, this is the one place where the Profile's name outlives the share invitation or the share.
-ADR 0024, as https://github.com/streamarr/streamarr-adr/pull/127[streamarr/streamarr-adr#127] amends it, lets that side see the Profile's name, picture and kind, and the name of the Account that sent the share invitation, only while the share invitation is pending or the share is active, and it records the kept name as its one exception.
-A Notification keeps no other name: not the name of the share invitation's sender, not the Household's, and not the name of a ProfileManager invitation's inviter.
-Each of those would outlive what ADR 0024 lets its recipient see of it.
-A client that wants them opens the subject by its reference, through the ordinary queries, which answer by the subject's own read rule and may answer that it does not exist.
+For the target Household's HouseholdAdmins, a Notification is the one place where the Profile's name outlives the share invitation or the share.
+ADR 0024, as https://github.com/streamarr/streamarr-adr/pull/127[streamarr/streamarr-adr#127] amends it, limits what those HouseholdAdmins may see.
+Those HouseholdAdmins may see the Profile's name, picture and kind, and the name of the Account that sent the share invitation, only while the share invitation is pending or the share is active.
+ADR 0024 records the name kept in a Notification as the one exception to that limit.
+A Notification keeps no other name.
+A Notification does not keep the name of the Account that sent a share invitation, the Household's name, or the name of the Account that issued a ProfileManager invitation.
+Each of those names would outlive what ADR 0024 lets the recipient see.
+A client that wants those names opens the subject by its reference, through the ordinary queries.
+Those queries answer by the subject's own read rule, and they may answer that the subject does not exist.
 
-From its snapshot, its times and its state, a Notification gives one line of text and a link target, and later an email.
-The server also writes that line in English, for a client that shows a type but handles it no further.
+The server builds a Notification's line of text and its link target from the Notification's snapshot, times and state.
+A later email uses the same facts.
+The server also writes that line in English.
+A client can show that English line for a type that it does not handle in any other way.
 Each client may word its own line from the typed fields.
-The server sends no URL: each client maps the subject's reference to its own screen, and a later email builds its link from the same reference.
+The server sends no URL.
+Each client maps the subject's reference to its own screen.
+A later email builds its link from the same reference.
 
 A Notification never carries a secret, such as an invitation code, a share code or a pairing code.
 
@@ -248,104 +330,148 @@ A Notification never carries a secret, such as an invitation code, a share code 
 === Dismissal
 
 A dismissal deletes Notifications before retention would.
-It is one general operation of the module, and a domain asks for it with an event, as it asks for a Notification to be made.
+A dismissal is one general operation of the module.
+A domain asks for a dismissal with an event, in the same way that the domain asks for a Notification to be made.
 A dismissed Notification leaves its recipient's list and unread count for good.
-It is deleted, not kept in a third state beside read and unread, so no read has to leave it out and nothing brings it back.
+The module deletes a dismissed Notification instead of keeping it in a third state beside read and unread.
+So no read has to leave the dismissed Notification out, and nothing can bring it back.
 
-A dismissal carries a selector, which selects either of these:
+A dismissal carries a selector, which selects one of these:
 
 * Notifications by id, one or more.
 * Every Notification about one or more subjects, each named by its subject reference.
 
-Either may be narrowed to one recipient, to one or more kinds, and to one form: news, or the requests that no event has resolved yet.
+Either kind of selector may be narrowed to one recipient, to one or more kinds, and to one form.
+The form is either news or the requests that no event has resolved yet.
 A selector always names ids or subjects, so no dismissal selects every Notification.
 
-The module deletes what the selector selects and asks nothing about why.
-The domain that dismisses owns the reason: it works out the selector from its own records, and it selects no more than it means to.
+The module deletes what the selector selects and does not ask why.
+The domain that asks for the dismissal owns the reason.
+That domain works out the selector from its own records and selects no more than it intends.
 
-A dismissal runs inside the transaction of the event that causes it, so it commits or rolls back with that event.
-After commit, each recipient that lost a Notification receives one live change with each dismissed id and its new unread count (see <<live-changes>>), so its open lists and its count update without a read.
+A dismissal runs inside the transaction of the event that causes the dismissal.
+So the dismissal commits or rolls back with that event.
+After commit, each recipient that lost a Notification gets one live change (see <<live-changes>>).
+The live change carries each dismissed id and the recipient's new unread count.
+So the recipient's open lists and unread count update without a new read.
 
-Its first uses:
+This decision uses dismissal in two ways:
 
 * *A request that is no longer the recipient's to decide.*
-  When an Account loses the relationship through which a waiting request reached it, the domain that owns that relationship dismisses that Account's waiting requests about the subjects concerned.
+  An Account can lose the relationship through which a waiting request reached the Account.
+  The domain that owns that relationship then dismisses that Account's waiting requests about the subjects concerned.
   Today that relationship is a HouseholdAdmin's role in a share invitation's target Household.
-  When a HouseholdAdmin loses that role, or its Account moves to another Household, the identity domain changes the role and then, in the same transaction, dismisses that Account's requests about the share invitations still pending into that Household.
-  It names those share invitations by their references and narrows the selector to that Account and to the requests that no event has resolved.
-  A request kind that later reaches an Account as a ProfileManager is dismissed the same way when that Account stops managing the Profile.
-  The module stores no audience and no side for this, because the identity domain knows which share invitations wait for that Household.
-  News that the Account was told stays, and so do its resolved requests.
-  A share invitation sent at the same moment as a demotion holds the role rows that it reads, so the two run one after the other.
-  When the demotion runs first, the share invitation reads the changed role and does not tell that Account; when the share invitation commits first, the demotion's dismissal sees the new request and deletes it.
-  A change that ends the subject itself resolves its requests instead: an invitation that the server invalidates because its invited Account became ineligible leaves that Account a withdrawn request.
+  Suppose that a HouseholdAdmin is demoted, or that the HouseholdAdmin's Account moves to another Household.
+  The identity domain changes the role.
+  In the same transaction, the identity domain then dismisses that Account's requests about the share invitations still pending into that Household.
+  The identity domain names those share invitations by their references.
+  The identity domain narrows the selector to that Account and to the requests that no event has resolved.
+  A later request kind may reach an Account because the Account is a ProfileManager.
+  Such a request is dismissed the same way when that Account stops managing the Profile.
+  The module stores no audience and no side for these dismissals, because the identity domain knows which share invitations wait for that Household.
+  The Account keeps its news and its resolved requests.
+  The operation that sends a share invitation at the same moment as a demotion locks the role rows that it reads.
+  So the share invitation and the demotion run one after the other.
+  When the demotion runs first, the operation that sends the share invitation reads the changed role and makes no request for that Account.
+  When the share invitation commits first, the demotion's dismissal finds the new request and deletes that request.
+  A change that ends the subject itself resolves the subject's requests instead of dismissing those requests.
+  For example, the server invalidates a ProfileManager invitation when its invited Account becomes ineligible.
+  The invited Account then keeps a withdrawn request.
 * *A deleted subject.*
-  Deleting a subject dismisses every Notification about it, for every recipient, in the transaction that deletes it.
-  Deleting a share dismisses the Notifications about it, and deleting a Household dismisses those about it and about the shares into it.
-  Deleting a Profile dismisses the Notifications about the Profile, its shares and its ProfileManager invitations, because nothing of a deleted Profile stays anywhere, its name in an old Notification included (ADR 0024).
-  An invitation keeps its row when its Profile is deleted (ADR 0024), and its Notifications are dismissed all the same.
+  Deleting a subject dismisses every Notification about that subject, for every recipient, in the transaction that deletes the subject.
+  Deleting a share dismisses the Notifications about the share.
+  Deleting a Household dismisses the Notifications about the Household and about the shares into the Household.
+  Deleting a Profile dismisses the Notifications about the Profile, its shares and its ProfileManager invitations.
+  Nothing of a deleted Profile stays anywhere, not even its name in an old Notification (ADR 0024).
+  A ProfileManager invitation keeps its row when its Profile is deleted (ADR 0024).
+  The invitation's Notifications are dismissed all the same.
   Removing a library dismisses the Notifications about the library.
 
 Later uses fit the same selector, and this decision builds none of them:
 
-* A person dismisses one of their own Notifications from a client: a mutation dismisses by id, narrowed to the caller as recipient.
-* A later event makes news pointless: once a library holds no unmatched items, the library domain could dismiss its _Unmatched items_ news, by the library's reference, narrowed to that kind.
-* News about one shared record, such as news to every ServerAdmin when a viewer shares a playback report (ADR 0013), could be dismissed for every ServerAdmin once one of them marks the report read, by the report's reference, narrowed to that kind.
+* A person dismisses one of their own Notifications from a client.
+  A mutation dismisses by id, narrowed to the caller as recipient.
+* A later event makes news pointless.
+  For example, once a library holds no unmatched items, the library domain could dismiss the library's _Unmatched items_ news.
+  The selector would name the library's reference and narrow to that kind.
+* News may be about one shared record, such as the news that a viewer shared a playback report (ADR 0013).
+  Every ServerAdmin would get that news.
+  Once one ServerAdmin marks the report read, the news could be dismissed for every ServerAdmin.
+  The selector would name the report's reference and narrow to that kind.
 
 === Deletion, disabling, and the end of a subject
 
 * *A subject is deleted:* its Notifications are dismissed, for every recipient (see <<dismissal>>).
-  When a share ends because its Profile or its Household is deleted, the share is deleted too, and nobody gets news.
-* *A recipient Account is deleted:* its Notifications are deleted with it, in the transaction that deletes the Account.
+  When a share ends because its Profile or its Household is deleted, the share is deleted too.
+  Nobody gets news that the share ended.
+* *A recipient Account is deleted:* the Account's Notifications are deleted in the transaction that deletes the Account.
   Nothing is pushed, because the Account's sessions end with it.
-  No other Account's Notification holds the deleted Account's name, so the deletion of the Account alone changes no other Notification.
-  A Personal Profile that is erased with its Account is a deleted Profile, and the Notifications about it are dismissed.
+  No other Account's Notification holds the deleted Account's name.
+  So deleting the Account changes no other Notification by itself.
+  A Personal Profile that is erased with its Account counts as a deleted Profile.
+  The Notifications about that Profile are dismissed.
 * *An Account is disabled:* nothing changes for its Notifications.
   The Account keeps receiving copies.
-  Its open sockets close when their access tokens expire (ADR 0042), and it cannot sign in to read them until it is enabled again (ADR 0024).
-* *An Account loses a relationship:* its news stays, and the domain that owns the relationship dismisses the requests that are no longer the Account's to decide (see <<dismissal>>).
+  The Account's open sockets close when their access tokens expire (ADR 0042).
+  The Account cannot sign in to read its Notifications until it is enabled again (ADR 0024).
+* *An Account loses a relationship:* the Account keeps its news.
+  The domain that owns the relationship dismisses the requests that are no longer the Account's to decide (see <<dismissal>>).
 * *A share invitation is canceled, replaced or invalidated:* its requests resolve as withdrawn.
-  The Profile's side gets no news, because its own side or the server withdrew the share invitation.
-* *A share invitation expires:* its requests read as expired from their stored expiry, and nobody gets news.
-  The identity domain resolves them as expired when the expiry sweep stores the share invitation's expiry, and that resolution is pushed (see <<live-changes>>).
-* *A share ends:* a side that did not end it gets news, as the sharing kinds below set out.
+  Nobody on the Profile's side gets news, because someone on the Profile's side or the server withdrew the share invitation.
+* *A share invitation expires:* the share invitation's requests read as expired from their stored expiry.
+  Nobody gets news.
+  When the expiry sweep stores the share invitation's expiry, the identity domain resolves the requests as expired.
+  The module pushes that resolution (see <<live-changes>>).
+* *A share ends:* who gets news depends on who ended the share, as <<sharing-kinds>> sets out.
 
 [[retention]]
 === Retention
 
 The server keeps 90 days of history by default.
-History is the news that its recipient read and the requests that resolved, a request that reads as expired from its stored expiry included.
+History means read news and resolved requests.
+A request that reads as expired from its stored expiry counts as resolved here.
 The server deletes such a Notification once its latest event is older than the retention period.
 
 Unread news and waiting requests stay.
-News stays until it is read, and unread news stays few, because the noise rule allows one unread news for each kind and subject.
-Every request built now waits for a subject that expires, so every waiting request becomes history, even one whose resolution was never published.
+News stays until it is read.
+Unread news stays few, because the noise rule allows one unread news Notification for each kind and subject.
+Every request kind built now waits for a subject that expires.
+So every waiting request becomes history in the end, even a request whose resolution was never published.
 
-A recurring scheduled task deletes old history once a day, under the system actor, a batch at a time.
+A scheduled task deletes old history once a day, a batch at a time.
+The task runs as the System actor.
 Each delete states the conditions of history and age in its `WHERE`.
-History never stops being history: read news is never updated in place, and a request that reads as resolved never reads as waiting again.
-The task therefore takes no lock and reads nothing beyond its own rows, and two servers that run it together delete each row once.
+History never stops being history.
+Read news is never updated in place, and a request that reads as resolved never reads as waiting again.
+So the task takes no lock and reads nothing beyond its own rows.
+Two servers that run the task at the same time still delete each row once.
 
 The retention period is a server-wide setting.
-A ServerAdmin reads and changes it within the bounds that the setting reports, as with the idle segment retention setting.
+A ServerAdmin reads and changes the retention period within the bounds that the setting reports.
+The idle segment retention setting works the same way.
 
 === Who may use Notifications
 
 The server serves Notifications to every Account session that is not device-bound.
-The session may be Account-scoped or Profile-scoped, with or without a selected Profile, and may use any Household that the Account may use (ADR 0024).
-Each session reads only the Notifications of its own Account, and nothing else decides what it reads.
-The web client is the only client that shows them now.
+The session may be Account-scoped or Profile-scoped, with or without a selected Profile.
+The session may use any Household that the Account may use (ADR 0024).
+Each session reads only its own Account's Notifications.
+Nothing else decides what the session reads.
+The web client is the only client that shows Notifications now.
 
 A web session is the Account's own sign-in.
-Whichever Profile it selects, a Kid Profile on a shared computer included, it acts with the Account's authority, which never comes from the selected Profile (ADR 0024).
-Its Notifications show what was told to that Account and nothing else.
+A web session acts with the Account's authority, whichever Profile it selects, a Kid Profile on a shared computer included.
+That authority never comes from the selected Profile (ADR 0024).
+The web session's Notifications show what that Account was told and nothing else.
 
-Device-bound sessions receive none.
-A Cedar guardrail forbids every Notification action to a session that carries a registration id, as ADR 0025 forbids such sessions every administration action.
-A shared TV runs on the session of the Account that linked it while other people use it, so Notifications on it would show everyone in the room what was told to one Account.
+Device-bound sessions get no Notifications.
+A Cedar guardrail forbids every Notification action to a session that carries a registration id.
+ADR 0025 forbids such sessions every administration action in the same way.
+A shared TV runs on the session of the Account that linked the TV, while other people use the TV.
+Notifications on the TV would show everyone in the room what one Account was told.
 This rule is about the session, not about a relationship.
 
-No query reads another Account's Notifications, and that includes a ServerAdmin's queries.
+No query reads another Account's Notifications, not even a ServerAdmin's query.
 A ServerAdmin sees the subjects themselves.
 
 === The kinds
@@ -375,10 +501,10 @@ A ServerAdmin sees the subjects themselves.
 | Share ended
 | First build
 | News
-| The side that did not end the share, or both sides when a ServerAdmin or another operation ended it
+| Everyone on the side opposite whoever ended the share, or everyone on both sides when a ServerAdmin ended the share or the server ended the share as part of another change
 | The share: the same `ProfileShare` after it was active
-| Which side ended it, and the Profile's name when it ended
-| `endProfileShare`, `administrativelyEndProfileShare`, and the operations that end a share on their way, such as an Account transfer
+| Who ended the share, by role and never by name, and the Profile's name when the share ended
+| `endProfileShare`, `administrativelyEndProfileShare`, and the operations that end a share as part of another change, such as an Account transfer
 | Never updates, because a share ends once
 
 | Invitation received
@@ -395,7 +521,7 @@ A ServerAdmin sees the subjects themselves.
 | News
 | The Account that issued the invitation
 | The ProfileManager invitation
-| The answer, accepted or declined, and the Profile's name when it was answered
+| The answer, accepted or declined, and the Profile's name when the invitation was answered
 | The invited Account accepts or declines
 | Never updates, because an invitation has one answer
 
@@ -406,16 +532,16 @@ A ServerAdmin sees the subjects themselves.
 | The Profile
 | The Profile's name at the removal
 | `removeProfileManager` and `administrativelyRemoveProfileManager`, never an Account that relinquishes its own management
-| A later removal while it is unread replaces its time and the Profile's name
+| A later removal while the Notification is unread replaces its time and the Profile's name
 
 | Scan or refresh finished
 | Specified only
 | News
 | Every ServerAdmin
 | The library
-| The library's name and the figures of the scans and refreshes that it tells of
+| The library's name and the figures of the scans and refreshes that the Notification reports
 | A scan or a refresh of the library finishes, and at least one of its figures is above zero
-| A later such scan or refresh adds its figures to the unread one's and replaces its time and the library's name
+| A later such scan or refresh adds its figures to those of the unread Notification and replaces its time and the library's name
 
 | Unmatched items
 | Specified only
@@ -430,122 +556,165 @@ A ServerAdmin sees the subjects themselves.
 [[sharing-kinds]]
 ==== The sharing kinds
 
-A share invitation becomes the share when it is accepted: one `ProfileShare` goes from pending to active to ended (ADR 0024).
-That one record is the subject of all three sharing kinds, and each of them stores the share's id as its subject's reference.
+A share invitation becomes the share when someone accepts the share invitation.
+One `ProfileShare` record goes from pending to active to ended (ADR 0024).
+That one record is the subject of all three sharing kinds.
+Each sharing kind stores the share's id as the reference to its subject.
 
-A share has two sides, and the identity domain works out each from the relationships as they stand at the event:
+A share has two sides.
+The identity domain works out who is on each side from the relationships as they are at the event:
 
-* The Profile's side: the Profile's ProfileManagers, direct and derived, and the Account that sent the share invitation, which the share records, while that Account may still read the share.
+* The Profile's side is the Profile's ProfileManagers, direct and derived, and the Account that sent the share invitation.
+  The share records which Account sent the share invitation.
+  That Account is on the Profile's side only while it may still read the share.
   The Account of a self-managed Personal Profile is one of the managers.
-  The Account that sent the share invitation need not manage the Profile: a ServerAdmin may send a share invitation for any Profile, and an Account invitation sends its automatic share invitation for a restricted Profile in the name of the Account invitation's issuer, a ServerAdmin.
-  An Account that sent the share invitation and has since stopped managing the Profile, and is not a ServerAdmin, may no longer read the share (ADR 0024), so it is not on the Profile's side.
-* The Household's side: the target Household's HouseholdAdmins.
+  The Account that sent the share invitation need not manage the Profile.
+  A ServerAdmin may send a share invitation for any Profile.
+  An Account invitation can also send an automatic share invitation for a restricted Profile.
+  That automatic share invitation goes out in the name of the ServerAdmin who issued the Account invitation.
+  Suppose that the Account that sent the share invitation has since stopped managing the Profile and is not a ServerAdmin.
+  That Account may no longer read the share (ADR 0024), so that Account is not on the Profile's side.
+* The Household's side is the target Household's HouseholdAdmins.
+  This ADR also calls them the Household's admins.
 
-An Account can stand on both sides, and it still receives one copy.
-The snapshot is the same for both sides, so the copy needs to record no side.
+An Account can be on both sides, and that Account still gets one copy.
+The snapshot is the same for both sides, so the copy does not need to record a side.
 
 _Share invitation waiting_ (`ProfileShareOfferedNotification`, a request).
-Every share invitation makes one for each HouseholdAdmin of the target Household, except the Account that sent the share invitation.
-They may see the Profile's name while the share invitation is pending (ADR 0024).
-A share invitation that replaces an older one withdraws the older share invitation's requests and makes new ones.
-A ServerAdmin may decide any share invitation, but a ServerAdmin receives no request for it.
+Every share invitation makes a request for each HouseholdAdmin of the target Household, except the Account that sent the share invitation.
+Those HouseholdAdmins may see the Profile's name while the share invitation is pending (ADR 0024).
+A share invitation that replaces an older share invitation withdraws the older share invitation's requests and makes new requests.
+A ServerAdmin may decide any share invitation, but ServerAdmin authority alone brings no request.
 
 The first build follows https://github.com/streamarr/streamarr-server/issues/870[streamarr/streamarr-server#870].
-With it, every ordinary share invitation spends a share code that the target Household issued, and the automatic share invitations that an Account invitation sends go only to Households that already host the Profile (streamarr/streamarr-adr#127).
-Each request in a Household's list then answers a code that the Household handed out.
-Without share codes, any ProfileManager could fill another Household's lists by sending share invitations and canceling them again and again, because each replacement is a new share invitation with new requests.
+With streamarr/streamarr-server#870, every ordinary share invitation spends a share code that the target Household issued.
+The automatic share invitations that an Account invitation sends go only to Households where the Profile is already shared (streamarr/streamarr-adr#127).
+So each request that a HouseholdAdmin gets is for a share invitation sent with a share code that the HouseholdAdmin's Household issued.
+Without share codes, any ProfileManager could fill the lists of another Household's admins with requests.
+The ProfileManager would only need to send share invitations and cancel them again and again, because each replacement is a new share invitation with new requests.
 
 _Share invitation answered_ (`ProfileShareAnsweredNotification`, news).
-When a HouseholdAdmin or a ServerAdmin accepts or rejects a share invitation, each Account on the Profile's side gets one, except the Account that answered.
-The Account that sent the share invitation is always on the Profile's side at that moment, because a share invitation whose sender loses management or ServerAdmin authority is invalidated while it is pending (ADR 0024).
+When a HouseholdAdmin or a ServerAdmin accepts or rejects a share invitation, everyone on the Profile's side gets a Notification.
+The admin who answered doesn't get one.
+The Account that sent the share invitation is always on the Profile's side at that moment.
+If the sender loses management or ServerAdmin authority while the share invitation is pending, the server invalidates the share invitation (ADR 0024).
 
 _Share ended_ (`ProfileShareEndedNotification`, news).
-Who ended the share decides who is told:
+Who gets a Notification depends on who ended the share:
 
-* When a HouseholdAdmin of the Household ends the share, the Household's side ended it, and the Profile's side is told.
-  An Account that both administers the Household and manages the Profile ends the share for the Household's side.
-* When any other ProfileManager of the Profile ends the share, the Profile's own Account included, the Profile's side ended it, and the Household's side is told.
-* When a ServerAdmin ends the share with `administrativelyEndProfileShare`, or another operation ends it on its way, both sides are told.
-  Such operations include an Account transfer that ends the share into the previous Household, and connecting a Profile to an Account, which ends the Profile's other shares (ADR 0024).
-* The Account that acted is never told.
+* If an admin of the target Household ends the share, everyone on the Profile's side gets a Notification.
+  Someone who is both an admin of that Household and a manager of the Profile counts as the Household's admin here.
+* If a manager of the Profile ends the share, including the Profile's own Account, the Household's admins get a Notification.
+* If a ServerAdmin ends the share with `administrativelyEndProfileShare`, or the server ends the share as part of another change, everyone on both sides gets a Notification.
+  One such change is an Account transfer, which ends the share into the previous Household.
+  Another is connecting a Profile to an Account, which ends the Profile's other shares (ADR 0024).
+* Whoever ended the share doesn't get a Notification.
 
-The Household's side is told at the moment that it receives the change that ends the share, its last change of that share (ADR 0024, ADR 0042).
-It keeps its _Share ended_ news and its resolved _Share invitation waiting_ requests after the share invitation or the share is over, and after it stops administering the Household, because they are what it was told.
-The share queries still answer it as if the share did not exist (ADR 0024).
-A Notification shows it nothing of the share but its own snapshot: the Profile's name, the answer or which side ended the share, and the times.
+The Household's admins get their _Share ended_ Notification at the same moment as the live change that reports the end of the share.
+That live change is the last change of the share that the Household's admins receive (ADR 0024, ADR 0042).
+A HouseholdAdmin keeps their _Share ended_ news and their resolved _Share invitation waiting_ requests after the share invitation or the share is over.
+The HouseholdAdmin also keeps those Notifications after no longer administering the Household, because those Notifications are what the HouseholdAdmin was told.
+The share queries still answer that HouseholdAdmin as if the share did not exist (ADR 0024).
+A Notification shows that HouseholdAdmin nothing of the share except what the Notification itself stores: the Profile's name, the answer or who ended the share, and the times.
 
 ==== The Profile management kinds
 
 These kinds arrive with the screens for ProfileManager invitations.
-Their subject is one ProfileManager invitation, or the Profile for _Management removed_, and they reach the live schema when Profile management is built.
+The subject of these kinds is one ProfileManager invitation, except for _Management removed_, whose subject is the Profile.
+These kinds join the live schema when Profile management is built.
 
 _Invitation received_ (`ProfileManagerInvitationReceivedNotification`, a request).
-Issuing an invitation makes one for the Account that it invites, when that Account may accept it.
-An invitation that nobody can accept, because no Account has its address, or because the Account that has it is not eligible or already manages the Profile, makes no request (ADR 0024).
-A newer invitation to the same address for the same Profile replaces the older one: replacement goes by the address that the inviter typed, never by the Account (ADR 0024).
-The older request then resolves as withdrawn, and the newer invitation makes a new request.
-Two invitations sent to two addresses can therefore wait for one Account, for example after the Account changed its email.
-Each has its own request, and neither withdraws the other.
-When the Account accepts one of them, or becomes or stops being one of the Profile's ProfileManagers by any other route, the server invalidates the other (ADR 0024), and its request resolves as withdrawn.
+Issuing a ProfileManager invitation makes a request for the Account that the invitation invites, when that Account may accept the invitation.
+Nobody can accept an invitation when no Account has its address, or when the Account with that address is ineligible or already manages the Profile.
+Such an invitation makes no request (ADR 0024).
+A newer invitation to the same address for the same Profile replaces the older invitation.
+Replacement goes by the address that the inviter typed, never by the Account (ADR 0024).
+The older invitation's request then resolves as withdrawn, and the newer invitation makes a new request.
+So two invitations sent to two addresses can wait for one Account, for example after the Account changed its email address.
+Each invitation has its own request, and neither invitation withdraws the other.
+The Account may accept one of the two invitations, or become or stop being a ProfileManager of the Profile in some other way.
+The server then invalidates the other invitation (ADR 0024), and the other invitation's request resolves as withdrawn.
 The Notification never carries the invitation's code.
-The request opens the page where the invited Account accepts or declines, and that page needs no code, because the invitation already names the Account that may decide (ADR 0024).
-The link that carries the code is a second route to the same page, for an inviter who wants to send one.
+The request opens the page where the invited Account accepts or declines.
+That page needs no code, because the invitation already names the Account that may decide (ADR 0024).
+The link that carries the code is a second way to reach the same page.
+An inviter may choose to send that link.
 
 _Invitation answered_ (`ProfileManagerInvitationAnsweredNotification`, news).
-When the invited Account accepts or declines, the Account that issued the invitation gets one.
-That Account still manages the Profile at that moment, because an invitation whose inviter loses management is invalidated while it is pending (ADR 0024).
+When the invited Account accepts or declines, the Account that issued the invitation gets a Notification.
+The Account that issued the invitation still manages the Profile at that moment.
+If the inviter loses management while the invitation is pending, the server invalidates the invitation (ADR 0024).
 
 _Management removed_ (`ProfileManagementRemovedNotification`, news).
-When the Profile's own Account or a ServerAdmin removes a direct manager, the removed Account gets one.
-An Account that relinquishes its own management gets none, because it acted itself.
-The removed Account may no longer see the Profile, and it is told the name that it saw until the removal.
-A removed Account can accept a new ProfileManager invitation and be granted management again, so it can lose management of one Profile more than once.
-The noise rule holds for this kind as for any news: an Account has at most one unread Notification about the removal of its management of one Profile.
-A removal while that Notification is unread replaces its time and the Profile's name with the new removal's, and it stays unread.
-Once the Account has read it, whether or not retention has deleted it since, a later removal makes a new one.
+When the Profile's own Account or a ServerAdmin removes a direct manager, the removed Account gets a Notification.
+An Account that relinquishes its own management gets no Notification, because that Account acted itself.
+The removed Account may no longer see the Profile.
+The Notification gives the Profile's name as the removed Account saw it until the removal.
+A removed Account can accept a new ProfileManager invitation and be granted management again.
+So an Account can lose management of one Profile more than once.
+The noise rule holds for this kind as for any news.
+An Account has at most one unread Notification about losing management of one Profile.
+A removal while that Notification is unread replaces the Notification's time and the Profile's name with the new removal's.
+The Notification stays unread.
+Once the Account has read that Notification, a later removal makes a new Notification, whether or not retention has since deleted the read Notification.
 
-An invitation keeps its row when its Profile, its inviter or its invited Account is deleted (ADR 0024).
+A ProfileManager invitation keeps its row when its Profile, its inviter or its invited Account is deleted (ADR 0024).
 Deleting the Profile dismisses the invitation's Notifications.
-Deleting the inviter or the invited Account deletes that Account's own Notifications as a recipient, and no other Notification holds its name.
+Deleting the inviter or the invited Account deletes the Notifications that the deleted Account received.
+No other Notification holds the deleted Account's name.
 
 [[library-kinds]]
 ==== The library kinds, which are specified only
 
 These two kinds show that the model is not shaped around sharing alone.
-They are not in the live schema, and a later decision builds them.
-Only a ServerAdmin can scan, refresh or fix a match, so they go to every Account that is a ServerAdmin when the operation finishes.
+These two kinds are not in the live schema.
+A later decision builds the library kinds.
+Only a ServerAdmin can scan, refresh or fix a match.
+So the library kinds go to every Account that is a ServerAdmin when the operation finishes.
 
 Both kinds take the library as their subject.
-The noise rule counts each kind on its own, so a ServerAdmin can have one unread Notification of each kind about one library, and neither replaces the other.
-The unmatched kind opens its library under the `unmatched` filter.
+The noise rule counts each kind on its own.
+So a ServerAdmin can have one unread Notification of each kind about one library, and neither Notification replaces the other.
+An _Unmatched items_ Notification opens its library under the `unmatched` filter.
 
-`ScanEndedEvent` and `RefreshEndedEvent` carry only the library's id, and the server publishes them for every conclusion.
-The decision that builds these kinds adds the library operation's id to them, and the library domain reads the conclusion and the figures from that library operation to build the snapshot.
+`ScanEndedEvent` and `RefreshEndedEvent` carry only the library's id.
+The server publishes both events for every conclusion.
+The decision that builds these kinds adds the library operation's id to both events.
+The library domain then reads the conclusion and the figures from that library operation to build the snapshot.
 
 _Scan or refresh finished_ (news).
-A scan or a refresh whose conclusion is finished (ADR 0027) makes one for every ServerAdmin, when at least one of its figures is above zero.
-A stopped or failed scan or refresh makes none, and so does one that changed nothing, so a daily scan of a quiet library says nothing.
-The end of a scan is nobody's action, so the ServerAdmin who started the scan is told too.
-The figures include the titles it added and removed and the files it skipped; the decision that builds the kind fixes the exact figures.
-A later such scan or refresh of the same library adds its figures to the unread Notification's.
-The line therefore counts everything since the ServerAdmin last read it, and a smaller scan overwrites nothing.
+A scan or a refresh whose conclusion is finished (ADR 0027) makes a Notification for every ServerAdmin, when at least one of its figures is above zero.
+A stopped or failed scan or refresh makes no Notification.
+A scan or a refresh that changed nothing makes no Notification either.
+So a daily scan of a library where nothing changed makes no Notification.
+The end of a scan is nobody's action, so the ServerAdmin who started the scan also gets a Notification.
+The figures include the titles that the scan or refresh added and removed, and the files that it skipped.
+The decision that builds the kind fixes the exact figures.
+A later such scan or refresh of the same library adds its figures to those in the unread Notification.
+So the line counts everything since the ServerAdmin last read such a Notification about the library.
+A smaller scan overwrites nothing.
 
 _Unmatched items_ (news).
-A finished scan that added items it could not match makes one for every ServerAdmin.
-Its snapshot holds how many unmatched items the library held when the scan finished, as in "Movies: 14 titles need matching".
-Fixing a match changes nothing stored: the line says what the ServerAdmin was told after the scan, and the library's `unmatched` filter counts the items now.
-A later scan that adds unmatched items replaces the number in the unread Notification and moves it to the top.
-A scan that adds none changes nothing, so a ServerAdmin who keeps some items unmatched on purpose is not told again.
-There is one per library, never one per item.
+A finished scan that added items it could not match makes a Notification for every ServerAdmin.
+The snapshot holds how many unmatched items the library held when the scan finished, as in "Movies: 14 titles need matching".
+Fixing a match changes nothing that the Notification stores.
+The line says what the ServerAdmin was told after the scan, and the library's `unmatched` filter counts the items now.
+A later scan that adds unmatched items replaces the number in the unread Notification and moves that Notification to the top.
+A scan that adds no unmatched items changes nothing.
+So a ServerAdmin who keeps some items unmatched on purpose gets no new Notification.
+There is one such Notification per library, never one per item.
 
 *Why unmatched items are news, not a request:* an unmatched item can be the right state, such as a file that no provider knows.
-Nobody waits for it, and no single decision settles a library's unmatched items.
+Nobody waits for an unmatched item.
+No single decision settles a library's unmatched items.
 As a request, the Notification would never resolve, or it would ask again after every scan.
 
 === The GraphQL contract
 
-One interface fits every kind, and a second interface marks the requests, in the same way that `InputMutationError` extends `MutationError` (ADR 0026).
-Each kind that the server sends has its own concrete type, which holds the kind's snapshot and its subject's id.
+One interface fits every kind.
+A second interface marks the requests, in the same way that `InputMutationError` extends `MutationError` (ADR 0026).
+Each kind that the server sends has its own concrete type.
+That type holds the kind's snapshot and the subject's id.
 
 [source,graphql]
 ----
@@ -556,8 +725,8 @@ concrete type names the kind and holds what the Account was told and the subject
 interface Notification {
     id: ID!
     """
-    The Notification's line, in English, for a client that shows this type but handles it no
-    further. A client may word its own line from the typed fields. Never parse this one.
+    The Notification's line, in English, for a client that does not handle this type in any other
+    way. A client may word its own line from the typed fields. Never parse this line.
     """
     message: String!
     "When the first event made the Notification, as an ISO-8601 instant."
@@ -572,10 +741,10 @@ interface Notification {
 }
 
 """
-A Notification that waits for a decision on its subject. Its state is stored on it, and the
-subject's events write it. Once expiresAt has passed, an unresolved request reads as EXPIRED.
-A decision or a withdrawal made before expiresAt that arrives after it still replaces EXPIRED,
-and the change is pushed.
+A Notification that waits for a decision on its subject. The request stores its own state, and
+the subject's events write that state. Once expiresAt has passed, an unresolved request reads as
+EXPIRED. A decision or a withdrawal made before expiresAt still replaces EXPIRED when it arrives
+after expiresAt, and the change is pushed.
 """
 interface RequestNotification implements Notification {
     id: ID!
@@ -608,14 +777,14 @@ The first build has three concrete types:
 """
 A share invitation for a Profile was sent to the Household that the recipient administered.
 Recipients: the Household's HouseholdAdmins when the share invitation was sent, except the
-Account that sent it.
+Account that sent the share invitation.
 """
 type ProfileShareOfferedNotification implements RequestNotification & Notification {
     # ...the fields of RequestNotification...
     """
-    The id of the share invitation's ProfileShare, for the share queries. They answer by the
-    share's own read rule, so once the share invitation is over they answer the Household's
-    HouseholdAdmins that it does not exist.
+    The id of the share invitation's ProfileShare, for the share queries. The share queries answer
+    by the share's own read rule. Once the share invitation is over, the share queries tell the
+    Household's HouseholdAdmins that the share does not exist.
     """
     shareId: ID!
     "The Profile's name when the share invitation was sent. A later rename does not change it."
@@ -628,9 +797,9 @@ type ProfileShareOfferedNotification implements RequestNotification & Notificati
 }
 
 """
-A Household accepted or rejected a share invitation for a Profile on whose side the recipient
-stood. Recipients: the Profile's side when the share invitation was answered, except the Account
-that answered. Its latestEventAt is when the share invitation was answered.
+A HouseholdAdmin or a ServerAdmin accepted or rejected a share invitation, and the recipient is on
+the Profile's side. Recipients: everyone on the Profile's side when the share invitation was
+answered, except the admin who answered. Its latestEventAt is when the share invitation was answered.
 """
 type ProfileShareAnsweredNotification implements Notification {
     # ...the fields of Notification...
@@ -647,14 +816,15 @@ enum ProfileShareAnswer {
 }
 
 """
-An active share ended, and the recipient stood on a side that did not end it, or on either side
-when a ServerAdmin or another operation ended it. Its latestEventAt is when the share ended.
+An active share ended. Recipients: everyone on the side opposite whoever ended the share, or
+both sides when a ServerAdmin or the server ended the share. Whoever ended the share is never a
+recipient. Its latestEventAt is when the share ended.
 """
 type ProfileShareEndedNotification implements Notification {
     # ...the fields of Notification...
     """
-    The id of the ProfileShare, for the share queries. They answer the Household's
-    HouseholdAdmins that it does not exist.
+    The id of the ProfileShare, for the share queries. The share queries tell the Household's
+    HouseholdAdmins that the share does not exist.
     """
     shareId: ID!
     "The Profile's name when the share ended. A later rename does not change it."
@@ -663,11 +833,11 @@ type ProfileShareEndedNotification implements Notification {
 }
 
 enum ProfileShareEndedBy {
-    "A ProfileManager of the Profile ended the share. The Profile's own Account counts as one."
+    "A ProfileManager of the Profile ended the share. The Profile's own Account counts as a ProfileManager here."
     OFFERING_SIDE
     "A HouseholdAdmin of the Household ended the share."
     HOUSEHOLD_SIDE
-    "A ServerAdmin ended the share, or another operation ended it, such as an Account transfer."
+    "A ServerAdmin ended the share, or the server ended the share as part of another change, such as an Account transfer."
     SERVER
 }
 ----
@@ -734,13 +904,13 @@ union MarkNotificationsReadError = NotificationIdCountOutOfRangeError | InvalidI
 
 extend type Subscription {
     """
-    The signed-in Account's Notifications changed: one was made or updated in place, a request
-    resolved, some were marked read, or some were dismissed. An expiry arrives when the subject's
-    domain stores it, within about a minute of the request's expiresAt, and the request already
-    reads as EXPIRED from expiresAt on. A deletion by retention is not pushed. The Account comes
-    from the access token that opened the socket, and no argument names it. The same access as
-    notifications, decided once when the field opens. Every open socket of the Account receives
-    the change, including the socket of the client that made it.
+    The signed-in Account's Notifications changed: a Notification was made or updated in place, a
+    request resolved, some Notifications were marked read, or some were dismissed. An expiry arrives
+    when the subject's domain stores the expiry, within about a minute of the request's expiresAt.
+    The request already reads as EXPIRED from expiresAt on. A deletion by retention is not pushed.
+    The Account comes from the access token that opened the socket, and no argument names the
+    Account. The same access as notifications, decided once when the field opens. Every open socket
+    of the Account receives the change, including the socket of the client that made the change.
     """
     notificationsChanged: NotificationsChange
 }
@@ -757,8 +927,8 @@ type NotificationChange {
     notificationId: ID!
     """
     The same edge that the notifications query returns, or null when the Notification was
-    dismissed and no longer exists. Remove it from the list and the cache only for a null edge with
-    no error at this change's path.
+    dismissed and no longer exists. Remove the Notification from the list and the cache only for a
+    null edge with no error at this change's path.
     """
     edge: NotificationEdge
 }
@@ -785,27 +955,36 @@ union ChangeNotificationRetentionError = NotificationRetentionOutOfRangeError
 ----
 
 * `NotificationIdCountOutOfRangeError` and `NotificationRetentionOutOfRangeError` join the shared error types (ADR 0026).
-  `NotificationIdCountOutOfRangeError` is an `InputMutationError`: `markNotificationsRead` returns it, and marks nothing, when it receives no id or more than 100.
+  `NotificationIdCountOutOfRangeError` is an `InputMutationError`.
+  `markNotificationsRead` returns that error, and marks nothing, when it receives no id or more than 100 ids.
   An id that the server cannot decode is an `InvalidIdError` at that id's `inputPath`, and the call marks nothing.
-  `markNotificationsRead` has no not-found error: an id that does not exist and another Account's Notification are skipped alike, so its answer tells the caller nothing about another Account's Notifications.
+  `markNotificationsRead` has no not-found error.
+  The mutation skips an id that does not exist and the id of another Account's Notification alike.
+  So the mutation's answer tells the caller nothing about another Account's Notifications.
 * A concrete type carries its subject's id, never the subject.
-  `shareId` is the id of a `ProfileShare`, in the same encoding as `ProfileShare.id`, so a client opens the share through the share queries and its cache meets the share under its own identity.
-  The share queries may answer that the share does not exist, and a client then shows the Notification's own line and nothing more.
-* ADR 0042 requires a selected Profile for every subscription field except Library status, and the active streams of ADR 0013 need a ServerAdmin.
+  `shareId` is the id of a `ProfileShare`, in the same encoding as `ProfileShare.id`.
+  So a client opens the share through the share queries, and the client's cache finds the share under the share's own identity.
+  The share queries may answer that the share does not exist.
+  The client then shows the Notification's own line and nothing more.
+* ADR 0042 requires a selected Profile for every subscription field except Library status.
+  The active streams of ADR 0013 need a ServerAdmin.
   This decision amends ADR 0042: `notificationsChanged` needs an Account session that is not device-bound, with or without a selected Profile, because Notifications belong to their recipient Account.
-  ADR 0042 also records the other such exception, the share changes of streamarr-server#871.
+  ADR 0042 also records the other such exception, the share changes of streamarr/streamarr-server#871.
 * Every concrete type exists only for a kind that the server sends.
   The three sharing types are the first build.
   The three Profile management types join the schema with Profile management.
-  The library kinds are specified only, live in this ADR alone, and have no type in the schema.
-* A new concrete type is an addition to the schema, but a deployed client cannot match a type that its generated `possibleTypes` lack.
-  As for union members in ADR 0026, clients that know a new kind ship before the server sends it.
-* A Notification keeps its id and its concrete type for its whole life, because only an event of its own kind updates it in place.
-  A client's normalized cache therefore updates the one entry, and the changed edge moves it in the list.
+  The library kinds are specified only.
+  The library kinds exist in this ADR alone and have no type in the schema.
+* A new concrete type is an addition to the schema.
+  But a deployed client cannot match a type that its generated `possibleTypes` lack.
+  So clients that know a new kind are released before the server sends that kind, in the client-first order that ADR 0026 sets for union members.
+* A Notification keeps its id and its concrete type for its whole life, because only an event of its own kind updates the Notification in place.
+  So a client's normalized cache updates the one entry, and the changed edge moves the Notification in the list.
 * The list's order and paging are the server's shared ones (see <<order-and-paging>>).
   An update in place moves a Notification to the top of the list, as a newer last watched moves an item in Continue Watching.
 * Clients keep the list in their normalized cache (link:0048-clients-keep-live-lists-in-their-normalized-cache.adoc[ADR 0048]).
-  The list is one list per Account; a Profile or Household switch resets the client's store as ADR 0042 requires, and the client reads the list again.
+  Each Account has one list.
+  A Profile or Household switch resets the client's store as ADR 0042 requires, and the client reads the list again.
 
 [[live-changes]]
 === Live changes
@@ -814,126 +993,186 @@ union ChangeNotificationRetentionError = NotificationRetentionOutOfRangeError
 
 * a Notification is made or updated in place;
 * a request resolves;
-* a recipient marks Notifications read: a call that changes at least one row pushes one change, with each row that it marked, and a call that changes nothing pushes none;
-* Notifications are dismissed: each recipient that lost at least one receives one change, with a null edge for each.
+* a recipient marks Notifications read.
+  A call that changes at least one row pushes one change, with each row that the call marked.
+  A call that changes nothing pushes no change;
+* Notifications are dismissed.
+  Each recipient that lost at least one Notification gets one change, with a null edge for each dismissed Notification.
 
-The module pushes after commit, from the rows that the transaction wrote, and a transaction that rolls back pushes nothing.
+The module pushes after commit, from the rows that the transaction wrote.
+A transaction that rolls back pushes nothing.
 
 Every write of a share goes through `ProfileShareLifecycle`, which publishes a `ProfileShareChangedEvent` for each share that the write changes.
-The identity domain hears that event inside the transaction and publishes the Notifications to make and the requests to resolve, and the live updates of shares hear it too.
-These names come from the work for streamarr-server#871.
-The event covers the operations on a share invitation and a share themselves.
-It also covers the operations that change shares on their way, such as connecting a Profile to an Account, disabling an Account, revoking ServerAdmin authority, deleting or transferring an Account or a Profile, and relinquishing management.
+The identity domain hears that event inside the transaction.
+The identity domain then publishes the Notifications to make and the requests to resolve.
+The live updates of shares hear `ProfileShareChangedEvent` too.
+These names come from the work for streamarr/streamarr-server#871.
+The event covers the operations on a share invitation or a share.
+The event also covers the operations that change shares as part of another change.
+Examples are connecting a Profile to an Account, disabling an Account, revoking ServerAdmin authority, deleting or transferring an Account or a Profile, and relinquishing management.
 
-It covers expiry too.
+The event covers expiry too.
 `ProfileShareExpirySweeper` runs once a minute by default.
-It stores `EXPIRED` on each pending share invitation whose expiry time has passed, through `ProfileShareLifecycle`, so each expiry arrives as the same event as every other change.
-The identity domain then resolves the share invitation's requests as expired, and `notificationsChanged` announces it like any other resolution.
-The request already reads as expired from its stored expiry, so the sweep changes only when an open client learns of it.
-A later request kind brings the same rule for its own subject, its expiry included.
+The sweeper stores `EXPIRED` on each pending share invitation whose expiry time has passed.
+The sweeper writes through `ProfileShareLifecycle`, so each expiry arrives as the same event as every other change.
+The identity domain then resolves the share invitation's requests as expired.
+`notificationsChanged` pushes that resolution like any other resolution.
+The request already reads as expired from its stored expiry.
+So the sweep changes only the moment when an open client learns of the expiry.
+A later request kind brings the same rule for its own subject, including the subject's expiry.
 
 Two deletions are not pushed:
 
 * A deletion by retention, which deletes only history and changes no unread count.
-* A deletion with its recipient Account.
+* A deletion together with the recipient Account.
 
-An open list drops such Notifications when it is read again.
+An open list drops such Notifications when the client reads the list again.
 
-=== How the server builds it from what it has
+=== How the server builds Notifications from the parts that it already has
 
 The first build adds the module's own table and events, and no other mechanism.
-It uses the parts that the server already has:
+The first build uses the parts that the server already has:
 
-* *The module's inputs:* four kinds of application event (ADR 0010), which any domain may publish inside its transaction, and which the module hears inside that transaction:
-** _tell_, with a kind, a subject reference, the recipients, the snapshot and the event's time, and for a request its subject's expiry, which every request kind built now gives;
-** _resolve_, with a request kind, a subject reference, the resolution, the answer when the subject was decided, and the instant of the subject's change;
-** _dismiss_, with a selector (see <<dismissal>>);
-** _recipient deleted_, with the Account that its domain deletes.
-* *Where they live:* the four events, and one record type for each kind's snapshot, live in the shared events package below the domains, as ADR 0010 places the library events.
-  The domains depend on them, and the module depends on no domain.
-  Unlike ADR 0010's library events, which carry only ids and are heard after commit, these carry the snapshot and are heard inside the publisher's transaction.
-  The snapshot is what the module may not read for itself, and a Notification must commit or roll back with its event.
-* *Publishing:* each domain turns its own events into the module's.
-  For shares, the identity domain hears `ProfileShareChangedEvent` inside the transaction, works out the recipients from the relationship rows that it holds, leaves out the Account that acted, builds the snapshot, and publishes _tell_, with the share invitation's expiry for its requests, and _resolve_, with the instant that the change recorded on the share.
-  The identity domain publishes _dismiss_ when a HouseholdAdmin loses the role or moves to another Household, and when it deletes a share, a Profile or a Household, and it publishes _recipient deleted_ when it deletes an Account.
-  For the library kinds later, the library domain does the same from `ScanEndedEvent` and `RefreshEndedEvent`, with the library operation's id added, and publishes _dismiss_ when it removes a library.
+* *The module's inputs:* four kinds of application event (ADR 0010).
+  Any domain may publish these events inside its transaction, and the module hears them inside that transaction:
+** _tell_ carries a kind, a subject reference, the recipients, the snapshot and the event's time.
+   For a request, _tell_ also carries the subject's expiry, and every request kind built now has a subject that expires;
+** _resolve_ carries a request kind, a subject reference, the resolution, the answer when the subject was decided, and the instant of the subject's change;
+** _dismiss_ carries a selector (see <<dismissal>>);
+** _recipient deleted_ carries the Account that is being deleted.
+* *Where the events live:* the four events, and one record type for each kind's snapshot, live in the shared events package below the domains.
+  ADR 0010 places the library events there in the same way.
+  The domains depend on that package, and the module depends on no domain.
+  ADR 0010's library events carry only ids and are heard after commit.
+  The four notification events differ: they carry the snapshot, and the module hears them inside the publisher's transaction.
+  The events carry the snapshot because the module may not read those facts for itself.
+  The module hears the events inside the transaction because a Notification must commit or roll back with its event.
+* *Publishing:* each domain turns its own events into the module's events.
+  For shares, the identity domain hears `ProfileShareChangedEvent` inside the transaction.
+  The identity domain works out the recipients from the relationship rows that it has locked, and leaves out the Account that acted.
+  The identity domain then builds the snapshot and publishes _tell_, with the share invitation's expiry for the requests.
+  The identity domain also publishes _resolve_, with the instant that the change recorded on the share.
+  The identity domain publishes _dismiss_ when a HouseholdAdmin loses the role or moves to another Household.
+  The identity domain also publishes _dismiss_ when it deletes a share, a Profile or a Household.
+  The identity domain publishes _recipient deleted_ when it deletes an Account.
+  Later, the library domain does the same for the library kinds, from `ScanEndedEvent` and `RefreshEndedEvent` with the library operation's id added.
+  The library domain publishes _dismiss_ when it removes a library.
 * *Storage:* one table that the module owns.
-  Fixed columns hold everything that the module selects, orders, counts or coalesces by: the recipient's type and id, the kind, the form, the subject's type and id, the times, the read time, and for a request its state, its resolution time and its subject's expiry.
+  Fixed columns hold everything that the module selects, orders, counts or merges by.
+  Those columns are the recipient's type and id, the kind, the form, the subject's type and id, the times and the read time.
+  For a request, fixed columns also hold the request's state, its resolution time and its subject's expiry.
   The recipient and the subject are references, each a type and an id, with no foreign key.
-  A kind with a new subject type therefore adds no column that points at another module's table, and the module learns of a deleted subject or recipient from events, never from the database.
+  So a kind with a new subject type adds no column that points at another module's table.
+  The module learns of a deleted subject or recipient from events, never from the database.
   The snapshot is one structured column, a `jsonb` document that the kind's record type writes and reads.
-  The unique indexes, the list, the count, the marks, the dismissals and retention never look inside it.
-  A request's answer joins its snapshot when _resolve_ writes it, because what an answer can be depends on the kind.
-* *Why one structured column, not typed columns:* the module never selects, orders or counts by a fact of a snapshot, so typed columns would buy no query.
-  They would add a migration with every kind, and columns that are null on every other kind's rows.
-  With one structured column, a new kind brings a name, a form, a subject type and a record type for its snapshot, and the module's shape does not change.
-  A test writes and reads the snapshot of every kind, so a document that its record type cannot read fails the build, not a page.
-* *Writing:* _tell_ applies the noise rule to news with one `INSERT … ON CONFLICT … DO UPDATE` against the unique index, and makes requests with `INSERT … ON CONFLICT DO NOTHING` against the request index.
+  The unique indexes, the list, the count, the marks, the dismissals and retention never look inside the snapshot.
+  _resolve_ writes a request's answer into the request's snapshot, because what an answer can be depends on the kind.
+* *Why one structured column, not typed columns:* the module never selects, orders or counts by a fact of a snapshot, so typed columns would serve no query.
+  Typed columns would add a migration with every kind, and columns that are null on every other kind's rows.
+  With one structured column, a new kind brings a name, a form, a subject type and a record type for its snapshot.
+  The module's shape does not change.
+  A test writes and reads the snapshot of every kind.
+  So a document that its record type cannot read breaks the build instead of a page.
+* *Writing:* _tell_ applies the noise rule to news with one `INSERT … ON CONFLICT … DO UPDATE` against the unique index.
+  _tell_ makes requests with `INSERT … ON CONFLICT DO NOTHING` against the request index.
   A request's expiry column takes the expiry that _tell_ carries, and the module asks no other domain for it.
-  _Scan or refresh finished_ adds its figures in the same statement, and the decision that builds it fixes how.
-  _resolve_ updates the requests of its kind about its subject that no event has resolved yet: it writes the resolution and its instant where that instant is before the request's stored expiry, and expired, at the stored expiry, where it is not.
+  _Scan or refresh finished_ adds its figures in the same statement, and the decision that builds that kind fixes how the figures add up.
+  _resolve_ updates the requests of its kind about its subject that no event has resolved yet.
+  Where the resolution's instant is before a request's stored expiry, _resolve_ writes the resolution and its instant.
+  Otherwise _resolve_ writes expired, at the stored expiry.
   _dismiss_ deletes what its selector selects.
-  Both return the rows that they changed, for delivery.
-* *Delivery:* after commit, a listener passes each change to the recipient's open operations through a `KeyedSubscriptionBroadcaster` keyed by Account id, as `watchStateChanged` is keyed by Profile id (ADR 0042).
+  _resolve_ and _dismiss_ both return the rows that they changed, for delivery.
+* *Delivery:* after commit, a listener passes each change to the recipient's open subscriptions through a `KeyedSubscriptionBroadcaster` keyed by Account id.
+  `watchStateChanged` is keyed by Profile id in the same way (ADR 0042).
 * *Paging:* the server's shared pagination of ADR 0014, as <<order-and-paging>> sets out: a `PagedList` under `Pager`, read through `Keyset`, with `PositionCursorCodec` cursors, `OrderedEdge` edges and `PagedListContract`.
-* *Authorization:* Cedar decides each read, mark and subscription through actions of the module's own, which the device-bound guardrail forbids, and it decides the retention setting through ServerAdmin authority.
-  It is never asked about a share, an invitation, a Profile or a library.
-  Every read selects the caller's own rows by recipient, and nothing else decides what it returns.
+* *Authorization:* Cedar decides each read, mark and subscription through the module's own actions.
+  The device-bound guardrail forbids those actions to device-bound sessions.
+  Cedar decides the retention setting through ServerAdmin authority.
+  Cedar is never asked about a share, any kind of invitation, a Profile or a library.
+  Every read selects the caller's own rows by recipient, and nothing else decides what the read returns.
 * *Payloads:* the sealed service outcomes and the shared payload helpers of ADR 0026.
-* *Retention:* a sweep on a fixed schedule under the system actor, like the sweeps that expire share invitations and delete old credential attempts.
-  Its setting is shaped like the idle segment retention setting and kept in the same server settings, which the module reads through their own service.
+* *Retention:* a sweep runs on a fixed schedule as the System actor, like the sweeps that expire share invitations and delete old credential attempts.
+  The retention setting has the same shape as the idle segment retention setting.
+  The retention setting lives in the same server settings, and the module reads those settings through their own service.
   The sweep deletes a batch at a time, and each delete states the conditions of history and age in its `WHERE` (see <<retention>>).
 
 === Later channels
 
 ==== Email
 
-Email attaches as a second channel for the same Notifications.
-It needs a per-Account choice of the kinds to email, and a record for each Notification of what the channel sent.
-It reads the same line and link target that every client reads, and it sends to the Account's email address.
-An update in place is a new event, and the email channel decides whether to send again or to send a digest.
+Email can become a second channel for the same Notifications.
+Email needs each Account to choose which kinds to receive by email.
+Email also needs a record, for each Notification, of what the email channel sent.
+The email channel reads the same line and link target that every client reads.
+The email channel sends to the Account's email address.
+An update in place is a new event.
+The email channel decides whether to send again or to send a digest.
 The Notification, its kinds, its recipients and its read state stay as they are.
 
 ==== The TV apps
 
 A Notification stays addressed to its recipient, and nothing in it names a session or a client.
-The TV apps need a decision of their own: whose Notifications a shared TV may show, which kinds suit a shared screen, and whether a Profile becomes a recipient.
+The TV apps need a separate decision.
+That decision says whose Notifications a shared TV may show, which kinds suit a shared screen, and whether a Profile becomes a recipient.
 For example, a TV could show only the Notifications of the Account whose Personal Profile is selected there.
-A device-bound session may not administer (ADR 0024), so a TV could show news but never decide a request.
-That decision narrows the guardrail for device-bound sessions, and it adds no field to a Notification.
+A device-bound session may not administer (ADR 0024).
+So a TV could show news but could never decide a request.
+That later decision narrows the guardrail for device-bound sessions and adds no field to a Notification.
 
 === Tests
 
 Implementation starts with failing tests (link:0005-tdd-and-behavior-testing.adoc[ADR 0005]).
 The tests show that:
 
-* each recipient gets one copy when the event happens, the Account that sent a share invitation is on the Profile's side, and the Account that acts gets none;
-* an Account on both sides of a share that a ServerAdmin ends receives one _Share ended_ news;
-* an Account that sent a share invitation for a Profile and stopped managing the Profile before the share ended, and is not a ServerAdmin, gets no _Share ended_ news;
-* a recipient keeps its news, with the Profile's name that it was told, after it loses the relationship through which it was told: a HouseholdAdmin of a share's target Household, told that a ProfileManager ended the share, still reads that news after it is demoted, and the share query for the same share answers not found;
+* each recipient gets one copy when the event happens;
+* the Account that sent a share invitation is on the Profile's side;
+* the Account that acts gets no Notification;
+* an Account on both sides of a share gets one _Share ended_ Notification when a ServerAdmin ends the share;
+* an Account gets no _Share ended_ Notification when it sent the share invitation, stopped managing the Profile before the share ended, and is not a ServerAdmin;
+* a recipient keeps its news, with the Profile's name that it was told, after losing the relationship that brought the news.
+  For example, a HouseholdAdmin of a share's target Household gets a _Share ended_ Notification after a ProfileManager ends the share.
+  After that HouseholdAdmin is demoted, the HouseholdAdmin still reads that Notification, and the share query for the same share answers not found;
 * a rename of the Profile after the event changes no stored Notification, for either side;
-* a HouseholdAdmin who is demoted, or whose Account moves to another Household, loses its waiting requests about share invitations into that Household from the list, the count and a live change; it keeps its resolved requests and its news, and it gets no request back when it is promoted again;
-* a share invitation and a demotion of one of the target Household's HouseholdAdmins that run at the same moment leave that Account no waiting request, whichever commits first;
+* a HouseholdAdmin who is demoted, or whose Account moves to another Household, loses its waiting requests about share invitations into that Household.
+  The requests leave the list and the count, and a live change carries their removal;
+* that HouseholdAdmin keeps its resolved requests and its news, and gets no request back when promoted again;
+* when a share invitation is sent at the same moment as a demotion of one of the target Household's HouseholdAdmins, the demoted Account has no waiting request, whichever commits first;
 * a person who gains a role later gets no Notification for what was already waiting;
-* a request reads as decided with its answer, withdrawn or expired as the subject's events write its state, for every recipient, and it reads as expired from the expiry that _tell_ carried before the sweep stores the share invitation's expiry;
-* an acceptance whose instant is before the share invitation's expiry, and whose resolution reaches the module after that expiry, resolves the requests as decided, with the answer and the acceptance's instant, and pushes the change; a withdrawal whose instant is at or after the expiry leaves them expired, at the expiry;
-* each path that changes a share, the expiry sweep included, writes the requests' state and pushes a change that carries the edge and the unread count that a fresh query returns;
-* a recipient keeps one unread news per kind and subject, also under two events at the same moment; news of another kind about the same subject makes a Notification of its own, a request never updates in place, and a repeated _tell_ makes no second request;
-* when an Account's management of a Profile is removed, granted again and removed again before the Account reads the first removal, the Account has one unread Notification, with the second removal's time and the Profile's name at that removal; after the Account reads it, a further removal makes a new one;
-* two invitations to manage one Profile, sent to two addresses that one Account has had, both wait with a request each; when the Account accepts one, the other's request resolves as withdrawn, and neither was withdrawn before;
-* an invitation that nobody can accept makes no request;
-* a dismissal by id and a dismissal by subject, each narrowed to a recipient, to kinds and to a form, delete exactly what they select, push one change for each recipient that lost a Notification, and roll back with the transaction of their event;
-* deleting a share, a Profile or a Household dismisses every Notification about it, for every recipient, and deleting a Profile also dismisses the Notifications about its ProfileManager invitations, which keep their rows;
+* a request reads as decided with its answer, as withdrawn or as expired, as the subject's events write its state, for every recipient;
+* a request reads as expired from the expiry that _tell_ carried, before the sweep stores the share invitation's expiry;
+* an acceptance whose instant is before the share invitation's expiry resolves the requests as decided, even when the resolution reaches the module after that expiry.
+  The requests then hold the answer and the acceptance's instant, and the change is pushed;
+* a withdrawal whose instant is at or after the expiry leaves the requests expired, at the expiry;
+* each path that changes a share, the expiry sweep included, writes the requests' state.
+  Each path pushes a change that carries the same edge and unread count that a fresh query returns;
+* a recipient keeps one unread news Notification per kind and subject, also when two events happen at the same moment;
+* news of another kind about the same subject makes a Notification of its own;
+* a request never updates in place, and a repeated _tell_ makes no second request;
+* an Account's management of a Profile is removed, granted again and removed again before the Account reads the first removal.
+  The Account then has one unread Notification, with the second removal's time and the Profile's name at that removal;
+* after the Account reads that Notification, a further removal makes a new Notification;
+* two invitations to manage one Profile, sent to two addresses that one Account has had, both wait, with a request each, and neither invitation withdraws the other.
+  When the Account accepts one invitation, the other invitation's request resolves as withdrawn;
+* a ProfileManager invitation that nobody can accept makes no request;
+* a dismissal by id and a dismissal by subject, each narrowed to a recipient, to kinds and to a form, delete exactly what they select;
+* each such dismissal pushes one change for each recipient that lost a Notification, and rolls back with the transaction of its event;
+* deleting a share, a Profile or a Household dismisses every Notification about the deleted record, for every recipient;
+* deleting a Profile also dismisses the Notifications about its ProfileManager invitations, and those invitations keep their rows;
 * deleting a recipient Account deletes its Notifications and no other Account's;
-* the list passes the shared `PagedListContract`, newest `latestEventAt` first, and a page that continues from a Notification that has since moved to the top, or been dismissed, starts where that Notification was;
-* `markNotificationsRead` marks only the caller's own unread Notifications among the ids it receives, and skips an id that does not exist, another Account's and a read one alike, with no error;
+* the list passes the shared `PagedListContract`, with the newest `latestEventAt` first;
+* a page that continues from a Notification that has since moved to the top, or been dismissed, starts where that Notification was;
+* `markNotificationsRead` marks only the caller's own unread Notifications among the ids that it receives;
+* `markNotificationsRead` skips, with no error, an id that does not exist, the id of another Account's Notification and the id of a read Notification;
 * a Notification whose transaction commits after the page was read stays unread when the page's ids are marked, even when its time sorts below the rows that the page showed;
 * a call to `markNotificationsRead` that changes at least one row pushes one live change, and a call that changes nothing pushes none;
-* retention deletes read news and resolved requests older than the period, a request that reads as expired from its stored expiry included, and keeps unread news and waiting requests, a disabled recipient's included;
+* retention deletes read news and resolved requests older than the period, including a request that reads as expired from its stored expiry;
+* retention keeps unread news and waiting requests, including a disabled recipient's;
 * a device-bound session gets `FORBIDDEN` from every Notification read, mark and subscription;
-* the module's code depends on no other domain's package, only on the shared events package and the server's shared parts, and it reads no table that it does not own;
+* the module's code depends only on the shared events package and the server's shared parts, never on another domain's package;
+* the module reads no table that it does not own;
 * every kind's snapshot is written and read back unchanged;
-* the two library kinds, defined only in test code, fit the general model: the same writer, noise rule, dismissal and retention handle them, with _Scan or refresh finished_ adding its figures.
+* the two library kinds, defined only in test code, fit the general model.
+  The same writer, noise rule, dismissal and retention handle both kinds, and _Scan or refresh finished_ adds its figures.
 
 === Explicitly deferred
 
@@ -941,7 +1180,7 @@ The tests show that:
 * The TV apps, any Notification on a device-bound session, and a Profile as a recipient.
 * A per-Account choice of the kinds to receive, or later to email.
 * Marking a Notification unread, and dismissing a Notification by hand.
-* News when a share invitation or a ProfileManager invitation expires or the server withdraws it.
+* News when a share invitation or a ProfileManager invitation expires, or when the server withdraws the invitation.
 * A Notification when a scan or a refresh fails or is stopped.
 * A Notification when a viewer shares a playback report (ADR 0013).
   It would be news for every ServerAdmin, with the Shared reports list as its subject.
@@ -950,69 +1189,115 @@ The tests show that:
 
 == Consequences
 
-* A person learns about a share invitation, its answer or the end of a share without opening the sharing pages, and sees them in one list.
-* The sharing pages still list and count from the shares, and Notifications change nothing that those pages show.
-* The first build follows streamarr-server#871, for `ProfileShareLifecycle` and `ProfileShareChangedEvent`, and streamarr-server#870, so that every ordinary share invitation answers a share code that the target Household issued.
-* Every write of a share goes through `ProfileShareLifecycle`, because a write that bypasses it publishes no `ProfileShareChangedEvent`, tells nobody, resolves no request and leaves open screens stale.
+* A person learns about a share invitation, its answer or the end of a share without opening the sharing pages.
+  All of these appear in one list.
+* The sharing pages still list and count from the shares.
+  Notifications change nothing that those pages show.
+* The first build follows streamarr/streamarr-server#871, which adds `ProfileShareLifecycle` and `ProfileShareChangedEvent`.
+  The first build also follows streamarr/streamarr-server#870, so that every ordinary share invitation spends a share code that the target Household issued.
+* Every write of a share goes through `ProfileShareLifecycle`.
+  A write that bypasses `ProfileShareLifecycle` publishes no `ProfileShareChangedEvent`.
+  Then nobody gets a Notification, no request resolves, and open screens go stale.
   A request whose resolution is missed reads as waiting until its stored expiry, and never longer.
-* Each publishing domain owns who is told, what they are told, how its requests resolve and when its Notifications are dismissed.
-  A domain that changes a relationship through which requests reach people must dismiss them in the same transaction; one that forgets leaves a request in a list until it resolves or expires.
-* Listing, counting, marking and pushing read the caller's own rows and make no authorization decision for each Notification.
+* Each publishing domain is responsible for who gets a Notification, what the Notification says, how the domain's requests resolve and when the domain's Notifications are dismissed.
+  A domain that changes a relationship through which requests reach people must dismiss those requests in the same transaction.
+  A domain that forgets leaves a request in a list until the request resolves or expires.
+* Listing, counting, marking and pushing read only the caller's own rows.
+  None of them makes an authorization decision for each Notification.
   The unread count is one indexed count, however many relationships the caller has lost.
-* A Notification shows what was said, not what is true now: a renamed Profile keeps its old name in older Notifications, a resolved request keeps how it resolved, and an _Unmatched items_ line keeps the number from its scan.
-* A recipient keeps its news after it loses the relationship through which it was told.
-  The Household's side keeps a Profile's name after the share invitation or the share is over, and a former ProfileManager keeps the Profile's name in its news, until retention deletes the Notification or the Profile's deletion dismisses it; ADR 0024 records the Household's side's exception.
+* A Notification shows what its recipient was told, not what is true now.
+  A renamed Profile keeps its old name in older Notifications.
+  A resolved request keeps how it resolved.
+  An _Unmatched items_ line keeps the number from its scan.
+* A recipient keeps its news after losing the relationship that brought the news.
+  The Household's admins keep a Profile's name after the share invitation or the share is over.
+  A former ProfileManager keeps the Profile's name in their news.
+  Both keep the name until retention deletes the Notification or deleting the Profile dismisses the Notification.
+  ADR 0024 records the exception for the Household's admins.
 * A line names the Profile alone.
-  A client that wants the Household's name or the name of the Account that sent the share invitation opens the share through the share queries, which may answer that it does not exist.
-* The events that the module hears carry snapshots and are heard inside the publisher's transaction, unlike ADR 0010's library events, which carry ids and are heard after commit.
-* A dismissal deletes, and each recipient that loses a Notification receives a live change, so its open lists and its count follow without a read.
-* An expired request leaves an open client's unread count when the sweep stores its share invitation's expiry, within about a minute of the expiry time.
-  A read during that minute already leaves it out.
-* An update in place keeps a Notification's id, so marking the ids that a page showed also marks an update in place that the page had not shown yet.
-* Deleting a Profile, a Household or a library sends no news about it, and it dismisses what was said about it.
-* An accepted share that later ends leaves the Profile's side two lines, one for the answer and one for the end, because different kinds of news about one subject sit side by side.
+  A client that wants the Household's name or the name of the Account that sent the share invitation opens the share through the share queries.
+  Those queries may answer that the share does not exist.
+* The events that the module hears carry snapshots, and the module hears them inside the publisher's transaction.
+  ADR 0010's library events differ: they carry ids and are heard after commit.
+* A dismissal deletes Notifications.
+  Each recipient that loses a Notification gets a live change, so the recipient's open lists and unread count update without a new read.
+* An expired request leaves an open client's unread count when the sweep stores the share invitation's expiry, within about a minute of the expiry time.
+  A read during that minute already leaves the expired request out.
+* An update in place keeps a Notification's id.
+  So marking the ids that a page showed also marks an update in place that the page had not shown yet.
+* Deleting a Profile, a Household or a library sends no news about the deletion.
+  The deletion dismisses the Notifications about the deleted record.
+* An accepted share that later ends leaves everyone on the Profile's side two Notifications, one for the answer and one for the end, because different kinds of news about one subject sit side by side.
 * A Notification never changes its kind or its concrete type.
-* Each new kind adds a concrete type, which clients learn before the server sends it, and no column and no migration.
-* The list adds no paging of its own, so it keeps every rule of the shared pagination, and a change to those rules reaches it with every other list.
+* Each new kind adds a concrete type and no column or migration.
+  Clients learn each new type before the server sends a Notification of that type.
+* The list adds no paging of its own, so it keeps every rule of the shared pagination.
+  A change to those rules reaches the Notification list along with every other list.
 * The server gains a retention setting and a daily task.
-* `notificationsChanged`, like the share changes of streamarr-server#871, is a subscription that every Account may open without a selected Profile, and ADR 0042 records both exceptions.
+* `notificationsChanged` is a subscription that every Account may open without a selected Profile, like the share changes of streamarr/streamarr-server#871.
+  ADR 0042 records both exceptions.
 
 == Rejected Alternatives
 
-* Authorize a Notification at read time from the reader's live relationships — one rule would be stated three times, in a Cedar policy, in a SQL filter for the list and the count, and in a resolver for the subject, and the module would read the subject through a second path, all to take back what the reader was already told.
-* Store on each Notification the relationship or the side through which it reached its recipient — the module would keep a copy of another module's relationships and answer for their changes, while the domain that owns a relationship already knows which waiting requests its change ends.
-* A separate notification service behind a message broker — Streamarr runs one server on one database (ADR 0027), and events inside the publisher's transaction give the same decoupling with no delivery guarantees to manage.
-* Read a request's state from its subject at each read — the module would read another module's tables and apply the subject's read rule again; the subject's domain already publishes every change, and the stored expiry bounds a missed one.
-* Resolve as expired every request whose stored expiry has passed when its resolution reaches the module — an acceptance made in time whose transaction waited for locks would leave a request that reads as expired beside the share that it made active.
-* Find a request's expiry from its subject or from the lifetime setting — the module would read another domain, and the setting applies only to subjects made after it changes, so _tell_ carries the expiry.
-* Keep a dismissed Notification in a third state — every list, count and mark would have to leave it out, and nothing needs it back.
-* Dismiss a person's news when it loses the relationship through which it was told — the news was true, and its recipient could know it when it was told; only a request asks something of its recipient.
-* Let the module work out a dismissal from a reason, such as a lost role — the module would have to know each domain's relationships, while a selector by id or by subject keeps the reason with the domain that owns it.
-* Resolve the subject inside a Notification, as a `share` field or any field like it — the field would need a read rule of its own beside the subject's, and the subject's id already opens it through the ordinary queries.
-* Typed columns for each kind's facts, or a column for each subject type — each new kind would add a migration and columns that are null on every other kind's rows, and a subject column would point at another module's table.
-* Address a group, such as a Household's HouseholdAdmins, and check membership when a member reads — each member still needs a read state of its own, an Account that joins later would inherit what was said before, and every list and count would read each group's membership.
-* Count waiting things from unread requests — a person who gains a role later would see no count, and the count would fall when a reader marks a request read or retention deletes it.
-* Write a read time when a request resolves — a resolved request already counts as read from its state, and a read time would claim that its recipient had read it.
+* Authorize a Notification at read time from the reader's live relationships — the same rule would be stated three times: in a Cedar policy, in a SQL filter for the list and the count, and in a resolver for the subject.
+  The module would also read the subject through a second path.
+  All of that would only take back what the reader was already told.
+* Store on each Notification the relationship or the side through which the Notification reached its recipient — the module would keep a copy of another module's relationships and would have to keep that copy current.
+  The domain that owns a relationship already knows which waiting requests a change to that relationship ends.
+* A separate notification service behind a message broker — Streamarr runs one server on one database (ADR 0027).
+  Events inside the publisher's transaction give the same decoupling with no delivery guarantees to manage.
+* Read a request's state from its subject at each read — the module would read another module's tables and apply the subject's read rule again.
+  The subject's domain already publishes every change, and the stored expiry limits how long a missed change can leave a request wrong.
+* Resolve as expired every request whose stored expiry has passed when its resolution reaches the module — an acceptance made in time can wait for locks and reach the module late.
+  The request would then read as expired beside the share that the acceptance made active.
+* Find a request's expiry from its subject or from the lifetime setting — the module would read another domain.
+  The setting also applies only to subjects made after the setting changes, so _tell_ carries the expiry.
+* Keep a dismissed Notification in a third state — every list, count and mark would have to leave the dismissed Notification out, and nothing needs it back.
+* Dismiss a person's news when the person loses the relationship that brought them the news — the news was true, and the person was allowed to know it when the news arrived.
+  Only a request asks something of its recipient.
+* Let the module work out a dismissal from a reason, such as a lost role — the module would have to know each domain's relationships.
+  A selector by id or by subject keeps the reason with the domain that owns the reason.
+* Resolve the subject inside a Notification, as a `share` field or any field like it — the field would need a read rule of its own beside the subject's read rule.
+  The subject's id already opens the subject through the ordinary queries.
+* Typed columns for each kind's facts, or a column for each subject type — each new kind would add a migration and columns that are null on every other kind's rows.
+  A subject column would also point at another module's table.
+* Address a group, such as a Household's HouseholdAdmins, and check membership when a member reads — each member still needs a read state of its own.
+  An Account that joins the group later would inherit what the group's members were told before.
+  Every list and count would also read each group's membership.
+* Count waiting things from unread requests — a person who gains a role later would see no count.
+  The count would also fall when a reader marks a request read or retention deletes the request.
+* Write a read time when a request resolves — a resolved request already counts as read from its state.
+  A read time would wrongly say that the recipient had read the request.
 * Keep a request unread for each recipient until that recipient answers — the other recipients would see a dot for something already settled.
-* Key "Share invitation waiting" on the Profile and the Household, and update it when a share invitation is replaced — the share invitation is what waits and what a HouseholdAdmin decides, and share codes already make each new share invitation one that the Household asked for.
-* One unread Notification per subject across all kinds — it would replace a step of what happened with the next one: an unread "Share invitation answered" would become "Share ended", and the Account would never learn that the share was accepted.
+* Key "Share invitation waiting" on the Profile and the Household, and update that Notification when a share invitation is replaced — the share invitation is what waits, and a HouseholdAdmin decides the share invitation.
+  Share codes already make sure that the Household asked for each new share invitation.
+* One unread Notification per subject across all kinds — each step of what happened would replace the step before.
+  For example, an unread "Share invitation answered" would become "Share ended", and the Account would never learn that the share was accepted.
 * A new Notification for every event, with no update in place — a daily scan would leave one line a day for each library.
 * Replace the stored figures when a later scan updates a scan's Notification — a smaller scan would overwrite the figures of a larger one that the ServerAdmin had not read yet.
 * One Notification for each unmatched item — the first scan of a new library could leave hundreds of lines.
-* Read the library's current unmatched count into the line — the module would read the library's items, and the line would stop being what the ServerAdmin was told; the library's `unmatched` filter counts the items now.
-* Unmatched items as a request — an unmatched item can be correct, nobody waits for it, and the request would never resolve or would ask again after every scan.
-* Copy the name of the share invitation's sender, the Household's name or the name of a ProfileManager invitation's inviter into the snapshot — each would outlive what ADR 0024 lets its recipient see of it.
-* Read the Profile's current name for a reader who may still see the Profile — a line would change after it was read, and the module would read the Profile.
-* Keep a Notification after its subject is deleted — it would keep a deleted Profile's name, which ADR 0024 lets stay nowhere, and it has nothing to link to.
+* Read the library's current unmatched count into the line — the module would read the library's items, and the line would stop being what the ServerAdmin was told.
+  The library's `unmatched` filter counts the items now.
+* Unmatched items as a request — an unmatched item can be correct, and nobody waits for an unmatched item.
+  The request would never resolve, or it would ask again after every scan.
+* Copy the name of the share invitation's sender, the Household's name or the name of a ProfileManager invitation's inviter into the snapshot — each of those names would outlive what ADR 0024 lets the recipient see.
+* Read the Profile's current name for a reader who may still see the Profile — a line would change after its reader had read the line.
+  The module would also have to read the Profile.
+* Keep a Notification after its subject is deleted — the Notification would keep a deleted Profile's name, which ADR 0024 allows nowhere.
+  The Notification would also have no subject to link to.
 * Let retention delete unread news — news stays until it is read, and the noise rule already keeps unread news few.
-* Push a share invitation's expiry at the very moment its time runs out — it would need a timer for each share invitation, while the request already reads as expired from its stored expiry and the sweep pushes within about a minute.
+* Push a share invitation's expiry at the very moment its time runs out — the server would need a timer for each share invitation.
+  The request already reads as expired from its stored expiry, and the sweep pushes the change within about a minute.
 * Mark Notifications read when the list opens — the dot would clear for lines that the reader never looked at.
 * Mark read every unread Notification — it would mark read a Notification that arrived while the reader looked at the list.
-* Mark read every Notification at or below a place in the list — a Notification takes its time inside the transaction that changes its subject, so one that commits after the page was read can sort among the rows that the page showed and be marked read although the reader never saw it.
+* Mark read every Notification at or below a place in the list — a Notification takes its time inside the transaction that changes its subject.
+  So a Notification that commits after the page was read can sort among the rows that the page showed.
+  That Notification would be marked read although the reader never saw that Notification.
 * A second mutation that marks one Notification — the same mutation marks one id or many.
 * A link in the Notification — the server would depend on one client's routes.
-* One Notification type with a kind enum and every kind's fields nullable — no type would say what its kind carries; concrete types do, as ADR 0026's error members do.
-* Use the live share updates of streamarr-server#871, or another subscription, as the store — a subscription stores nothing and reaches only open screens.
+* One Notification type with a kind enum and every kind's fields nullable — no type would say what its kind carries.
+  Concrete types say what their kind carries, as ADR 0026's error members do.
+* Use the live share updates of streamarr/streamarr-server#871, or another subscription, as the store — a subscription stores nothing and reaches only open screens.
 * Notifications on device-bound sessions now — a shared TV would show one Account's Notifications to everyone who uses it.
 
 == References

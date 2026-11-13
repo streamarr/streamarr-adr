@@ -534,7 +534,7 @@ A probe that finds keyframe positions by scanning every packet of the chosen vid
 _Avoid_: packet scan (unqualified), keyframe probe
 
 **Media end**:
-Where the media of a stream session ends: the later end time, as a keyframe packet scan read it, of the chosen video stream and the session's audio stream. A direct-play stream session delivers every track, so it reads every audio stream of the file. Until a scan has read each of those ends, it is the container's duration. Every variant of the stream session advertises it, and watch progress is measured against it (ADR 0037).
+Where the media of a stream session ends: the latest end time, as a keyframe packet scan read it, of the chosen video stream and of each audio track that the stream session delivers. An HLS stream session whose variants multiplex the audio delivers one audio track. An HLS stream session with audio renditions delivers every audio track that has a rendition (ADR 0043). A direct-play stream session delivers every audio track of the file. Until a scan has read each of those ends, the media end is the container's duration. Every variant and every audio rendition of the stream session advertises the media end, and watch progress is measured against the media end (ADR 0037).
 _Avoid_: real end, scanned video end, true duration
 
 **Bitrate scan**:

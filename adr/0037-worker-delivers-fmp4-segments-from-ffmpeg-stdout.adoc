@@ -71,6 +71,12 @@ NOTE: An amendment merges the plain grid's final slot into the segment before it
 The plain grid's last segment then lasts at least 2 s, as a list's last segment does, and every job attempt of that stream session carries the grid's starts as a list.
 Media shorter than one slot stays one segment of its own length, and its job attempts carry no list.
 
+NOTE: An amendment checks a copy without a measurement against the segment cap (<<decision-segment-list>>).
+When the server holds no measurement of the copied video, the server estimates each segment of the copy at twice the copy's unmeasured cost over the segment's `EXTINF` duration.
+link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc[ADR 0054] defines the unmeasured cost.
+When any segment's estimate exceeds the segment cap, the server encodes the video from the start on the plain 3 s grid.
+Before the amendment, only the worker checked such a copy.
+
 NOTE: An amendment sends the chosen keyframe's presentation time as the seek position of an encoded replacement attempt that reads an MP4 or MOV source (<<decision-seek>>), because FFmpeg's MP4 demuxer seeks by presentation time.
 With the keyframe's decode time, that demuxer lands one keyframe interval early.
 A Matroska, MPEG-TS or any other source still gets the keyframe's decode time.
@@ -486,6 +492,11 @@ A merged segment can be long, and every variant and rendition of the stream sess
 When it creates a stream session with merged segments, the server bounds each advertised variant's and audio rendition's segment for every merged interval, with that segment's framing (link:0054-workers-measure-each-stream-bitrate-and-a-copy-advertises-its-measured-peak.adoc#segment-framing[ADR 0054]):
 
 * A copied variant or rendition takes each segment's size from ADR 0054's measurements.
+* A copied video variant without a measurement of its video takes an estimate of each segment's size instead.
+The estimate is twice the copy's unmeasured cost over the segment's `EXTINF` duration.
+ADR 0054 defines the unmeasured cost: the copied video's probed bitrate plus the stream session's audio bitrate, or the container-based cost of link:0050-viewer-limits-bind-copies-and-quality-tiers-are-picture-boxes.adoc[ADR 0050] when the probe knows no bitrate for the copied video.
+When the probe knows no container bitrate either, the source file's size over the playlist's duration stands in for the container bitrate in the estimate.
+The unmeasured cost already counts the stream session's audio, so the estimate adds nothing for an audio rendition.
 * An encoded variant takes the longest merged segment's duration times the maximum rate that the encode's rate control enforces, plus the size of the encode's rate-control buffer, with the framing of its samples at its output frame rate.
 The server sets that maximum rate and buffer, so the bound holds whatever the source's picture holds.
 An encode whose rate control enforces no maximum rate has no bound.
@@ -504,7 +515,9 @@ When that total exceeds the segment cap for any variant and interval, or any enc
 It uses the plain 3 s grid, offers no copied video variant and encodes every variant's video.
 That plain grid still merges a short final slot into the segment before it, because no attempt could deliver that slot on its own, so its last segment lasts less than two slots.
 The server makes that choice when it creates the stream session, so no attempt of that session meets a keyframe-merged segment.
-A copied output without a measurement is the one exception: it keeps the merged list, and the producer's budget is its only check.
+Two copied outputs keep the merged list with the producer's budget as their only check.
+The first is a copied video variant whose measurement does not hold one keyframe interval for each of the source's keyframe positions.
+The second is a copied audio rendition without a measurement beside a measured video copy.
 No duration bound limits a merged segment.
 
 A plain grid's merged last segment, which lasts less than two slots, doesn't make its stream session one with merged segments in the rules that follow.
@@ -595,12 +608,29 @@ A copy that fails on the segment cap fails at the merged segment, which can lie 
 Wherever ADR 0054's measurements give the merged segment's size, the server avoids that stall by encoding from the start.
 An encoded variant gains nothing from a copy's measurement: another codec, a higher resolution or the keyframes that the encoder forces can write more bytes than the copy for the same interval.
 The server sets an encode's maximum rate and buffer, so it can bound every encoded output before playback starts, and only a copy needs a measurement.
-The worker's segment cap failure and ADR 0052's fallback catch a copied merged segment that no measurement covers, and an encode that overshoots its buffer.
+The worker's segment cap failure and ADR 0052's fallback catch three cases.
+The first is a copied merged segment that exceeds the cap while its estimate does not.
+The second is a copied output that the server cannot size.
+The third is an encode that overshoots its buffer.
 Refusing every unmeasured copy would encode Matroska sources whose keyframes come from the container index until their background bitrate scan finishes, to spare a stall that only an oversized segment causes.
 That failure needs a new stream session, because every replacement attempt of the same session cuts the same merged segment.
 A duration bound would encode every source with long gaps between keyframes, although each such source copies bit for bit while its merged segments fit the segment cap.
 The server needs the worker's cap to decide up front, and a cap that each worker set would let a worker disagree with the server's own upload limit, which already decides what the server accepts.
 Evidence: https://github.com/streamarr/streamarr-server/issues/512[streamarr/streamarr-server#512], https://github.com/streamarr/streamarr-server/pull/723[streamarr/streamarr-server#723].
+
+*Why a copy without a measurement takes an estimate:*
+A long file whose probe lists one keyframe copies as one segment as long as the file.
+If the server checked a copied segment against the segment cap only with a measurement, the worker would fail such a copy's job with `JOB_ATTEMPT_FAILURE_SEGMENT_CAP_EXCEEDED`.
+Segment 0 would then answer `503`, and playback would not start.
+An encode from the start plays, so when a copy's estimate exceeds the cap, the server encodes the video instead.
+The unmeasured cost is the rate that the multivariant playlist already advertises as the copy's `AVERAGE-BANDWIDTH`.
+That rate is an average over the whole file.
+A merged segment can cover a stretch of the file whose rate is higher.
+The factor of two allows for such a stretch, for the segment's framing and for the heap cost that the producer reserves for each sample.
+A copy whose segments would fit the cap can still have an estimate over the cap.
+The server then encodes the file until a bitrate scan measures the file.
+A copy whose segment exceeds the cap fails at that segment instead.
+A failure at segment 0 keeps playback from starting.
 
 === Every encoder forces the boundary keyframes from a list
 
@@ -1616,9 +1646,12 @@ The frame-count GOP and the output rate therefore cannot disagree.
 At 3 s segments the server must hold every segment request for less than 3 s, because macOS AVPlayer abandons a request after one target duration without a byte.
 * Until merged segment lists arrive, a stream session that only copies keeps 6 s segments, and a copied variant in a stream session that also encodes is encoded when its keyframes do not fit the 3 s grid.
 Once merged segment lists arrive, every stream session uses 3 s slots, and a stream copy's playlist advertises segments of different lengths.
-* A source whose keyframes lie further apart than one segment is copied instead of encoded, unless a measured merged segment would exceed the segment cap or an encoded output of the same stream session can't be bounded within it.
+* A source whose keyframes lie further apart than one segment is copied instead of encoded, unless a merged segment's measured size or estimate would exceed the segment cap, or an encoded output of the same stream session can't be bounded within it.
 A stream session that offers a copy beside encoded variants therefore needs encodes whose rate control enforces a maximum rate, and the rate-control choices that ADR 0044 defers must provide one.
-Without a measurement, a copy whose merged segment exceeds the segment cap fails at that segment, and a new format attempt encodes on the plain grid under ADR 0052.
+A copy without a measurement can still have a merged segment that exceeds the segment cap while the segment's estimate does not.
+That copy fails at that segment, and a new format attempt encodes on the plain grid under ADR 0052.
+* A file without a measurement whose copy has a segment estimate over the segment cap is encoded until a bitrate scan measures the file.
+A file that no bitrate scan measures stays encoded.
 * An encoded variant that shares a merged segment list encodes a whole merged segment before it publishes that segment, so a seek or a switch into a long merged segment waits longer for its first picture.
 The server keeps a producer while its reported output advances, and each client's segment wait grows with the segment's length, so neither fails a healthy producer.
 * In a stream session with a copied variant, every variant's last segment can last up to twice the period when the grid's final interval holds no source keyframe.
@@ -1814,6 +1847,8 @@ At equal VMAF, 2 s segments needed 6.0 to 16.4 % more bitrate than 6 s segments,
 Merged segment lists let every stream session use 3 s slots without encoding more sources, whatever the spacing is.
 * Bounding a merged segment's duration would encode every source with long gaps between keyframes, although each such source copies bit for bit while its merged segments fit the segment cap.
 * Checking a merged segment against the segment cap only in the worker, even when a measurement gives its size, would fail the copy at that segment, deep into playback, with a stall and a drop to an encode.
+* Estimating a segment without a measurement at 1.2 times the unmeasured cost, the factor that a copy without a peak takes for `BANDWIDTH` (ADR 0054), leaves little room for a stretch whose rate is above the file's average.
+A wrong `BANDWIDTH` makes a player choose a variant badly, while a segment over the cap fails the copy.
 * Letting each worker set and register its own segment cap would let a worker disagree with the server's upload limit, which already decides what the server accepts.
 Every worker would report the same constant.
 * Cutting a copy's segment at a frame that is not a keyframe, as FFmpeg's segment muxer does under `break_non_keyframes`, breaks the rule that every segment's video opens at a keyframe.

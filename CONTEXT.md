@@ -43,7 +43,7 @@ While a Profile is shared into the Household, its HouseholdAdmins administer tha
 _Avoid_: owner, HouseholdOwner, parent (household roles that ADR 0024 removed)
 
 **ProfileManager**:
-An Account with durable authority to edit a Profile and its policy, manage its PIN, offer it to Households and invite other managers.
+An Account with durable authority to edit a Profile and its policy, manage its PIN, send share invitations for it to Households and invite other managers.
 The authority comes from a direct grant, or it derives from the Account's own unrestricted Adult Personal Profile.
 ProfileManager authority survives the end of a share, unlike a HouseholdAdmin's authority over a shared Profile.
 _Avoid_: owner, parent
@@ -62,14 +62,31 @@ Only the winning poll of ADR 0021's pairing flow creates a Device registration.
 A Device registration never expires, and only revocation ends it.
 _Avoid_: pairing grant (the short-lived approval record that comes before it)
 
+**Share invitation**:
+A proposal to share one Profile with one Household.
+A ProfileManager of the Profile, or a ServerAdmin, sends a share invitation to that Household with a share code that the Household issued.
+For a self-managed Personal Profile, only that Profile's own Account or a ServerAdmin may send one.
+A HouseholdAdmin of that Household, or a ServerAdmin, accepts the share invitation or declines it.
+Acceptance makes the share active, and the Profile is then available in that Household.
+A declined share invitation has the status `REJECTED`.
+A share invitation that nobody answers expires after the invitation lifetime that a ServerAdmin sets, 7 days by default.
+The Account that sent a share invitation may cancel it while it waits, and so may the Account whose self-managed Personal Profile it would share.
+A new share invitation for the same Profile and Household replaces the waiting one.
+The server withdraws a waiting share invitation when its Profile, its Household or its sender can no longer carry it, for example when the Profile is transferred or the sender stops managing the Profile (ADR 0024).
+An Account invitation that connects a Profile may name Households that get a new share invitation when the Account invitation is accepted.
+Those share invitations need no share code, and they go only to Households where the Profile is shared when the Account invitation is issued.
+Write "share invitation" wherever "invitation" alone could mean an Account invitation or a ProfileManager invitation.
+_Avoid_: offer, share offer, Profile share offer, offering, offerer, re-offer, share request (a request is a kind of Notification), invite or invitation (unqualified, where an Account invitation or a ProfileManager invitation could be meant), share (the active share that an accepted share invitation becomes)
+
 **Share code**:
-A short code that a HouseholdAdmin, or a ServerAdmin, issues for one Household so that whoever holds it can offer a Profile to that Household.
+A short code that a HouseholdAdmin, or a ServerAdmin, issues for one Household so that whoever holds it can send that Household a share invitation.
 Looking it up names the Household and tells nothing else about it.
-A share code admits one offer and is then spent.
+A share code admits one share invitation and is then spent.
 It also stops working when it expires, when a HouseholdAdmin withdraws it, or when the Account that issued it loses the authority to issue it or is disabled.
 A Household can hold several at once.
-Issuing one is an invitation to offer, never consent: every offer still waits for a HouseholdAdmin to accept or reject it (ADR 0024).
-_Avoid_: Household id (the key that a share code replaces), invite code or invitation code (the code of an Account invitation or a ProfileManager invitation), join code (a share code makes nobody a member), user code or linking code (the code that links a Device), share link (a client may carry the code in a link, but the code is the term)
+Issuing a share code is never consent to a share.
+Every share invitation still waits for a HouseholdAdmin to accept it or decline it (ADR 0024).
+_Avoid_: Household id (the key that a share code replaces), invite code or invitation code (the code of an Account invitation or a ProfileManager invitation), share invitation code (a share code lets its holder send one share invitation and is not one), join code (a share code makes nobody a member), user code or linking code (the code that links a Device), share link (a client may carry the code in a link, but the code is the term)
 
 ### Probe
 
@@ -732,21 +749,22 @@ _Avoid_: up next (a series' next episode, which Continue Watching does not list 
 ### Notifications
 
 **Notification**:
-A stored note to one Account that something happened to a subject, such as a share offer or a library.
+A stored note to one Account that something happened to a subject, such as a share invitation or a library.
 Each recipient Account gets its own copy when it happens, with its own read state.
 A Notification is either a request, which waits for a decision and resolves for every recipient once anyone decides it or it expires or is withdrawn, or news, which needs no decision and stays unread until its recipient reads it.
-A Notification never holds what waits: an offer or an invitation waits on its own, and the page that lists it counts it (ADR 0063).
+A Notification never holds what waits.
+A share invitation or a ProfileManager invitation waits on its own, and the page that lists the invitations counts them (ADR 0063).
 A recipient has at most one unread Notification of each kind about one subject, and a later event of that kind updates it in place; news of different kinds about one subject sits side by side.
 A dismissal deletes Notifications for good, such as a request that is no longer its recipient's to decide (ADR 0063); a dismissed completion, by contrast, stays in watch history.
 _Avoid_: alert, inbox (neither the list of Notifications nor a list of work such as the numbering review is an inbox), message (no person writes one; the `message` field is the server's English line, as on a `MutationError`), activity feed, event (a subscription event updates an open screen and is stored nowhere), task (a portion of a job's work)
 
 **Request**:
-A Notification that waits for a decision on its subject, such as the request that tells a HouseholdAdmin that a share offer waits.
+A Notification that waits for a decision on its subject, such as the request that tells a HouseholdAdmin that a share invitation waits.
 A request stores its state, which its subject's events write, and it resolves for every recipient at once when anyone decides the subject, when the subject is withdrawn, or when it expires (ADR 0063).
 The word names a Notification's form only where Notifications are meant; elsewhere a request is an API request, a playback request or an artwork request.
-_Avoid_: task (a portion of a job's work), action item, to-do, invitation (a ProfileManager invitation or an Account invitation, which a request can be about)
+_Avoid_: task (a portion of a job's work), action item, to-do, invitation (a ProfileManager invitation, a share invitation or an Account invitation, which a request can be about)
 
 **News**:
-A Notification that needs no decision, such as an offer's answer or the end of a share.
+A Notification that needs no decision, such as the answer to a share invitation or the end of a share.
 News stays unread until its recipient marks it read (ADR 0063).
 _Avoid_: alert, update (what a later event of the same kind does to an unread Notification), announcement

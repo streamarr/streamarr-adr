@@ -20,6 +20,7 @@ An amendment makes the current segment the media segment that the player needs n
 The same amendment gives a job attempt time to encode its preroll before the attempt counts as stalled.
 An amendment keeps the variant that the player leaves running until the switched variant delivers a media segment (<<decision-requested-variant>>).
 An amendment restarts a producer's stall clock whenever the worker reports that the job attempt's output advanced, so a long merged segment needs no wall-clock allowance.
+An amendment also restarts a producer's stall clock whenever the worker reports that the FFmpeg process that writes the job attempt's output has read more bytes (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-waits[ADR 0037]).
 This ADR sets the relocation gap to two media segments.
 The relocation gap is how far a requested media segment may lie ahead of a running job attempt's output before the server starts a new job attempt at the requested segment.
 The two-segment relocation gap depends on the decode-only early-start seek that link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] specifies.
@@ -44,6 +45,7 @@ https://github.com/streamarr/streamarr-server/pull/676[streamarr/streamarr-serve
 https://github.com/streamarr/streamarr-server/pull/677[streamarr/streamarr-server#677] keeps the variant that the player leaves running until the switched variant delivers a media segment.
 https://github.com/streamarr/streamarr-server/pull/744[streamarr/streamarr-server#744] takes copies out of the transcode limit and the worker job slots, stops a left variant that copies the video when a worker refuses a copy with `JOB_ATTEMPT_FAILURE_COPY_CAP_REACHED` (https://github.com/streamarr/streamarr-server/pull/769[streamarr/streamarr-server#769]), and lets a new viewer's first request make room for its copy.
 https://github.com/streamarr/streamarr-server/pull/747[streamarr/streamarr-server#747] implements <<decision-idle-retention>>.
+The server restarts a producer's stall clock on every progress report, so a report of the bytes that FFmpeg has read restarts the stall clock too (https://github.com/streamarr/streamarr-server/pull/924[streamarr/streamarr-server#924]).
 The server does not yet publish the preparing-or-ready state (https://github.com/streamarr/streamarr-server/issues/507[streamarr/streamarr-server#507]).
 The worker does not yet pad an encoded variant past a source that ends early (https://github.com/streamarr/streamarr-server/issues/511[streamarr/streamarr-server#511]).
 The server does not yet start extra variants from encoder headroom (https://github.com/streamarr/streamarr-server/issues/499[streamarr/streamarr-server#499]).
@@ -97,8 +99,12 @@ The server then holds a segment request past the real end until the client ends 
 
 === Segment waits are bounded by producer liveness, not a wall clock
 
-A request for an advertised-but-unproduced segment waits while a producer for that segment is alive and making progress; a producer whose output does not advance within the configured stall threshold is classified stalled and replaced.
-A producer's output advances when it publishes a segment, when the server receives a chunk of a media segment upload from the job attempt, and when the worker reports that the job attempt's output reached a later media time than in its previous report, or that a held encode's search for the video's last keyframe read more of the source (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-segment-list[ADR 0037]).
+A request for an advertised-but-unproduced segment waits while a producer for that segment is alive and making progress; a producer that makes no progress within the configured stall threshold is classified stalled and replaced.
+A producer makes progress when it publishes a segment, when the server receives a chunk of a media segment upload from the job attempt, and when the worker reports that the job attempt's output reached a later media time than in its previous report, or that a held encode's search for the video's last keyframe read more of the source (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-segment-list[ADR 0037]).
+A producer also makes progress when the worker reports that the FFmpeg process that writes the job attempt's output has read more bytes than in the worker's previous report.
+The worker reports the bytes that this FFmpeg process has read only when the FFmpeg process reads an audio track from an input other than the video's input (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-waits[ADR 0037]).
+Such an FFmpeg process can read for a long time while it writes no output, for example while the audio's input reads on past the audio's end.
+Nothing limits yet how long such a producer may write no output while its FFmpeg process keeps reading (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#explicitly-deferred[ADR 0037]).
 Before a job attempt stores its first media segment, uploads a chunk of one or reports progress, the job attempt receives the configured stall threshold plus one target segment duration for each segment that it encodes first.
 A job attempt encodes its first segment.
 An encoded job attempt that starts after the first segment also encodes one preroll segment before its first segment, because the one-period-early seek starts encoding one segment duration early.
@@ -106,7 +112,8 @@ Such a job attempt therefore receives the stall threshold plus two target segmen
 A copy, or an encode that starts at the first segment, receives the stall threshold plus one target segment duration.
 After the first publication, media segment upload chunk or progress report, the steady-state stall threshold applies by itself, and each of them restarts it.
 A long merged segment (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-segment-list[ADR 0037]) therefore needs no allowance of its own.
-Its producer reports progress while it encodes the segment, however far below real time it runs, and a producer whose output stops advancing is replaced after the stall threshold, whatever the segment's length.
+Its producer reports progress while it encodes the segment, however far below real time it runs.
+A producer that makes no progress within the stall threshold is replaced, whatever the segment's length.
 The local store writes every segment completely to a temporary file in the segment folder before moving it into its final name. A segment is stored once: the first publication under a name moves the file into place atomically, and a later publication of that name leaves the stored file untouched. The segment folder must be one filesystem that renames a file atomically; on a filesystem that does not, a publication fails and stores nothing. A later publication of a media segment still succeeds, so a job attempt that reproduces stored media continues and is credited for it. The bytes under a final name therefore never change. On a connection that the web server can send a file on, the server hands a stored segment's file to the web server, which opens the file by its name after the request has ended; because the bytes never change, the file that it opens holds the bytes whose length the response headers announced. Unchanging bytes do not keep the file. When the stream session ends between the request and the moment the web server opens the file, the response carries its headers and no body, and the connection closes. That player's stream session has ended, so the player starts again at the viewer's position (<<decision-idle-retention>>). Under the segment-store contract, only the final name is observable as ready; supported deployments must therefore provide rename visibility consistent with that contract. No successor-segment inference is needed or permitted.
 The wait ends when the segment is ready, when no producer can be made to produce it, or on request cancellation — never on a fixed wall-clock timeout.
 A slow or resource-starved transcode must not surface to the client as a missing segment.

@@ -997,6 +997,12 @@ The worker's CI has no NVIDIA or VideoToolbox hardware, so CI skips the NVDEC an
 A skipped case does not pass the upgrade guard.
 The upgrade's local run on a host with an NVIDIA GPU runs the NVDEC cases of the test.
 The upgrade's local run on an Apple silicon Mac runs the VideoToolbox cases of the test.
+An NVDEC case passes the upgrade guard only when the case shows that NVDEC decoded the case's pictures.
+A VideoToolbox case passes the upgrade guard only when the case shows that Apple's hardware decoder decoded the case's pictures.
+When a hardware decoder fails to start, FFmpeg decodes the source in software instead.
+FFmpeg then still exits with status 0.
+VideoToolbox can also decode an HEVC picture with Apple's software decoder, because FFmpeg does not ask VideoToolbox to require Apple's hardware decoder for HEVC.
+Software decoding passes every comparison of the test, including the run with `showall` (<<evidence-hevc-nvdec-seek>>, <<evidence-hevc-videotoolbox-seek>>).
 Every other seek attempt that decodes in hardware runs behind the filter.
 That covers an H.264 source on VideoToolbox and on NVDEC, and a source of any other codec family that the hardware decoder decodes.
 A hardware decoder that a later decision adds, such as QSV or VAAPI, runs every seek attempt behind the filter, HEVC included, until a measurement covers that decoder.
@@ -1918,6 +1924,7 @@ The merge gate of issue https://github.com/streamarr/streamarr-server/issues/502
 The exception rests on two checks that FFmpeg's HEVC decoder makes (<<decision-hardware-decode>>).
 Each upgrade of the pinned FFmpeg build therefore re-runs the worker test that pins both checks, with the NVDEC cases on a host with an NVIDIA GPU and the VideoToolbox cases on an Apple silicon Mac.
 The test gains its VideoToolbox cases when the worker starts to decode seek attempts on VideoToolbox.
+A hardware case passes only when the case shows that the hardware decoder, not a software decoder, decoded the case's pictures.
 * A segment closes about one fragmentation target after its boundary in media time.
 With the previous worker, FFmpeg renames the segment file at the boundary itself.
 Wall-clock delivery further depends on encoder speed and on back-pressure from the server.
@@ -2702,6 +2709,14 @@ With the refusal off, the decoder also output 8 pictures before the CRA picture,
 A trim at 4 s, where the seek attempt's first segment starts, removed those 8 pictures.
 The 96 pictures after the trim equalled those of the attempt from zero, with the refusal on and with the refusal off.
 A test that compares only the pictures after the worker's filters therefore passes with the refusal turned off.
+* In the source of the pinned FFmpeg 8.1.3, FFmpeg's decoder decodes in software when a hardware decoder fails to start (`ff_get_format` in `libavcodec/decode.c`).
+FFmpeg's command line then continues without an error (`get_format` in `fftools/ffmpeg_dec.c`).
+* A check on 2026-11-13 decoded a synthetic 128×128 libx265 encode with `-hwaccel cuda` on the same RTX 5090.
+NVDEC on that GPU decodes no HEVC picture narrower than 144 pixels, so NVDEC failed to start.
+FFmpeg logged the failure and decoded all 120 pictures in software.
+FFmpeg then exited with status 0.
+Each of the 120 pictures equalled the picture that a run without `-hwaccel cuda` gave.
+With the pictures kept in GPU memory and copied to system memory by a filter, the same decode failed, because software decoding put no picture in GPU memory.
 * A constructed MPEG-TS source held keyframes at 0 and 20 s and an intra picture every 2 s between them, each marked with a recovery point SEI.
 After a read-back that reached no keyframe before the first segment, NVDEC and software decoding both output the one marked picture after the landing, and then nothing until the keyframe at 20 s.
 The seek attempt repeated that picture up to 20 s: 191 of its 432 pictures were repeats in one case, and 47 of 288 in another.
@@ -2766,6 +2781,19 @@ It also added splices without Dolby Vision: at a BLA picture, at an unmarked CRA
 It watched the system's hardware decoder sessions during each run: 438 of 456 VideoToolbox runs without the filter opened one.
 The 12-bit source opened none, because VideoToolbox decoded it with Apple's software decoder, so 12-bit HEVC on Apple's hardware decoder was not measured.
 In no case did VideoToolbox without the filter differ from its attempt from zero while software decoding did not differ the same way, except on gradual-refresh streams.
+* For HEVC, the pinned FFmpeg 8.1.3 asks VideoToolbox to enable Apple's hardware decoder, not to require it (`libavcodec/videotoolbox.c`).
+* A check on 2026-11-13 decoded 120 pictures of the independent check's 12-bit source on VideoToolbox, with the pictures kept in VideoToolbox's memory.
+FFmpeg exited with status 0, and no session opened on Apple's hardware decoder.
+Pictures in VideoToolbox's memory can therefore come from Apple's software decoder.
+* Another check on 2026-11-13 ran a seek on VideoToolbox in a sandbox that blocked FFmpeg's access to system services, so VideoToolbox could not start.
+The check's source was a synthetic 10-bit libx265 encode of FFmpeg's `testsrc2` pattern in MPEG-TS, with a CRA picture every 50 pictures, each followed by RASL pictures.
+The seek used the worker's seek options and read from the decode time of the CRA picture at 50/24 s.
+FFmpeg logged that VideoToolbox failed to start and decoded in software.
+FFmpeg then exited with status 0.
+All 150 pictures that the seek decoded equalled those of the decode from zero, which also ran in software in the sandbox.
+With `showall` in the sandbox, the decoder also output 8 pictures before the CRA picture, and all 8 differed from the decode from zero.
+With the pictures kept in VideoToolbox's memory and copied to system memory by a filter, the same seek failed in the sandbox.
+Outside the sandbox, that seek opened a session on Apple's hardware decoder, and its 150 pictures equalled those of VideoToolbox's decode from zero.
 * In the source of the pinned FFmpeg 8.1.3, FFmpeg hands VideoToolbox each HEVC picture slice by slice after the RASL skip and the refusal (`libavcodec/videotoolbox.c`).
 The slices of a picture that the HEVC decoder skips or refuses never reach VideoToolbox.
 * FFmpeg does hand VideoToolbox the parameter sets and SEI messages of such a picture, in front of the next picture that it accepts.

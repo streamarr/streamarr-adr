@@ -1,4 +1,4 @@
-= ADR 0063: A Notification Keeps What Its Recipient Was Told, as a Request or as News, and the Domain That Publishes an Event Decides Who Is Told and What Is Dismissed
+= ADR 0063: A Notification Keeps What Its Recipient Was Told, as a Request or as News, and the Domain That Publishes an Event Decides Who Gets a Notification and What Is Dismissed
 
 == Status
 
@@ -39,7 +39,7 @@ But a person who can no longer make a decision must not keep a request for that 
 
 Each subject already has an owner, the domain that decides who may read the subject.
 For a share, Cedar decides who may read the share by the sharing rule of ADR 0024 (link:0025-cedar-decides-authorization.adoc[ADR 0025]).
-A record of what someone was told should not make that decision a second time.
+Storing what someone was told should not mean deciding a second time who may read the subject.
 
 Some events repeat.
 A scheduled scan can run every day (link:0027-library-operations-are-durable-jobs.adoc[ADR 0027]).
@@ -59,7 +59,8 @@ Each copy has its own read state.
 A Notification is either a request, which waits for a decision on its subject, or news, which needs no decision.
 The domain that publishes an event decides once who gets a Notification and what the Notification says.
 The notification module stores Notifications and merges repeated news.
-The module also lists and counts Notifications, marks them read, pushes changes, dismisses Notifications and deletes old ones.
+The module also lists and counts Notifications, marks Notifications read, pushes changes and dismisses Notifications.
+The module deletes read news and resolved requests that are older than the retention period.
 The module decides nothing about a subject.
 
 === What a Notification is, and is not
@@ -105,13 +106,14 @@ An API request keeps its usual meaning.
 The domain that publishes an event decides who gets a Notification and what the Notification says.
 That domain works out the recipients from the relationships as they are at that moment, inside the transaction that changes the subject.
 The domain locks the relationship rows that it reads, as ADR 0024 requires of every operation that decides from relationships.
-A relationship that changes at the same moment therefore either waits until the event commits or has already changed when the event reads the relationship.
+Another operation may change one of those relationships at the same moment.
+That operation then either waits until the event commits, or has already committed its change before the domain reads the relationship.
 The Notification commits or rolls back with the change that made it.
 
-A Notification tells its recipient only what the recipient may know at the moment of the event.
-That is what the recipient may read of the subject at that moment.
-When the event ends the recipient's access to the subject, the Notification tells only what the recipient could read until the event.
-Every kind below picks its recipients by this rule.
+A Notification holds only what its recipient may read of the subject at the moment of the event.
+Sometimes the event ends the recipient's access to the subject.
+Then the Notification holds only what the recipient could read until the event.
+The publishing domain picks the recipients of every kind below by this rule.
 
 * The Account that acts never receives a Notification about its own action.
   A HouseholdAdmin who accepts a share invitation gets no news of the acceptance, even when that HouseholdAdmin also manages the Profile.
@@ -123,9 +125,9 @@ Every kind below picks its recipients by this rule.
 Nothing decides the recipients again later.
 When the module lists, counts, marks or pushes a Notification, the module looks only at the Notification and its recipient.
 The module never looks at anyone's relationships.
-A person keeps their news after losing the relationship that brought them the news.
-A waiting request is the one thing that a lost relationship takes away.
-The domain that owns the relationship dismisses that request (see <<dismissal>>).
+A person keeps their news after losing the relationship through which the news reached them.
+Losing a relationship takes away only the waiting requests that reached the person through that relationship.
+The domain that owns the relationship dismisses those requests (see <<dismissal>>).
 
 *Why a copy for each recipient:* each recipient has a read state of its own, so each needs a record of its own.
 A copy also fixes who got the Notification.
@@ -265,7 +267,8 @@ A list read again from the start shows the moved Notification at the top.
 Each recipient's copy has its own read state.
 Marking a Notification read changes no other recipient's copy.
 A playback report works differently.
-A playback report is one shared record, so once any ServerAdmin marks it read, it is read for every ServerAdmin (ADR 0013).
+A playback report is one shared record.
+So once any ServerAdmin marks a playback report read, the playback report is read for every ServerAdmin (ADR 0013).
 
 Read state changes in two ways only:
 
@@ -294,7 +297,8 @@ A Notification stores its recipient, its kind, its form and the reference to its
 It stores when it was made, when its latest event happened, and when its recipient marked it read.
 A request also stores its state, when it resolved, and when its subject expires.
 The snapshot holds the other facts of the event that the Notification's line needs.
-Examples are the Profile's name, the answer to a share invitation, who ended a share, and a scan's figures.
+Examples are the Profile's name, the answer to a share invitation and a scan's figures.
+For a share that ended, the snapshot says whether a manager of the Profile, an admin of the target Household, or a ServerAdmin or the server ended the share.
 Each kind's row in the table below lists the facts that its snapshot holds.
 
 The snapshot is what the recipient was told.
@@ -383,7 +387,7 @@ This decision uses dismissal in two ways:
   Deleting a share dismisses the Notifications about the share.
   Deleting a Household dismisses the Notifications about the Household and about the shares into the Household.
   Deleting a Profile dismisses the Notifications about the Profile, its shares and its ProfileManager invitations.
-  Nothing of a deleted Profile stays anywhere, not even its name in an old Notification (ADR 0024).
+  The reason is that nothing of a deleted Profile may stay anywhere, not even the Profile's name in an old Notification (ADR 0024).
   A ProfileManager invitation keeps its row when its Profile is deleted (ADR 0024).
   The invitation's Notifications are dismissed all the same.
   Removing a library dismisses the Notifications about the library.
@@ -502,7 +506,7 @@ A ServerAdmin sees the subjects themselves.
 | Share ended
 | First build
 | News
-| The side opposite whoever ended the share, or both sides when a ServerAdmin ended the share or the server ended the share as part of another change
+| The Profile's side when an admin of the target Household ends the share; the Household's admins when a manager of the Profile ends the share; both sides when a ServerAdmin ends the share or the server ends the share as part of another change
 | The share: the same `ProfileShare` after it was active
 | Who ended the share, by role and never by name, and the Profile's name when the share ended
 | `endProfileShare`, `administrativelyEndProfileShare`, and the operations that end a share as part of another change, such as an Account transfer
@@ -590,15 +594,17 @@ A ServerAdmin may decide any share invitation, but a ServerAdmin gets no request
 The first build follows https://github.com/streamarr/streamarr-server/issues/870[streamarr/streamarr-server#870].
 With streamarr/streamarr-server#870, every ordinary share invitation spends a share code that the target Household issued.
 The automatic share invitations that an Account invitation sends go only to Households where the Profile is shared when the Account invitation is issued (streamarr/streamarr-adr#127).
-So each request that a HouseholdAdmin gets is either for a share invitation sent with a share code from the HouseholdAdmin's Household, or for an automatic share invitation to a Household where the Profile was shared when the Account invitation was issued.
+So a HouseholdAdmin gets a request for a share invitation in only two cases.
+In the first case, the share invitation spent a share code that the HouseholdAdmin's Household issued.
+In the second case, the share invitation is an automatic share invitation, and the Profile was already shared with the HouseholdAdmin's Household when the Account invitation was issued.
 Without share codes, any ProfileManager could fill the lists of another Household's admins with requests.
 The ProfileManager would only need to send share invitations and cancel them again and again, because each replacement is a new share invitation with new requests.
 
 _Share invitation answered_ (`ProfileShareAnsweredNotification`, news).
 When a HouseholdAdmin or a ServerAdmin accepts or rejects a share invitation, everyone on the Profile's side gets a Notification.
 The admin who answered doesn't get one.
-The Account that sent the share invitation is always on the Profile's side at that moment.
-If the sender loses management or ServerAdmin authority while the share invitation is pending, the server invalidates the share invitation (ADR 0024).
+The Account that sent the share invitation is still on the Profile's side when someone answers.
+That is because the server invalidates a pending share invitation as soon as the sender loses management or ServerAdmin authority (ADR 0024).
 
 _Share ended_ (`ProfileShareEndedNotification`, news).
 Who gets a Notification depends on who ended the share:
@@ -615,9 +621,12 @@ Who gets a Notification depends on who ended the share:
 The Household's admins get their _Share ended_ Notification at the same moment as the live change that reports the end of the share.
 That live change is the last change of the share that the Household's admins receive (ADR 0024, ADR 0042).
 A HouseholdAdmin keeps their _Share ended_ news and their resolved _Share invitation waiting_ requests after the share invitation or the share is over.
-The HouseholdAdmin also keeps those Notifications after no longer administering the Household, because those Notifications are what the HouseholdAdmin was told.
+The HouseholdAdmin also keeps those Notifications after no longer being an admin of the Household.
+Losing the HouseholdAdmin role takes away only waiting requests, never news.
 The share queries still answer that HouseholdAdmin as if the share did not exist (ADR 0024).
-A Notification shows that HouseholdAdmin nothing of the share except what the Notification itself stores: the Profile's name, the answer or who ended the share, and the times.
+A Notification shows that HouseholdAdmin nothing of the share except what the Notification itself stores.
+A _Share invitation waiting_ request stores the Profile's name, the times and, once the share invitation is decided, the answer.
+A _Share ended_ Notification stores the Profile's name, the times, and whether a manager of the Profile, an admin of the target Household, or a ServerAdmin or the server ended the share.
 
 ==== The Profile management kinds
 
@@ -644,8 +653,8 @@ An inviter may choose to send that link.
 
 _Invitation answered_ (`ProfileManagerInvitationAnsweredNotification`, news).
 When the invited Account accepts or declines, the Account that issued the invitation gets a Notification.
-The Account that issued the invitation still manages the Profile at that moment.
-If the inviter loses management while the invitation is pending, the server invalidates the invitation (ADR 0024).
+The Account that issued the invitation still manages the Profile when the invited Account answers.
+That is because the server invalidates a pending invitation as soon as the inviter loses management (ADR 0024).
 
 _Management removed_ (`ProfileManagementRemovedNotification`, news).
 When the Profile's own Account or a ServerAdmin removes a direct manager, the removed Account gets a Notification.
@@ -819,9 +828,10 @@ enum ProfileShareAnswer {
 }
 
 """
-An active share ended. The recipient was on the side opposite whoever ended the share, or on
-either side when a ServerAdmin or another operation ended the share. Its latestEventAt is when the
-share ended.
+An active share ended. If an admin of the target Household ended the share, the recipient was on
+the Profile's side. If a manager of the Profile ended the share, the recipient was one of the
+Household's admins. If a ServerAdmin ended the share, or the server ended the share as part of
+another change, the recipient was on either side. Its latestEventAt is when the share ended.
 """
 type ProfileShareEndedNotification implements Notification {
     # ...the fields of Notification...
@@ -1104,8 +1114,8 @@ The first build uses the parts that the server already has:
 
 ==== Email
 
-Email can become a second channel for the same Notifications.
-Email needs each Account to choose which kinds to receive by email.
+Email comes later, as a second channel for the same Notifications.
+Email needs a setting where each Account chooses which kinds the Account gets by email.
 Email also needs a record, for each Notification, of what the email channel sent.
 The email channel reads the same line and link target that every client reads.
 The email channel sends to the Account's email address.
@@ -1133,7 +1143,7 @@ The tests show that:
 * the Account that acts gets no Notification;
 * an Account on both sides of a share gets one _Share ended_ Notification when a ServerAdmin ends the share;
 * an Account gets no _Share ended_ Notification when it sent the share invitation, stopped managing the Profile before the share ended, and is not a ServerAdmin;
-* a recipient keeps its news, with the Profile's name that it was told, after losing the relationship that brought the news.
+* a recipient keeps its news, and the Profile's name in that news, after losing the relationship through which the news reached the recipient.
   For example, a HouseholdAdmin of a share's target Household gets a _Share ended_ Notification after a ProfileManager ends the share.
   After that HouseholdAdmin is demoted, the HouseholdAdmin still reads that Notification, and the share query for the same share answers not found;
 * a rename of the Profile after the event changes no stored Notification, for either side;
@@ -1213,7 +1223,7 @@ The tests show that:
   A renamed Profile keeps its old name in older Notifications.
   A resolved request keeps how it resolved.
   An _Unmatched items_ line keeps the number from its scan.
-* A recipient keeps its news after losing the relationship that brought the news.
+* A recipient keeps its news after losing the relationship through which the news reached the recipient.
   The Household's admins keep a Profile's name after the share invitation or the share is over.
   A former ProfileManager keeps the Profile's name in their news.
   Both keep the name until retention deletes the Notification or deleting the Profile dismisses the Notification.
@@ -1257,7 +1267,7 @@ The tests show that:
 * Find a request's expiry from its subject or from the lifetime setting — the module would read another domain.
   The setting also applies only to subjects made after the setting changes, so _tell_ carries the expiry.
 * Keep a dismissed Notification in a third state — every list, count and mark would have to leave the dismissed Notification out, and nothing needs it back.
-* Dismiss a person's news when the person loses the relationship that brought them the news — the news was true, and the person was allowed to know it when the news arrived.
+* Dismiss a person's news when the person loses the relationship through which the news reached them — the news was true, and the person was allowed to read the news when the news arrived.
   Only a request asks something of its recipient.
 * Let the module work out a dismissal from a reason, such as a lost role — the module would have to know each domain's relationships.
   A selector by id or by subject keeps the reason with the domain that owns the reason.
@@ -1274,7 +1284,7 @@ The tests show that:
   A read time would wrongly say that the recipient had read the request.
 * Keep a request unread for each recipient until that recipient answers — the other recipients would see a dot for something already settled.
 * Key "Share invitation waiting" on the Profile and the Household, and update that Notification when a share invitation is replaced — the share invitation is what waits, and a HouseholdAdmin decides the share invitation.
-  Share codes already make sure that the Household asked for each new share invitation.
+  Share codes already make sure that the Household asked for each new ordinary share invitation.
 * One unread Notification per subject across all kinds — each step of what happened would replace the step before.
   For example, an unread "Share invitation answered" would become "Share ended", and the Account would never learn that the share was accepted.
 * A new Notification for every event, with no update in place — a daily scan would leave one line a day for each library.

@@ -34,6 +34,20 @@ Producers that run far ahead of their viewers are held back until a viewer nears
 
 A further amendment gives the keyframe-verified NVENC encoders, `h264_nvenc` and `hevc_nvenc`, a column in the preset scale (<<decision-preset-scale>>).
 
+NOTE: link:0013-stream-decision-architecture.adoc#hardware-failure-range[ADR 0013] decides that the software continuation after a hardware encoder failure keeps the range and the bit depth of the failed encode.
+An edit of 2026-11-11 states that rule in <<decision-hardware-failure>>, which said only that the variant continues on the software encoder of the same codec family or the stream session fails.
+Draft https://github.com/streamarr/streamarr-server/pull/913[streamarr/streamarr-server#913] builds the rule.
+An edit of 2026-11-12 adds that no later format attempt of the playback session encodes that codec family on a hardware encoder, and that the server refuses the software continuation for lack of capacity when no worker has a software encoder of the codec family (link:0013-stream-decision-architecture.adoc#failed-hardware-encoder[ADR 0013]).
+Draft streamarr/streamarr-server#913 builds those rules too.
+The edit of 2026-11-11 names one exception, which draft https://github.com/streamarr/streamarr-server/pull/759[streamarr/streamarr-server#759] builds: an encoded lower variant beside a copy in Auto gets no software continuation, and the hardware encoder failure of the lower variant that the player requests withdraws the lower variants (link:0013-stream-decision-architecture.adoc#lower-variant-failure[ADR 0013]).
+An edit of 2026-11-13 makes the withdrawal a new stream session that lists the copy alone in place of the stream session.
+
+An edit of 2026-11-13 lets the headroom model decide whether a PQ or HLG encode on a software encoder comes before the SDR encode of a hardware AV1 or HEVC encoder (<<decision-headroom-decides-encodes>>).
+The same prediction decides whether a lower variant on a software encoder is listed beside a copy (link:0013-stream-decision-architecture.adoc#lower-variant-range[ADR 0013]).
+The rule takes effect only after https://github.com/streamarr/streamarr-server/pull/828[streamarr/streamarr-server#828] and a later pull request merge, and only with validated constants.
+The same edit charges a reshape of Dolby Vision into PQ without a tone map to the tone-mapping term, because the model now predicts the speed of PQ encodes of such sources (<<decision-headroom-model>>).
+streamarr/streamarr-server#828 builds the prediction, and the later pull request lets the prediction choose the encode.
+
 == Context
 
 In this ADR, a variant is one HLS variant in the sense of RFC 8216's `EXT-X-STREAM-INF`.
@@ -108,7 +122,9 @@ The encoder and its preset select `a`.
 * The decode term is a decoder constant `d` × the source pixel rate.
 The source's codec and whether the job attempt decodes in hardware together select `d`.
 * The tone-mapping term is the cost of tone mapping.
-The tone-mapping term applies only when the job attempt tone-maps.
+The tone-mapping term applies when the job attempt tone-maps.
+It also applies when the job attempt reshapes a Dolby Vision source into PQ without a tone map (link:0013-stream-decision-architecture.adoc[ADR 0013]).
+Such a reshape is a tone-mapping chain of its own, with its own tone-mapping constant.
 
 Every variant's job decodes the source in its own FFmpeg process.
 Each job attempt's cost therefore includes its own decode term.
@@ -374,6 +390,13 @@ A shortfall of encoder headroom never keeps a requested variant from starting.
 Only a worker that cannot run the variant's job, or a worker's memory budget, keeps a requested variant from starting on that worker.
 The headroom model decides which extra variants run.
 The headroom model also decides which encoder backend each new variant uses (<<decision-hardware-first>>).
+The headroom model also decides whether a PQ or HLG encode on a software encoder keeps its place in link:0013-stream-decision-architecture.adoc#encode-range[ADR 0013]'s order of encodes.
+Such an encode comes before the SDR encodes of ADR 0013's second group, the AV1 and HEVC encodes that a worker encodes in hardware, only when the model predicts that a preset that the preset setting allows keeps the encode at the speed floor.
+Otherwise the encode comes right after those SDR encodes, and still ahead of the rest of ADR 0013's order, a hardware H.264 encode included.
+The stream decision then plans such a hardware SDR encode, unless a PQ or HLG encode keeps its place before it.
+A lower variant on a software encoder is listed beside a copy only under the same prediction (ADR 0013).
+The prediction chooses between encodes before a variant starts, so a shortfall of encoder headroom still never keeps a requested variant from starting.
+Until a measurement validates the model's constants, the prediction chooses no encode, and ADR 0013's order applies without it.
 
 The worker's memory budget guards the worker against runaway output (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-memory[ADR 0037]).
 The memory budget does not decide how many encodes run.
@@ -392,6 +415,7 @@ With the default of one playback slot, a player that switched variants sometimes
 The server then answered that no connected worker could run the variant, although the host had spare CPU.
 A memory refusal shows that the worker's output budget is full.
 A memory refusal does not show that the worker's encoder failed or that the host's CPU is busy.
+A software PQ or HLG encode below the speed floor drops the player to a lower variant or makes it stop to buffer, while a hardware encoder could play the full picture in SDR.
 Evidence: <<evidence-presets>>.
 
 [[decision-preset-setting]]
@@ -718,25 +742,41 @@ The VMAF comparison therefore shows whether a hardware encoder backend matches t
 === A variant whose hardware encoder fails continues on the software encoder of the same codec
 
 When a hardware encoder backend fails during a stream, the server continues that variant's playback with a new variant on the software encoder of the same codec family.
+The new variant keeps the range and the bit depth of the failed encode (link:0013-stream-decision-architecture.adoc#hardware-failure-range[ADR 0013]).
 The new variant runs on any worker that has that software encoder and whose memory budget can hold the new variant's job attempt (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-memory[ADR 0037]).
+For a PQ, HLG or 10-bit SDR encode, that software encoder must also list everything that the range and the bit depth need (link:0013-stream-decision-architecture.adoc#encode-range[ADR 0013]).
 A worker with room is such a worker.
 The server prefers the worker whose hardware encoder failed.
-When no worker has room, the stream session fails.
-With one worker, the new variant therefore runs on that worker's software encoder, or the stream session fails.
+When no such worker has room for an 8-bit SDR encode, the stream session fails.
+When no such worker has room for a 10-bit SDR encode, the encode continues as 8-bit SDR on the software encoder when a capability entry of the client accepts the 8-bit encode, as ADR 0013 decides.
+When no such worker has room for a PQ or HLG encode, or a 10-bit SDR encode cannot continue in 8 bits, the playback choice decides, as ADR 0013 decides.
+In Auto, the format attempt ends as a failed encode of that range and bit depth, and the next format attempt can use another codec family, or the same codec family on a software encoder.
+In a fixed quality, playback ends and the playback session reports the failure.
+The server never continues a PQ or HLG encode in another range.
+With one worker, the new variant therefore runs on that worker's software encoder, or one of those outcomes follows.
 These rules apply to the variant that the player requests.
+An encoded lower variant beside a copy in Auto is the exception: when the player requests that lower variant, its hardware encoder failure withdraws the lower variants, and the copy plays on (link:0013-stream-decision-architecture.adoc#lower-variant-failure[ADR 0013]).
+The withdrawal replaces the stream session with a new stream session that lists the copy alone, and that replacement counts no format attempt.
+When the copy does not fit the upload budget, the new stream session plays an encode that leaves the failed lower variant's encode out, as ADR 0013 decides.
 An extra variant or a left variant whose hardware encoder backend fails stops, as it stops when encoder headroom runs out, and the stream session keeps playing.
+A lower variant beside a copy that the player has left is such a left variant, so its hardware encoder failure withdraws nothing.
 The new variant has its own initialization segment, so ADR 0037's rule that a replacement attempt keeps its variant's backend still holds.
 The worker stops offering the failed hardware encoder backend until the backend passes its check again.
 The worker also stops decoding in hardware, so every job attempt on that worker decodes in software, seek attempts included (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-hardware-decode[ADR 0037]).
 The worker decodes in hardware and offers the hardware encoder backend again only when both pass their checks again.
 https://github.com/streamarr/streamarr-transcode-worker/issues/56[streamarr/streamarr-transcode-worker#56] settles how the player moves to the new variant, before NVENC encodes any stream.
+After a hardware encoder backend fails or refuses the encode of the variant that the player requests, no later format attempt of the playback session encodes that codec family on a hardware encoder, on any worker (link:0013-stream-decision-architecture.adoc#failed-hardware-encoder[ADR 0013]).
+When no connected worker has a software encoder of that codec family, the server refuses the new variant's stream session for lack of capacity, as ADR 0013 decides.
 
 *Why:* A hardware encoder can fail in the middle of a stream, for example after a driver reset.
 The software encoder of the same codec writes a codec that the client already accepted, so the viewer keeps playing.
+A software encoder that cannot write the failed encode's PQ or HLG range would change the picture with no format error and no counted format attempt, so it does not continue the variant.
+A 10-bit SDR encode that continues in 8 bits stays SDR, so the TV keeps its mode.
 Another worker with room can keep the viewer playing when the failed worker has none.
 The worker whose hardware encoder failed comes first, so the fallback leaves other workers' room to the stream sessions that the server places there.
 A replacement attempt on the software encoder would write a different initialization segment, which ADR 0037 refuses.
 A worker that kept offering a failed backend would send new variants to an encoder that fails again.
+A worker keeps offering a hardware encoder that refused at its driver's session limit, so the playback session keeps that codec family off every hardware encoder.
 A driver reset that takes down the hardware encoder can take down the hardware decoder on the same device too.
 The fallback prefers the same worker, so a variant on its software encoder that still decoded in hardware would fail again.
 
@@ -750,17 +790,18 @@ Each hardware encoder backend keeps its own cost constants, and the model adds t
 The benchmark therefore also runs encodes of different codecs on one GPU at once, and the server validates that mixed load like any other.
 Each of the decode and tone-mapping terms counts where its own stage runs.
 The decode term counts against the worker's cores unless the job attempt decodes in hardware.
-The tone-mapping term counts against the worker's cores unless the job attempt tone-maps on the GPU.
+The tone-mapping term counts against the worker's cores unless the job attempt tone-maps or reshapes on the GPU.
 A job attempt that decodes in hardware and tone-maps with CPU `tonemapx`, as link:0013-stream-decision-architecture.adoc[ADR 0013] requires until GPU tone mapping passes its equivalence check, therefore still charges its tone-mapping term to the worker's cores.
 A GPU has three limits that a model of cores and pixel rate does not predict.
 
 * Some drivers refuse a new encode session past a fixed count while the GPU still has capacity.
 The worker assumes no session limit.
 The worker keeps no list of GPUs or drivers.
-When the driver refuses the session of a variant's first job attempt because the session limit is reached, only that one variant encodes on the software encoder of the same codec.
-That variant has no initialization segment yet, so the software encoder becomes the variant's pinned encoder backend.
-A replacement attempt keeps its variant's pinned encoder backend, as ADR 0037 requires.
-When the driver refuses the session of a replacement attempt, the server continues that variant's playback as <<decision-hardware-failure>> decides, with a new variant on the software encoder of the same codec.
+When the driver refuses the session of a job attempt of the variant that the player requests because the session limit is reached, the refusal counts as that hardware encoder's failure.
+The server continues that variant's playback as <<decision-hardware-failure>> decides, with a new variant on the software encoder of the same codec, whether the refused job attempt was the variant's first or a replacement attempt.
+An encoded lower variant beside a copy in Auto withdraws the lower variants instead, as that section decides.
+The playback session then keeps that codec family off every hardware encoder in its later format attempts (link:0013-stream-decision-architecture.adoc#failed-hardware-encoder[ADR 0013]).
+When the driver refuses the session of another variant's job attempt, that variant stops, as an extra variant or a left variant whose hardware encoder fails stops.
 The worker keeps offering the hardware encoder backend.
 The worker learns no cap from the refusal.
 * Running out of GPU memory stalls every stream on that GPU at once.
@@ -843,9 +884,10 @@ No fixed count bounds how many jobs a worker accepts.
 Headroom decides which extra variants run.
 Headroom also decides which preset Automatic picks within an encoder's range.
 Headroom also decides when new variants move from a hardware encoder backend to the software encoder for the same codec.
+* Once the model decides, a server whose hardware AV1 or HEVC encoder writes only 8-bit SDR plays an HDR source in SDR when the model predicts that every software PQ or HLG encode falls below the speed floor, and a TV then leaves its HDR mode.
 * A worker's memory budget, not a count, bounds how many job attempts the worker runs.
 A ServerAdmin sizes a worker's encoding load through the worker's CPU limit, not through a number of jobs.
-* A GPU worker that hits its driver's session limit encodes the refused job in software and keeps encoding new jobs on the GPU.
+* After a GPU worker hits its driver's session limit, the refused variant that the player requests continues in software, or the lower variants beside a copy are withdrawn, and the GPU keeps encoding other playback sessions' new jobs.
 * On a worker with a verified hardware encoder backend, one codec's variants can come from two encoder backends at once.
 Each of those variants keeps one encoder backend for every replacement attempt.
 * A hardware encoder backend that scores below libx264 at `faster` gets higher bitrates, so the backend's variants cost more bandwidth.
@@ -875,6 +917,7 @@ A grain-heavy clip fits proportionally fewer encodes.
 * Raising the default number of playback slots, so that a copy and an encode fit, would also let two video encodes run on a host too small for both.
 * Ending the stream session whenever a hardware encoder fails stops a viewer whom the software encoder could keep playing.
 * Falling back only on the worker whose hardware encoder failed ends a stream session that another worker could keep playing.
+* Planning the range and the bit depth again from the software encoders lets a PQ encode continue as 8-bit SDR with no format error, also in a fixed quality with HDR chosen (link:0013-stream-decision-architecture.adoc#hardware-failure-range[ADR 0013]).
 * A replacement attempt of the same variant on the software encoder writes a different initialization segment, which ADR 0037 refuses.
 * Counting a copy that encodes audio as an encode would refuse viewers for work that costs little CPU.
 * Keeping hardware decoding on a worker whose hardware encoder failed would let a driver reset fail the software fallback on that worker too.

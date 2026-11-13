@@ -24,6 +24,13 @@ Each format attempt starts at the start position until the player reports that p
 This amends link:0019-recoverable-jit-hls-segment-delivery.adoc[ADR 0019]'s first job attempt, which starts at the start segment instead of segment 0.
 It also amends link:0045-clients-direct-play-covered-files-and-use-platform-players.adoc[ADR 0045]: a direct-play stream session carries the start position, and the client seeks the file there.
 
+NOTE: link:0013-stream-decision-architecture.adoc#encode-range[ADR 0013] decides which encodes keep 10 bits or a PQ or HLG range.
+The encode that follows a failed HDR copy keeps the source's range under that rule.
+ADR 0013 also decides what follows a failed hardware encoder whose PQ, HLG or 10-bit SDR encode no software encoder can continue: Auto changes format within its format-attempt budget, and a fixed quality ends (link:0013-stream-decision-architecture.adoc#hardware-failure-range[ADR 0013]).
+This ADR said that every encode is 8-bit SDR until https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397] added HDR10 encodes, and an edit of 2026-11-11 replaces that text.
+ADR 0013 also decides that a failure that the server attributes to an encoded lower variant beside a copy withdraws the lower variants and counts no format attempt (link:0013-stream-decision-architecture.adoc#lower-variant-failure[ADR 0013]).
+This ADR listed such a variant's `SEGMENT_CAP_EXCEEDED` failure among the failures that move Auto from a copy to an encode, and an edit of 2026-11-13 replaces that text (<<decision-fallback>>).
+
 == Context
 
 The viewer picks a playback choice when a stream session starts.
@@ -67,7 +74,7 @@ Auto recovers from a failed Dolby Vision copy in a fixed order (streamarr/stream
 For Dolby Vision profiles 8.1, 8.4, 10.1 and 10.4, and for profile 7 that the worker converts to profile 8.1 (https://github.com/streamarr/streamarr-server/issues/651[streamarr/streamarr-server#651]), Auto first tries the copy with Dolby Vision stripped and then an encode.
 The copy with Dolby Vision stripped plays the same video stream on its PQ or HLG base (ADR 0049).
 Dolby Vision profiles 5 and 10.0 have no compatible base, so Auto goes straight from the Dolby Vision copy to an encode.
-Every encode is 8-bit SDR until https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397] adds HDR10 encodes.
+An encode keeps a PQ or HLG range only under the conditions of link:0013-stream-decision-architecture.adoc#encode-range[ADR 0013], and it is SDR otherwise.
 
 A player can refuse a copy that the client declared.
 A client capability declaration is evidence, not a guarantee (ADR 0049).
@@ -100,8 +107,14 @@ The same failures that move Auto from a copy to an encode move Original from the
 * a format error that the player reports for the copy;
 * a copy's output mismatch, such as a copy whose decoder configuration record lacks its parameter sets (ADR 0013 and ADR 0019);
 * a copied variant that runs short while some source stream still has media after the copy's last segment (<<decision-short-copy>>);
-* a job attempt that fails with `SEGMENT_CAP_EXCEEDED` in a stream session with merged segments, which every replacement attempt would repeat, including an encoded variant's attempt in a stream session that also copies (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-segment-list[ADR 0037]);
+* a job attempt that fails with `SEGMENT_CAP_EXCEEDED` in a stream session with merged segments, which every replacement attempt would repeat (link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc#decision-segment-list[ADR 0037]);
 * the worker's typed failure to convert a Dolby Vision profile 7 RPU during the copy (https://github.com/streamarr/streamarr-server/issues/651[streamarr/streamarr-server#651]).
+
+In Auto, a failure that the server attributes to an encoded lower variant beside a copy withdraws the lower variants instead.
+A lower variant's job attempt that fails with `SEGMENT_CAP_EXCEEDED` is such a failure.
+The withdrawal counts no format attempt.
+A new stream session that lists the copy alone replaces the stream session, and the copy plays on (link:0013-stream-decision-architecture.adoc#lower-variant-failure[ADR 0013]).
+When the copy does not fit the upload budget, the new stream session plays an encode that leaves the failed lower variant's encode out, as ADR 0013 decides.
 
 The fallback applies whether the viewer picked Original or the client started in Original.
 
@@ -190,7 +203,7 @@ When the server cannot make an encode that the client accepts, the format error 
 
 The playback choice stays the fixed quality, and the client keeps that fixed quality selected in its quality control.
 The client shows the notice without its sentence about Auto (<<decision-notice>>).
-When the failed copy was HDR and the device cannot play an HDR encode, the encode is SDR.
+When the failed copy was HDR and the encode cannot keep that range (link:0013-stream-decision-architecture.adoc#encode-range[ADR 0013]), the encode is SDR.
 The notice already tells the viewer that a converted version is playing, so the change to SDR is not silent.
 The server tells the client that the encode is SDR, and the client's HDR toggle then shows SDR.
 A fixed quality changes format after no other format error, so a format error during the encode ends playback with the typed terminal error.
@@ -230,7 +243,7 @@ In Original, the playback choice then changes to Auto (<<decision-auto>>).
 In a fixed quality, the encode keeps the same fixed quality (<<decision-fixed-quality>>).
 
 *Why:* The copy with Dolby Vision stripped keeps the source's pixels, picture size and PQ or HLG base, and it costs no encoder capacity.
-An encode gives up HDR until streamarr/streamarr-server#397 adds HDR10 encodes, and it costs worker capacity.
+An encode costs worker capacity, and it gives up HDR whenever it cannot keep the range (link:0013-stream-decision-architecture.adoc#encode-range[ADR 0013]).
 Stripping Dolby Vision needs only a bitstream rewrite (link:0036-video-contracts-share-vocabulary-and-dynamic-range-facts.adoc#decision-bitstream-rewrites[ADR 0036]), not an encode.
 The stripped copy still plays the source's own video stream at the source's own size, so Original keeps its promise of the source's own quality, apart from the Dolby Vision information.
 A quality control that switched to Auto would describe a ladder that does not play.
@@ -447,7 +460,7 @@ Epic streamarr/streamarr-server#399 starts another format only after a qualifyin
 * Switching a fixed quality to Auto after a failed HLS copy would drop the size that the viewer picked, although an encode at that size can play.
 * Keeping the default budget at two format attempts, and letting the budget bind, would end playback on tvOS whenever a file that starts with direct play also fails its HLS copy.
 * A default budget of three format attempts would end playback on tvOS whenever a Dolby Vision file that starts with direct play also fails both copies.
-* Falling back from a failed Dolby Vision copy straight to the encode in Original and in a fixed quality would give up HDR until streamarr/streamarr-server#397 adds HDR10 encodes, and it would cost worker capacity.
+* Falling back from a failed Dolby Vision copy straight to the encode in Original and in a fixed quality would cost worker capacity, and it would give up HDR whenever the encode cannot keep the range (link:0013-stream-decision-architecture.adoc#encode-range[ADR 0013]).
 The copy with Dolby Vision stripped keeps the source's pixels and HDR base.
 * Switching Original to Auto after the fallback to the copy with Dolby Vision stripped would show a ladder in the quality control while the source's own video stream plays.
 * Falling back to an encode that pads when a copy runs short after the whole source has ended would show the viewer a notice and a change to Auto during the credits, for a frozen frame and silence.

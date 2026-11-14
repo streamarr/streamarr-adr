@@ -1,0 +1,71 @@
+= ADR 0064: Copied audio ends playback at its last media segment
+
+== Status
+
+Accepted
+
+== Context
+
+An HLS copy can advertise video after its selected audio has ended.
+A wholly silent final segment can leave a browser waiting for audio, and a seek into that tail can begin an attempt with no audio packet from which to initialize its copy.
+link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037] previously encoded audio that ended at least one segment early and accepted this limitation for a shorter tail.
+That threshold changes the audio for the whole title without ensuring that every advertised segment contains audio.
+Keeping the copied bytes and ending at a media segment boundary trades the remaining silent picture for a common end that the playlist and the worker can enforce.
+
+== Decision
+
+This decision applies to an HLS stream session whose variants multiplex one selected audio track with video.
+When that track is eligible for copying and its header or a scan supplies its end, the server keeps the copy and ends playback at the end of the media segment containing the last audio sample.
+An audio end exactly on a segment boundary belongs to the preceding segment.
+The boundary comes from the initially chosen video format's segment timeline, including merged final segments, and never extends the title beyond its otherwise selected media end.
+The rule applies whether the video is copied or encoded.
+The selected audio's known early end alone no longer requires an audio encode.
+Other reasons to encode the audio still apply; encoded audio retains ADR 0037's padding behavior.
+
+The chosen end stays fixed across later format attempts of that playback, including a recovery that changes the video format or segment spacing.
+Every variant advertises that end and sends it to every job attempt.
+The playlist exposes that end, and watch progress measures completion against it.
+A resume at or beyond the chosen end is already finished and starts no job attempt.
+The API supplies the terminal end for that finished resume, and the client reports it without waiting for media; playing again begins a fresh playback from the beginning.
+An ordinary planned playlist end is not a terminal short-copy report, so temporary buffering before it never counts as completion.
+Selecting a different audio track in a new stream session chooses an end for that track.
+Direct play and HLS audio-rendition layouts retain their existing policies.
+
+The worker keeps video only through the advertised end.
+For copied video with reordered pictures, it retains a valid decode-order prefix; a later leading picture whose presentation time precedes the boundary cannot reintroduce a reference to a discarded picture.
+The copied audio's packet payloads stay bit-identical, with no padding, resampling or re-encoding.
+Once the final advertised segment is closed and every delivered segment is acknowledged, an active attempt may complete by intentionally stopping FFmpeg at this boundary.
+That planned completion does not require a natural end of file or exit status zero from the intentionally stopped process.
+It reports no learned source-stream end, because the source may continue.
+A refusal or cancellation before acceptance of the final delivery retains its failed or stopped outcome.
+Natural end-of-file completion still follows ADR 0037's clean-process-exit rules.
+
+An end learned only from a job attempt is not a stated or scanned end for this decision.
+FFmpeg can stop at a read error and still exit successfully, so that evidence must not silently shorten future playback.
+Unknown ends retain ADR 0037's failed-copy recovery to a padded encode, including an attempt that cannot initialize a copied track after that track has ended.
+The worker adds no refusal solely for a known audio end, a late audio start, or a gap inside copied audio.
+Damaged media remains subject to the existing bounded failure and recovery rules.
+
+== Consequences
+
+The final segment can contain picture after its last audio sample, but no later wholly silent segment is advertised.
+The picture after that boundary is intentionally unavailable in this playback.
+The selected end is playback state, rather than a replacement for the file's probe duration or a learned source end.
+Format recovery, immediate worker failure, resume and replay must all preserve that distinction.
+
+Clean-room fixtures with generated pictures and tones verify copied AAC and FLAC packet identity and normal completion of a partly-audio final segment.
+Normal playback, seeking into its silent portion and starting there passed in Chromium, Firefox and actual Safari.
+Playwright's Linux WebKit passed normal playback but did not complete the tested seek and start cases; it is not evidence that those cases pass in that engine.
+Copied open-GOP video also requires decoded-picture comparison, because a decoder can conceal a missing reference without reporting a hard decode failure.
+
+== Rejected Alternatives
+
+* Encode whenever audio ends before the last segment — changes the audio for the whole title to preserve a silent picture tail.
+* Advertise the silent tail and end only after a client stall — leaves a player-dependent recovery path and can start an audio copy with no packet.
+* Cut exactly at the audio end — moves the end inside a segment whose video may require a later reference picture.
+* Treat an intentional stop as a learned source end — mistakes a delivery boundary for evidence about the file.
+
+== References
+
+* link:0037-worker-delivers-fmp4-segments-from-ffmpeg-stdout.adoc[ADR 0037: worker delivery and early ends]
+* link:0052-a-failed-hls-copy-falls-back-to-an-encode-and-original-changes-to-auto.adoc[ADR 0052: failed copies and format recovery]

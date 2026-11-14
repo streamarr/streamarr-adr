@@ -120,7 +120,7 @@ _Avoid_: base layer (a Dolby Vision layer, not a picture format), HDR10 (PQ with
 **Assumed source matrix**:
 The matrix, BT.709 or BT.601, with which an encode that does not tone-map reads a video stream that names no matrix.
 The server chooses it from the width and height that the probe result stores for the stream, and sends it in the transcode job.
-An H.264 copy of such a stream names it in its sequence parameter sets, through a bitstream rewrite (ADR 0013).
+An H.264 copy of such a stream names it, through a bitstream rewrite (ADR 0013).
 _Avoid_: guessed color space, default matrix, untagged matrix
 
 **Codec family**:

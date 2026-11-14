@@ -119,7 +119,8 @@ _Avoid_: base layer (a Dolby Vision layer, not a picture format), HDR10 (PQ with
 
 **Assumed source matrix**:
 The matrix, BT.709 or BT.601, with which an encode that does not tone-map reads a video stream that names no matrix.
-The server chooses it from the width and height that the probe result stores for the stream, and sends it in the transcode job; the job of a stream copy carries none (ADR 0013).
+The server chooses it from the width and height that the probe result stores for the stream, and sends it in the transcode job.
+An H.264 copy of such a stream names it, through a bitstream rewrite (ADR 0013).
 _Avoid_: guessed color space, default matrix, untagged matrix
 
 **Codec family**:
@@ -297,7 +298,7 @@ Under fragmented MP4 delivery, the initialization segment describes it on its ow
 _Avoid_: actual output, transcoded output
 
 **Bitstream rewrite**:
-A change that the worker makes to a copied video stream without decoding it, such as stripping Dolby Vision or HDR10+, converting Dolby Vision profile 7 to profile 8.1, or normalizing the Dolby Vision configuration record.
+A change that the worker makes to a copied video stream without decoding it, such as stripping Dolby Vision or HDR10+, converting Dolby Vision profile 7 to profile 8.1, normalizing the Dolby Vision configuration record, or naming the assumed source matrix.
 The decision lists every bitstream rewrite of a stream copy, and the worker applies exactly the listed rewrites to the fragmented MP4 that FFmpeg writes.
 A stream copy passes the source video through unchanged apart from its listed bitstream rewrites (ADR 0036).
 _Avoid_: bitstream filter (an FFmpeg component), transform, conversion (unqualified), remux

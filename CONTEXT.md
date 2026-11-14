@@ -504,7 +504,7 @@ An encoder that a worker runs for a codec family, together with whether it is ha
 _Avoid_: encoder capability, codec
 
 **Completed attempt**:
-A job attempt completes when FFmpeg has exited cleanly, the producer has read all output, and the server has acknowledged every delivered segment. The attempt must still be active when all three conditions hold. The server must still handle requests for any advertised segment that the attempt did not produce.
+An active job attempt whose delivered segments the server has accepted, after either clean source exhaustion or planned completion at the advertised end (ADR 0037, ADR 0064). Planned completion establishes no end of the source; a source-exhausted attempt can leave advertised segments for the server to recover.
 _Avoid_: finished, done, success
 
 ### Encoding load
@@ -558,7 +558,7 @@ A probe that finds keyframe positions by scanning every packet of the chosen vid
 _Avoid_: packet scan (unqualified), keyframe probe
 
 **Media end**:
-Where the media of a stream session ends: the latest end time, as a keyframe packet scan read it, of the chosen video stream and of each audio track that the stream session delivers. An HLS stream session whose variants multiplex the audio delivers one audio track. An HLS stream session with audio renditions delivers every audio track that has a rendition (ADR 0043). A direct-play stream session delivers every audio track of the file. Until a scan has read each of those ends, the media end is the container's duration. Every variant and every audio rendition of the stream session advertises the media end, and watch progress is measured against the media end (ADR 0037). Once a timeline report of a direct-play stream session names the audio track that plays, watch progress is measured against the later end of the video and of that track (ADR 0045).
+Where playback of a stream session ends. For multiplexed HLS copying a selected audio track with a header or scanned end, it is the end of the segment containing that track’s last audio, fixed across format recovery (ADR 0064); otherwise it is the latest scanned end of the delivered streams, with the container-duration fallback described by ADR 0037. An HLS stream session whose variants multiplex the audio delivers one audio track. An HLS stream session with audio renditions delivers every audio track that has a rendition (ADR 0043). A direct-play stream session delivers every audio track of the file. Outside the copied-audio rule, the media end is the container's duration until a scan has read each of those ends. Every variant and every audio rendition of the stream session advertises the media end, and watch progress is measured against the media end (ADR 0037). Once a timeline report of a direct-play stream session names the audio track that plays, watch progress is measured against the later end of the video and of that track (ADR 0045).
 _Avoid_: real end, scanned video end, true duration
 
 **Bitrate scan**:

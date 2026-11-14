@@ -33,6 +33,9 @@ Producers that run well ahead of their viewers pause while a seek's first segmen
 Producers that run far ahead of their viewers are held back until a viewer nears their output (<<decision-hold-back>>).
 
 A further amendment gives the keyframe-verified NVENC encoders, `h264_nvenc` and `hevc_nvenc`, a column in the preset scale (<<decision-preset-scale>>).
+An amendment of 2026-11-13 makes preset `9` Automatic for libsvtav1, with presets `10` and `11` as its choices under load (<<decision-preset-setting>>).
+It follows a measurement of libsvtav1's speed and seek waits at those three presets (<<evidence-svt-av1-presets>>).
+No pull request builds that amendment yet.
 
 NOTE: link:0013-stream-decision-architecture.adoc#hardware-failure-range[ADR 0013] decides that the software continuation after a hardware encoder failure keeps the range and the bit depth of the failed encode.
 An edit of 2026-11-11 states that rule in <<decision-hardware-failure>>, which said only that the variant continues on the software encoder of the same codec family or the stream session fails.
@@ -443,8 +446,8 @@ The worker passes the job's preset to the encoder.
 
 Automatic means `faster` for libx264.
 Automatic means `veryfast` for libx265.
-Automatic means preset `10` for libsvtav1.
-On the preset scale, libsvtav1 preset `10` is `faster`.
+Automatic means preset `9` for libsvtav1.
+On the preset scale, libsvtav1 preset `9` is `fast`.
 An NVENC encoder takes the NVENC preset of its codec family's preset name.
 Automatic therefore means `p4` for `h264_nvenc` and `p3` for `hevc_nvenc`.
 Until a measurement validates the headroom model's constants, Automatic keeps exactly those presets.
@@ -459,9 +462,10 @@ Each encoder has its own range under Automatic.
 libx264 moves to `veryfast` only when `faster` would push a running variant below the speed floor.
 The server never picks a libx264 preset slower than `faster`.
 * libx265 stays at `veryfast` until libx265's seek waits are measured.
-* libsvtav1 runs at preset `10`.
-libsvtav1 moves to preset `11` only when preset `10` would push a running variant below the speed floor.
-Until libsvtav1's seek waits are measured, the server never picks a libsvtav1 preset slower than `10`.
+* libsvtav1 runs at preset `9`.
+libsvtav1 moves to preset `10` only when preset `9` would push a running variant below the speed floor.
+libsvtav1 moves to preset `11` only when preset `10` would too.
+The server never picks a libsvtav1 preset slower than `9`.
 
 *Why:* The server picks each headroom-driven preset.
 The headroom model needs to know which preset each job runs.
@@ -475,10 +479,24 @@ At 3 s segments, the first 1080p media segment after a seek took 1.28 s with `fa
 Those two times are medians of 12 runs.
 Automatic therefore starts libx264 at `faster` and moves libx264 only toward `veryfast` under load.
 A slower preset lengthens the wait for the first media segment after a seek.
-The seek waits of libx265 and libsvtav1 have not been measured, so neither encoder runs slower than its Automatic preset.
+libx265's seek waits have not been measured, so libx265 runs no slower than its Automatic preset.
 On a 14-core arm64 host with a synthetic 1080p30 source, libx265 at `veryfast` already spent about three times the CPU of libx264.
+SVT-AV1 4.3.0, the version in the pinned FFmpeg, logs a warning at presets 10 and 11.
+The warning says that those presets are meant for automated tools and that visual artifacts may occur.
+SVT-AV1 logs no such warning at preset 9.
+A measurement therefore compared presets 9, 10 and 11, on four public-domain clips, with the worker's arguments at 3 s segments.
+Preset 9 had to keep a 1080p encode above the speed floor with the margin of <<decision-calibration>>.
+Its median seek wait also had to stay within 0.3 s of preset 10's.
+On 10 cores of one host, a 1080p encode at preset 9 ran at 8.7× real time or faster, against a speed floor of about 2.10×.
+Its median seek wait was 0.08 s to 0.26 s longer than preset 10's, clip by clip.
+Preset 9 ran at 76 % to 94 % of preset 10's speed.
+Preset 9 scored 0.26 dB to 1.02 dB higher in PSNR than preset 10 on every clip, at about the same bitrate.
+Preset 9 therefore passes, and Automatic starts libsvtav1 there.
+A variant below the speed floor stalls playback, which costs more than the artifacts that the warning names.
+libsvtav1 therefore still moves to presets 10 and 11 under load.
 SVT-AV1's documentation uses preset 10 as its example for fast and real-time encoding.
-Evidence: <<evidence-presets>>, <<evidence-svt-av1>>.
+Preset 8 and slower presets were not measured, so libsvtav1 runs no slower than preset 9.
+Evidence: <<evidence-presets>>, <<evidence-svt-av1>>, <<evidence-svt-av1-presets>>.
 
 [[decision-preset-scale]]
 === One preset scale serves every software encoder
@@ -493,9 +511,9 @@ The keyframe-verified NVENC encoders, `h264_nvenc` and `hevc_nvenc`, use the NVE
 |Preset name |libx264 |libx265 |libsvtav1 |NVENC |Role under Automatic
 
 |`superfast` |`superfast` |`superfast` |`12` |`p2` |Not used
-|`veryfast` |`veryfast` |`veryfast` |`11` |`p3` |Automatic for libx265 and `hevc_nvenc`, and the choice under load for libx264, `h264_nvenc` and libsvtav1
-|`faster` |`faster` |`faster` |`10` |`p4` |Automatic for libx264, `h264_nvenc` and libsvtav1
-|`fast` |`fast` |`fast` |`9` |`p5` |Not used
+|`veryfast` |`veryfast` |`veryfast` |`11` |`p3` |Automatic for libx265 and `hevc_nvenc`, the choice under load for libx264 and `h264_nvenc`, and the second choice under load for libsvtav1
+|`faster` |`faster` |`faster` |`10` |`p4` |Automatic for libx264 and `h264_nvenc`, and the first choice under load for libsvtav1
+|`fast` |`fast` |`fast` |`9` |`p5` |Automatic for libsvtav1
 |`medium` |`medium` |`medium` |`8` |`p6` |Not used
 |`slow` |`slow` |`slow` |`7` |`p7` |Not used
 |`slower` |`slower` |`slower` |`6` |`p7` |Not used
@@ -866,9 +884,10 @@ https://github.com/streamarr/streamarr-server/issues/398[streamarr/streamarr-ser
 * The validated model and its constants.
 This decision fixes the model's form, not the values of `a`, `d` or the tone-mapping cost.
 The measurements cover libx264 only.
-libx265 and libsvtav1 presets have not been measured on a ladder.
+libx265 presets have not been measured on a ladder.
+libsvtav1's presets 9, 10 and 11 have been measured on one host, with one ladder.
 * Any headroom-driven move of libx265 away from `veryfast`, until libx265's seek waits are measured.
-* Any libsvtav1 preset slower than `10` under Automatic, until libsvtav1's seek waits are measured.
+* Any libsvtav1 preset slower than `9` under Automatic, until the seek waits of those presets are measured.
 * The rate-control choices, including any CRF values.
 * Bounding the age of a seek or hold-back command.
 A command that the worker could check, such as one that names the last segment the server saw the job attempt deliver, would keep a late command from pausing a job attempt on a lead that no longer holds.
@@ -913,6 +932,11 @@ Automatic accepts those costs to keep every running variant at or above the spee
 * A preset change, whether by a ServerAdmin or by Automatic, reaches only variants that start afterwards.
 * Every job carries a preset, even while Automatic keeps its fixed presets.
 A ServerAdmin changes the preset on the web ServerAdmin settings page, never in a worker's configuration.
+* Under Automatic, a libsvtav1 encode leaves the presets at which SVT-AV1 warns of visual artifacts, until load moves the encode to preset `10` or `11`.
+* A seek into a libsvtav1 encode waits longer than at preset `10`: by 0.08 s to 0.26 s on 10 cores in the measurement.
+The difference grows as the cores shrink, and no host with fewer than 10 cores was measured.
+* A libsvtav1 encode at preset `9` ran at 76 % to 94 % of its speed at preset `10`, so a worker reaches the speed floor with fewer libsvtav1 variants.
+* Until a measurement validates the headroom model's constants, libsvtav1 stays at preset `9` and does not move under load (<<decision-preset-setting>>).
 
 == Rejected Alternatives
 
@@ -970,9 +994,10 @@ On the measured host, `medium` also kept only two concurrent 1080p encodes at 1.
 After a seek at 360p, `medium` still cost about 1.4 times the CPU of `faster`, averaged over four sources.
 * Using `fast` for libx264 costs 0.80× `medium`'s CPU at 1080p, against 0.59× for `faster`.
 At 6 s segments, `fast` also took 2.58 s to the first 1080p media segment after a seek, against 1.95 s for `faster`.
-* Mapping Automatic to libsvtav1 preset `11`, so that `veryfast` names Automatic for every encoder, moves libsvtav1 off preset `10`.
-SVT-AV1's documentation gives preset `10` as its example for fast and real-time encoding.
-* Keeping libsvtav1's headroom range from `10` down to `8` would let libsvtav1 run slower than `10` before libsvtav1's seek waits are measured.
+* Mapping Automatic to libsvtav1 preset `11`, so that `veryfast` names Automatic for every encoder, puts every libsvtav1 encode on a preset at which SVT-AV1 warns of visual artifacts.
+* Keeping preset `10` as libsvtav1's Automatic preset keeps every libsvtav1 encode on such a preset, although preset `9` passed the speed and seek-wait checks.
+* Never moving libsvtav1 to presets `10` and `11` under load, because of the warning, would let a variant fall below the speed floor, and a stalled playback costs more than the artifacts that the warning names.
+* A libsvtav1 range that reaches down to preset `8` would let libsvtav1 run at a preset whose seek waits are not measured.
 * A preset setting on the worker would hide each job's preset from the headroom model, which needs that preset.
 * Keeping `ultrafast` on the preset scale would let a ServerAdmin pick a preset at which every libx264 encode fails the worker's codec string check.
 Automatic never picked `ultrafast`, and no measurement in this ADR covers `ultrafast`.
@@ -1247,6 +1272,67 @@ The documentation gives preset 10 as its example.
 * SVT-AV1 names 13 as its highest preset.
 SVT-AV1 names 12 as the highest preset intended for human use.
 
+[[evidence-svt-av1-presets]]
+=== libsvtav1 presets 9, 10 and 11
+
+* These runs used FFmpeg 8.1.3 with SVT-AV1 4.3.0, from the pinned worker image, on one x86-64 host.
+Every encode used the worker's arguments for a libsvtav1 job at 3 s segments, with video only, and only the preset changed between runs.
+* The sources were 30 s excerpts of four NASA videos in the public domain, each scaled to the 1080p tier's picture (see References).
+They show a rocket launch in slow motion at 29.97 fps, an outdoor competition at 30 fps, Earth from orbit at 23.976 fps and a computer-generated ocean at 30 fps.
+* SVT-AV1 logged "Non-RTC M10+ are meant for automation tooling usage. Visual artifacts may occur otherwise." at presets 10 and 11.
+It logged no such warning at preset 9.
+* The seek wait is the time from the start of the FFmpeg process until the worker would close the first 1080p segment after a seek.
+Each seek decoded 5 s of the source before the segment's start.
+* The next table holds the runs on 10 cores of the host.
+Each speed is the median of 3 runs of one 1080p encode, as a multiple of real time.
+Each seek wait is the median of 12 runs, in seconds.
+
+[cols="3,2,1,1,1,1",options="header"]
+|===
+|Source |Speed at presets 9, 10 and 11 |Seek wait at 9 |Seek wait at 10 |Seek wait at 11 |9 minus 10
+
+|Rocket launch
+|23.6, 31.1, 31.5
+|0.59
+|0.50
+|0.47
+|0.10
+
+|Outdoor competition
+|11.5, 12.3, 12.8
+|1.40
+|1.15
+|1.11
+|0.26
+
+|Earth from orbit
+|30.1, 32.1, 32.5
+|0.58
+|0.49
+|0.46
+|0.09
+
+|Computer-generated ocean
+|8.7, 9.3, 9.8
+|1.62
+|1.54
+|1.47
+|0.08
+|===
+
+* Over all 48 seeks of each preset, the median seek wait was 0.98 s at preset 9, 0.81 s at preset 10 and 0.76 s at preset 11.
+* Without the encoder, the decoder and the filters took 0.20 s to 0.98 s of each seek wait.
+The encoder therefore added 0.34 s to 0.77 s at preset 9, and 0.25 s to 0.56 s at preset 10.
+* On every core of the same host, which has more than 10, preset 9's median seek wait was 0.03 s to 0.07 s longer than preset 10's.
+There, preset 9 ran at 87 % to 92 % of preset 10's speed.
+With the four variants of the default ladder running at once there, the slowest variant ran at 5.9× real time at preset 9, at 6.8× at preset 10 and at 7.0× at preset 11.
+* At 1080p, preset 9 scored 0.26 dB to 1.02 dB higher in luma PSNR than preset 10 on every source.
+Its bitrate was from 3 % lower to 7 % higher.
+Preset 11 scored 0.15 dB to 0.35 dB lower than preset 10.
+The pinned FFmpeg has no libvmaf, so these runs hold no VMAF score.
+* Every encode placed its keyframes every 3 s.
+* No run encoded audio, the worker itself did not run, and no host with fewer than 10 cores was measured.
+
 == References
 
 * https://www.rfc-editor.org/rfc/rfc8216[RFC 8216: HTTP Live Streaming] — variants (`EXT-X-STREAM-INF`) and `BANDWIDTH`.
@@ -1254,6 +1340,10 @@ SVT-AV1 names 12 as the highest preset intended for human use.
 * https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Docs/CommonQuestions.md[SVT-AV1: Common Questions] — what presets do and their ranges.
 * https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Docs/Parameters.md[SVT-AV1: Parameters] — the preset range and default.
 * https://trac.ffmpeg.org/wiki/Encode/H.264[FFmpeg: H.264 encoding guide] — libx264 preset names.
+* https://commons.wikimedia.org/wiki/File:Artemis_I_Slow_Motion_Liftoff_(KSC-20221116--MH-FMX-01-0001-Artemis_1_slowmo_liftoff-3314595).webm[NASA Kennedy Space Center: Artemis I Slow Motion Liftoff] — public domain; the rocket launch of the libsvtav1 preset measurement.
+* https://commons.wikimedia.org/wiki/File:NASA%E2%80%99s_annual_Human_Exploration_Rover_Challenge_student_engineering_competition_took_place_from_April_9-11,_2025_(ROVER_CHALLENGE-VOY_UHD-H264).webm[NASA Marshall Space Flight Center: Human Exploration Rover Challenge 2025] — public domain; the outdoor competition of that measurement.
+* https://commons.wikimedia.org/wiki/File:ISS_4K_Crew_Earth_Observations.webm[NASA: ISS 4K Crew Earth Observations] — public domain; the views of Earth from orbit of that measurement.
+* https://commons.wikimedia.org/wiki/File:Perpetual_ocean2_CLOSE_093_clean_noDate_1080p30.webm[NASA's Scientific Visualization Studio: Perpetual Ocean 2] — public domain; the computer-generated ocean of that measurement.
 * https://github.com/video-dev/hls.js/tree/v1.7.0[hls.js 1.7.0] — the ABR rules behind the speed floor's 1.35× real time.
 * https://github.com/streamarr/streamarr-server/issues/497[streamarr/streamarr-server#497] — the preset setting, Automatic's fixed presets and the preset on every job.
 * https://github.com/streamarr/streamarr-server/issues/399[streamarr/streamarr-server#399] — the playback capabilities epic.

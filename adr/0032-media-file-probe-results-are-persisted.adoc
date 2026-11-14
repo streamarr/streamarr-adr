@@ -683,17 +683,21 @@ Probe version 8 reports every fact of probe version 7.
 https://github.com/streamarr/streamarr-server/issues/652[streamarr/streamarr-server#652], https://github.com/streamarr/streamarr-server/issues/651[streamarr/streamarr-server#651] and https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397] need its three facts, and one probe version carries all three, so every library re-scans once.
 The probe reads none of them with a new pass.
 
-The chosen video stream reports its maximum frame rate, the highest rate at which it presents pictures:
+The chosen video stream reports its maximum frame rate, the highest rate that at least 24 consecutive picture intervals sustain:
 
 * A constant-rate stream reports its base rate, unless the presentation times below prove a faster rate.
 The worker counts a stream as constant-rate when the frame-rate rule finds both declared rates agreeing on a listed rate (<<output-frame-rate>>).
 Agreeing declarations do not prove the cadence of every frame, but timestamp rounding never proves a rate above the true one, so a measured rate replaces the base rate only when the times prove it.
 * A variable-rate stream reports what the presentation times of every frame show, when a pass that the probe runs anyway lists them.
 The stream measurement of an MP4 or MOV file lists them from the sample tables (ADR 0054).
-Each time can be one tick off, so a run of k frame intervals that spans s ticks proves at least k frames per s + 1 ticks.
-The worker looks at runs of 1 to 24 intervals and takes the run that proves the highest rate.
-It reports the listed rate nearest k / s when one lies within the run's precision, and k / s itself otherwise.
-A run that spans one tick allows every rate from k frames per 2 ticks up.
+The worker orders the presentation times and examines every run of 24 consecutive picture intervals, which contains 25 pictures.
+A run supports a rate only when each of its intervals is no longer than that rate's interval, within one tick of timestamp precision.
+For each run, the longest interval bounds its rate; the shortest of those longest intervals decides the maximum.
+If that interval spans s ticks, the times prove at least one picture per s + 1 ticks.
+The worker reports the listed rate nearest 1 / s when one lies between 1 / (s + 1) and 1 / (s - 1), and 1 / s itself otherwise, with all rates expressed in pictures per tick.
+For s equal to one, the upper bound is unbounded.
+Fewer than 25 pictures, or intervals that are all zero, supply no measured maximum.
+A faster run of fewer than 24 consecutive intervals never raises the maximum.
 * Every other stream reports no maximum: a variable-rate stream that no pass lists every frame of, an interlaced stream, and every stream other than the chosen video stream.
 
 The probe never reports zero, and an unknown maximum stays absent.
@@ -723,15 +727,20 @@ Playback keeps using each file's probe version 7 outcome until the server stores
 
 *Why:* A variable-rate stream can run faster after the 30 s that the frame-rate rule scans, so the rule's rate cannot show that a copy exceeds a client's maximum frame rate.
 A full read of every frame's timestamps would add a pass over every variable-rate file, so the probe reports only what a pass it already runs shows.
-Runs of 1 to 24 intervals count a burst of a few fast frames, while a longer run outweighs the 1 ms rounding that some containers give each time.
+A few short intervals can come from timestamp quantization, jitter or a splice and do not establish a faster section.
+Requiring every one of 24 consecutive intervals to support the rate admits a sustained faster section without treating an isolated short interval or a short burst as a new maximum.
+The window counts pictures, not elapsed time; it uses no per-file jitter threshold and never averages a short burst together with slower intervals.
+The declared base rate remains a floor when the timestamp precision cannot distinguish it from a nearby listed rate.
 The stream decision does not read the enhancement layer type: the profile 7 conversion (streamarr/streamarr-server#651) converts a MEL and a FEL stream alike with mode 2, and the worker classifies each RPU itself.
 The media info shows whether a profile 7 source carries a MEL or a FEL, which tells the viewer whether the converted copy loses picture detail.
 An HDR encode (streamarr/streamarr-server#397) needs a content light level for a Dolby Vision source whose bitstream carries none outside its RPUs.
 
 [[probe-version-9]]
-=== Probe version 9 reports where a keyframe packet scan reads each stream's end
+=== Probe version 9 reports scanned stream ends and sustained maximum frame rates
 
-Probe version 9 reports every fact of probe version 8.
+Probe version 9 reports every fact of probe version 8 and applies the 24-interval maximum frame-rate rule above.
+The upgrade re-measures stored maximum frame rates, including those that probe version 8 raised for a shorter burst, through the same version 9 re-scan as the scanned stream ends.
+It adds no separate probe-version bump or additional read pass.
 https://github.com/streamarr/streamarr-server/pull/900[streamarr/streamarr-server#900] adds probe version 9.
 With probe version 9, a keyframe packet scan reports one more fact beside the keyframe positions: where the chosen video stream and each audio stream ends.
 The probe itself reports no new fact, and it starts no new pass.
@@ -1221,7 +1230,7 @@ streamarr/streamarr-transcode-worker#117 adds those facts.
 https://github.com/streamarr/streamarr-server/issues/395[streamarr/streamarr-server#395] decides the rule that reads the layout.
 * Probe version 8 adds the maximum frame rate, the Dolby Vision enhancement layer type and the RPU's level 6 light levels that <<probe-version-8,the probe version 8 section>> describes.
 https://github.com/streamarr/streamarr-server/issues/652[streamarr/streamarr-server#652], https://github.com/streamarr/streamarr-server/issues/651[streamarr/streamarr-server#651] and https://github.com/streamarr/streamarr-server/issues/397[streamarr/streamarr-server#397] need those facts.
-* Probe version 9 adds the scanned stream end times that <<probe-version-9,the probe version 9 section>> describes.
+* Probe version 9 adds the scanned stream end times and applies the 24-interval maximum frame-rate rule that <<probe-version-9,the probe version 9 section>> describes.
 https://github.com/streamarr/streamarr-server/pull/900[streamarr/streamarr-server#900] adds those facts.
 * Probe version 10 adds the start time correction that <<probe-version-10,the probe version 10 section>> describes.
 https://github.com/streamarr/streamarr-server/issues/664[streamarr/streamarr-server#664] adds that fact.
@@ -2016,7 +2025,12 @@ The channel layout blocks streamarr/streamarr-server#711, and no change has yet 
 * Read the timestamps of every frame of a variable-rate stream to find its maximum frame rate.
 That read would add a pass over every variable-rate file to every re-scan, and a stream whose maximum stays unknown still plays: its copy matches on its copied frame rate.
 * Average the frame rate over a fixed window of 24 intervals.
-A burst of eight 50 fps frames in a 25 fps stream would read as 30 fps, so a copy could reach a client whose maximum the burst exceeds.
+A short burst surrounded by slower intervals can raise the average even though the run does not sustain that rate.
+The maximum requires each of 24 consecutive picture intervals to support the rate instead.
+* Let a run of fewer than 24 picture intervals raise the maximum.
+An isolated short interval or a short burst does not establish a sustained faster section.
+* Require a fixed elapsed duration or tune a jitter threshold per file before accepting a faster rate.
+The same 24-interval rule applies at every rate and does not depend on the duration or other characteristics of a particular file.
 * Give each of the three probe version 8 facts its own probe version.
 Each probe version re-scans every library, and the three facts ship together.
 * Leave the commentary and visual-impaired dispositions, or the subtitle commentary flag, to a later probe version.

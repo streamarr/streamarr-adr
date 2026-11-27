@@ -77,6 +77,8 @@ None at present.
 - [ADR 0062: A Worker Sends Each Probe Report in a Call of Its Own, and the Worker Session Carries Only Commands and Events](adr/0062-a-worker-sends-each-probe-report-in-a-call-of-its-own.adoc)
 - [ADR 0063: A Notification Keeps What Its Recipient Was Told, as a Request or as News, and the Domain That Publishes an Event Decides Who Is Told and What Is Dismissed](adr/0063-notifications-are-stored-per-recipient-as-requests-or-news.adoc)
 
+- [ADR 0064: Copied Audio Ends Playback at Its Last Media Segment](adr/0064-copied-audio-ends-playback-at-its-last-segment.adoc)
+
 ## Domain language
 
 [`CONTEXT.md`](CONTEXT.md) is the shared glossary for every Streamarr repository: server, transcode worker, web and Apple clients. Each repository's `CLAUDE.md` points here instead of keeping its own copy. Propose a new or sharpened term with a pull request to this repository, together with the ADR that settles it when one is needed.
